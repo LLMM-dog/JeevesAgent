@@ -133,3 +133,65 @@ class TestSpaFallback:
 
         src = inspect.getsource(main.create_app)
         assert "StarletteHTTPException" in src, "必须用 starlette 的那个"
+
+class TestHtmlNotCached:
+    """
+    index.html 必须永不缓存。
+
+    ## 这个测试对应的真实故障
+
+    构建产物名带 hash（index-Cqs10vA.js），所以 JS/CSS 可以长期缓存 ——
+    内容变了文件名就变。但 index.html 名字不变，而它【引用】那些文件。
+
+    StaticFiles 默认给 index.html 发 etag + last-modified，浏览器于是
+    缓存它。下次更新后：新 JS 已在服务器上，浏览器却还用缓存的旧 HTML，
+    那份 HTML 指向【旧的】JS 文件名。
+
+    结果是"更新了但界面没变"，而且极难自查 —— 服务器文件是新的、
+    构建成功、日志正常，只有浏览器在骗你。真实踩到过：工作目录选择器
+    和设置页标签都上线了但看不到，要 Ctrl+Shift+R 才出来。
+    """
+
+    async def test_index_has_no_store(self, client: Any) -> None:
+        r = await client.get("/")
+        assert r.status_code == 200
+        cc = r.headers.get("cache-control", "")
+        assert "no-store" in cc, f"index.html 可被缓存：cache-control={cc!r}"
+
+    async def test_index_has_no_validators(self, client: Any) -> None:
+        """
+        etag / last-modified 必须去掉。
+
+        留着的话浏览器发 If-None-Match 换回 304，等于缓存仍然生效 ——
+        no-store 就白设了。
+        """
+        r = await client.get("/")
+        assert "etag" not in {k.lower() for k in r.headers}
+        assert "last-modified" not in {k.lower() for k in r.headers}
+
+    @pytest.mark.parametrize("route", ["/chat", "/settings", "/cron"])
+    async def test_spa_routes_also_no_store(self, client: Any, route: str) -> None:
+        """
+        前端路由走的是 404 回退分支，那条路径也要禁缓存 ——
+        它们是用户最常访问的入口。
+        """
+        r = await client.get(route)
+        assert r.status_code == 200
+        assert "no-store" in r.headers.get("cache-control", "")
+
+    async def test_hashed_assets_still_cacheable(self, client: Any) -> None:
+        """
+        带 hash 的资源【必须】仍可缓存。
+
+        一律禁缓存的话每次刷新都要重下 544KB 的 JS ——
+        修一个问题制造另一个。
+        """
+        import re
+
+        html = (await client.get("/")).text
+        m = re.search(r'src="(/assets/[^"]+\.js)"', html)
+        if m is None:
+            pytest.skip("产物里没有带 hash 的 JS（可能是测试用的假 dist）")
+        r = await client.get(m.group(1))
+        assert r.status_code == 200
+        assert "no-store" not in r.headers.get("cache-control", "")

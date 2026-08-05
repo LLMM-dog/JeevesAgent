@@ -445,9 +445,51 @@ def create_app() -> FastAPI:
         # 应用只有从 "/" 进入才能用。而这个问题在开发模式下完全看不出来 ——
         # vite dev server 自带 SPA 回退。
         class _SpaStatic(StaticFiles):
+            @staticmethod
+            def _no_store(resp: Response) -> Response:
+                """
+                让 index.html 永不缓存。
+
+                ## 为什么这条必须有
+
+                构建产物的文件名带 hash（index-Cqs10vA.js），所以 JS/CSS
+                可以放心长期缓存 —— 内容变了文件名就变了。
+
+                但 index.html 的名字不变，而它【引用】那些带 hash 的文件。
+                StaticFiles 默认给它发 etag + last-modified，浏览器于是
+                缓存它。下次更新后：新 JS 已经在服务器上，可浏览器还在用
+                缓存的旧 HTML，那份 HTML 指向【旧的】JS 文件名。
+
+                结果是"更新了但界面没变"，而且极难自查 —— 服务器上文件是
+                新的、构建是成功的、日志一切正常，只有浏览器在骗你。
+                真实踩到过：新加的工作目录选择器和设置页标签都上线了，
+                但界面上看不到，需要 Ctrl+Shift+R 才出来。
+
+                no-store 而不是 no-cache：后者仍允许缓存，只是每次要
+                回源验证；前者根本不存。HTML 只有几百字节，不值得为它
+                省一次往返却换来这类问题。
+                """
+                resp.headers["Cache-Control"] = "no-store, must-revalidate"
+                # 有些代理只认这两个老字段，一并发出
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+                # etag / last-modified 必须去掉。留着的话浏览器会用
+                # If-None-Match 换回一个 304，等于缓存仍然生效。
+                #
+                # 用 del 而不是 pop —— starlette 的 MutableHeaders 没有
+                # pop 方法（它不是 dict），调了直接 500。
+                # 而 __delitem__ 对不存在的键是静默的，不需要先判断。
+                del resp.headers["etag"]
+                del resp.headers["last-modified"]
+                return resp
+
             async def get_response(self, path: str, scope: Any) -> Response:
                 try:
-                    return await super().get_response(path, scope)
+                    resp = await super().get_response(path, scope)
+                    # 目录请求（"/"）也会落到这里，此时 path 是 "."
+                    if path in ("", ".", "index.html") or path.endswith("/"):
+                        return self._no_store(resp)
+                    return resp
                 except StarletteHTTPException as e:
                     # 【必须 catch 异常而不是判断 status_code】。
                     #
@@ -463,7 +505,12 @@ def create_app() -> FastAPI:
                     # /api/* 已经被前面的路由吃掉了，能走到这里的
                     # 要么是前端路由，要么是真的不存在的资源。
                     # 后者拿到 index.html 也无害：前端会显示"页面不存在"。
-                    return await super().get_response("index.html", scope)
+                    #
+                    # 这条回退路径也要禁缓存 —— /chat、/settings 这些
+                    # 前端路由全走这里，是用户最常访问的入口。
+                    return self._no_store(
+                        await super().get_response("index.html", scope)
+                    )
 
         app.mount(
             "/",
