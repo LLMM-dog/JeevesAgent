@@ -40,20 +40,43 @@ Windows 也可以直接双击 `setup.bat`。
 
 ### 3. 启动
 
-**Windows**（PowerShell 如果拦脚本，先跑一次 `Set-ExecutionPolicy Bypass -Scope Process -Force`）：
-
-```powershell
-.\start.ps1
-```
+**Windows** —— 双击 `start.bat`。
 
 **macOS / Linux**：
 
 ```bash
 chmod +x start.sh    # 只需第一次
-./start.sh
+./start.sh --prod
 ```
 
-浏览器打开 **http://127.0.0.1:5173**（开发模式）或 **http://127.0.0.1:9000**（生产模式，加 `-Prod` / `--prod`）。
+然后浏览器打开 **http://127.0.0.1:9000**。
+
+就一个地址、一个进程 —— 前端已经构建好，由后端直接伺服。源码没改动时会跳过构建，所以之后每次启动都是秒开。
+
+<details>
+<summary>要改代码的话用开发模式</summary>
+
+开发模式起两个进程：后端带 `--reload`，前端跑 vite dev server（改代码即时生效）。
+
+```
+start.bat -Dev          # Windows
+./start.sh              # macOS / Linux
+```
+
+这时候访问 **http://127.0.0.1:5173**（vite 的地址，不是 9000）。
+
+也可以直接用 PowerShell 脚本，它默认就是开发模式：
+
+```powershell
+.\start.ps1                  # 开发
+.\start.ps1 -Prod            # 生产
+.\start.ps1 -BackendOnly     # 只起后端
+.\start.ps1 -Port 9500       # 换端口
+```
+
+`start.ps1` 需要执行策略允许运行脚本。被拦了就先跑一次 `Set-ExecutionPolicy Bypass -Scope Process -Force`，或者干脆用 `start.bat`（它内部已经带了 `-ExecutionPolicy Bypass`）。
+
+</details>
 
 ### 4. 配模型
 
@@ -97,11 +120,12 @@ API Key：   sk-你的密钥
 
 | 现象 | 原因 |
 | --- | --- |
-| `无法加载文件 start.ps1` | PowerShell 执行策略。先跑 `Set-ExecutionPolicy Bypass -Scope Process -Force` |
+| 双击 `start.bat` 窗口一闪就没了 | 不会发生 —— 它有 `pause`。如果真闪掉了，用 cmd 手动跑一次看报错 |
+| `无法加载文件 start.ps1` | 你直接跑了 `.ps1`。用 `start.bat`，或先 `Set-ExecutionPolicy Bypass -Scope Process -Force` |
 | `Permission denied: ./start.sh` | 忘了 `chmod +x start.sh` |
-| `端口被占用` | 上次的进程没退干净。`start.ps1` 会问你要不要清理，选 y |
-| 页面白屏 | 前端依赖没装上。`cd frontend && npm install` |
-| `ENCRYPTION_KEY 缺失` | `.env` 没生成。重跑 `uv run python scripts/setup.py` |
+| `端口被占用` | 上次的进程没退干净。脚本会问你要不要清理，选 y |
+| 打开 9000 是白屏 | 前端没构建。`cd frontend && npm install && npm run build` |
+| `ENCRYPTION_KEY 缺失` | `.env` 没生成。重跑 `setup.bat` |
 | 对话报"未配置模型" | 去设置页添加供应商，并确认「功能位绑定」里对话模型选了 |
 
 ### 起不来的话

@@ -94,18 +94,54 @@ if ($occupant) {
 # ── 生产模式：先构建前端 ──
 
 if ($Prod) {
-    Write-Host "构建前端…" -ForegroundColor Cyan
     if (-not (Test-Path (Join-Path $root "frontend\node_modules"))) {
         Fail "前端依赖未安装。先跑：cd frontend; npm install"
     }
-    Push-Location (Join-Path $root "frontend")
-    try {
-        npm run build
-        if ($LASTEXITCODE -ne 0) { Fail "前端构建失败" }
-    } finally {
-        Pop-Location
+
+    # 【只在源码比产物新时才构建】。
+    #
+    # 生产模式是普通用户的默认入口（start.bat 双击），而无条件构建
+    # 意味着每次启动都白等 7 秒 —— 用户什么都没改，产物却重新生成一遍。
+    #
+    # 判据是"最新的源文件 vs dist/index.html 的时间戳"。
+    # 比较 index.html 而不是整个 dist 目录：目录的修改时间在某些
+    # 文件系统上不随内容更新，而 index.html 每次构建必然重写。
+    #
+    # 覆盖的源：src/ 下所有文件，加上会影响构建结果的配置
+    # （vite.config、tsconfig、package.json、index.html、tailwind 配置）。
+    # 漏掉配置文件的话，改了 vite.config 却不会重新构建 ——
+    # 那种"改了没生效"最难排查。
+    $dist = Join-Path $root "frontend\dist\index.html"
+    $needBuild = $true
+    if (Test-Path $dist) {
+        $distTime = (Get-Item $dist).LastWriteTimeUtc
+        $srcRoot = Join-Path $root "frontend"
+        $watch = @(Get-ChildItem (Join-Path $srcRoot "src") -Recurse -File -ErrorAction SilentlyContinue)
+        foreach ($n in @("vite.config.ts", "tsconfig.json", "tsconfig.app.json",
+                         "package.json", "index.html", "tailwind.config.ts",
+                         "postcss.config.js")) {
+            $f = Join-Path $srcRoot $n
+            if (Test-Path $f) { $watch += Get-Item $f }
+        }
+        $newest = $watch | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        if ($newest -and $newest.LastWriteTimeUtc -le $distTime) {
+            $needBuild = $false
+            Write-Host "前端产物已是最新，跳过构建" -ForegroundColor DarkGray
+            Write-Host "  （要强制重建：cd frontend; npm run build）" -ForegroundColor DarkGray
+        }
     }
-    Write-Host "✓ 构建完成" -ForegroundColor Green
+
+    if ($needBuild) {
+        Write-Host "构建前端…（首次或源码有改动，约 5-10 秒）" -ForegroundColor Cyan
+        Push-Location (Join-Path $root "frontend")
+        try {
+            npm run build
+            if ($LASTEXITCODE -ne 0) { Fail "前端构建失败" }
+        } finally {
+            Pop-Location
+        }
+        Write-Host "✓ 构建完成" -ForegroundColor Green
+    }
 }
 
 # ── 起后端 ──

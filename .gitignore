@@ -26,6 +26,8 @@ venv/
 node_modules/
 frontend/dist/
 frontend/.vite/
+# tsc 的增量编译缓存。机器相关，且每次构建都变
+*.tsbuildinfo
 
 # ─── IDE / OS ───
 .idea/

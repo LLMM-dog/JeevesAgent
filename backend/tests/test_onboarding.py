@@ -427,3 +427,102 @@ class TestReadmeOnboarding:
         r = (ROOT / "README.md").read_text(encoding="utf-8")
         assert "前置要求" in r
         assert "Node" in r
+
+class TestDoubleClickLauncher:
+    """
+    start.bat 是 Windows 上的主入口（README 让用户双击它）。
+
+    ## 为什么它必须存在且默认生产模式
+
+    双击是 Windows 上最自然的启动方式，而 .ps1 双击默认被执行策略挡下，
+    报错只说"无法加载文件"，不说怎么办。
+
+    而 dev 模式对普通用户是错的四件事：两个进程而不是一个、
+    --reload 白监视没人改的文件、两个端口要理解（5173 vs 9000）、
+    首屏更慢。生产模式由后端伺服构建产物，一个进程一个地址。
+    """
+
+    def test_start_bat_exists(self) -> None:
+        assert (ROOT / "start.bat").is_file(), "Windows 主入口缺失"
+
+    def test_defaults_to_prod(self) -> None:
+        """默认必须是生产模式，否则普通用户拿到的是开发服务器。"""
+        src = (ROOT / "start.bat").read_text(encoding="utf-8", errors="replace")
+        assert "-Prod" in src
+        assert "set MODE=-Prod" in src
+
+    def test_bypasses_execution_policy(self) -> None:
+        """
+        不带 -ExecutionPolicy Bypass 的话，双击会报"无法加载文件"——
+        而这个包装器存在的全部意义就是绕开它。
+        """
+        src = (ROOT / "start.bat").read_text(encoding="utf-8", errors="replace")
+        assert "-ExecutionPolicy Bypass" in src
+        assert "-NoProfile" in src
+
+    def test_pauses_on_exit(self) -> None:
+        """
+        没有 pause 的话，双击时错误信息一闪而过，用户只看到空屏。
+        """
+        src = (ROOT / "start.bat").read_text(encoding="utf-8", errors="replace")
+        assert "pause" in src
+
+    def test_ascii_only(self) -> None:
+        """
+        .bat 按控制台 OEM 代码页读取（中文 Windows 是 936）。
+        存成 UTF-8 的话每个中文注释字节都会被当成命令，
+        cmd 会刷一屏"不是内部或外部命令"。
+        """
+        raw = (ROOT / "start.bat").read_bytes()
+        bad = [b for b in raw if b > 0x7F]
+        assert not bad, f"start.bat 含 {len(bad)} 个非 ASCII 字节，会被 cmd 当成命令"
+
+    def test_checks_prerequisites(self) -> None:
+        """缺 uv 或 .env 时要给出下一步做什么，而不是让 PowerShell 报晦涩错误。"""
+        src = (ROOT / "start.bat").read_text(encoding="utf-8", errors="replace")
+        assert "where uv" in src
+        assert ".env" in src
+        assert "setup.bat" in src
+
+    def test_dev_escape_hatch(self) -> None:
+        """要能切回开发模式 —— 否则改代码的人没法用这个入口。"""
+        src = (ROOT / "start.bat").read_text(encoding="utf-8", errors="replace")
+        assert "-Dev" in src
+
+    def test_readme_points_at_bat(self) -> None:
+        r = (ROOT / "README.md").read_text(encoding="utf-8")
+        assert "双击 `start.bat`" in r
+        # 生产模式的地址是 9000，不是 vite 的 5173
+        assert "127.0.0.1:9000" in r
+
+
+class TestBuildSkip:
+    """
+    生产模式下源码没改就不该重新构建。
+
+    无条件构建意味着每次启动白等 5-10 秒 —— 而生产模式是普通用户
+    的默认路径，他每天启动几次，每次都在等一个没必要的构建。
+    """
+
+    def test_ps1_skips_when_fresh(self) -> None:
+        src = (ROOT / "start.ps1").read_text(encoding="utf-8")
+        assert "跳过构建" in src
+        # 必须比对 index.html 而不是目录 —— 目录 mtime 不随内容更新
+        assert "dist\\index.html" in src or "dist/index.html" in src
+
+    def test_sh_skips_when_fresh(self) -> None:
+        src = (ROOT / "start.sh").read_text(encoding="utf-8")
+        assert "跳过构建" in src
+        # find -newer 是 POSIX 的；stat 的参数在 GNU 和 BSD 上不一样
+        assert "-newer" in src
+
+    def test_watches_config_files(self) -> None:
+        """
+        只看 src/ 不够 —— 改了 vite.config 却不重新构建的话，
+        "改了没生效"是最难排查的一类问题。
+        """
+        for name in ("start.ps1", "start.sh"):
+            src = (ROOT / name).read_text(encoding="utf-8")
+            assert "vite.config.ts" in src, f"{name} 没监视 vite.config.ts"
+            assert "package.json" in src, f"{name} 没监视 package.json"
+

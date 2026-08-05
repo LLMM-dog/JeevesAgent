@@ -77,11 +77,44 @@ fi
 # ── 生产模式：先构建前端 ──
 
 if [ "$PROD" = "1" ]; then
-  info "构建前端…"
   [ -d "$ROOT/frontend/node_modules" ] || \
     fail "前端依赖未安装。先跑：cd frontend && npm install"
-  (cd "$ROOT/frontend" && npm run build) || fail "前端构建失败"
-  ok "构建完成"
+
+  # 【只在源码比产物新时才构建】。
+  #
+  # 生产模式是普通用户的默认入口，而无条件构建意味着每次启动都白等
+  # 若干秒 —— 用户什么都没改，产物却重新生成一遍。
+  #
+  # 判据是"有没有源文件比 dist/index.html 更新"。比较 index.html 而不是
+  # 整个 dist 目录：目录的 mtime 在某些文件系统上不随内容更新，
+  # 而 index.html 每次构建必然重写。
+  #
+  # 用 find -newer 而不是比时间戳数值：前者是 POSIX 的，
+  # 后者要用 stat，而 stat 的参数在 GNU 和 BSD（macOS）上不一样。
+  DIST="$ROOT/frontend/dist/index.html"
+  NEED_BUILD=1
+  if [ -f "$DIST" ]; then
+    # 除了 src/，还要看会影响构建结果的配置 —— 漏掉它们的话，
+    # 改了 vite.config 却不重新构建，那种"改了没生效"最难排查。
+    NEWER=$(
+      find "$ROOT/frontend/src" -type f -newer "$DIST" -print -quit 2>/dev/null
+      for f in vite.config.ts tsconfig.json tsconfig.app.json package.json \
+               index.html tailwind.config.ts postcss.config.js; do
+        [ -f "$ROOT/frontend/$f" ] && \
+          find "$ROOT/frontend/$f" -newer "$DIST" -print -quit 2>/dev/null
+      done
+    )
+    if [ -z "$NEWER" ]; then
+      NEED_BUILD=0
+      info "前端产物已是最新，跳过构建"
+    fi
+  fi
+
+  if [ "$NEED_BUILD" = "1" ]; then
+    info "构建前端…（首次或源码有改动）"
+    (cd "$ROOT/frontend" && npm run build) || fail "前端构建失败"
+    ok "构建完成"
+  fi
 fi
 
 # ── 后端参数 ──
