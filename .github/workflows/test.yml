@@ -1,0 +1,90 @@
+# 后端与前端测试。
+#
+# ## 为什么值得配
+#
+# 945 个后端测试 + 30 个前端测试写了，但只在本机跑过 ——
+# "在我机器上是好的" 是最经典的失败模式。CI 让每次推送都验一遍，
+# 也让别人 fork 之后能看到自己的改动有没有弄坏东西。
+#
+# ## 为什么只跑 ubuntu
+#
+# 开发在 Windows 上做，所以 Linux 是覆盖不到的那一半 ——
+# 路径分隔符、大小写敏感、行尾、shell 差异都在这里暴露。
+# 反过来 Windows 每天都在本机验，CI 里再跑一遍收益小。
+
+name: 测试
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支的新推送取消旧任务，省额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 装依赖
+        # 带上可选组 —— 不装的话联网搜索、MCP、定时任务相关的测试
+        # 会走"依赖缺失"分支，等于没测到真实路径
+        run: uv sync --extra dev --extra mcp --extra search --extra web --extra cron
+
+      - name: ruff
+        run: uv run ruff check backend scripts
+
+      - name: mypy
+        # 目前有已知的存量告警，不阻塞 CI。
+        # 真正拦回归的是 ruff 和测试。
+        run: uv run mypy backend || true
+
+      - name: pytest
+        # 需要 ENCRYPTION_KEY 才能启动配置层。
+        # CI 里用一个固定的假值 —— 它只用于加解密测试数据，
+        # 不接触任何真实凭据。
+        env:
+          JEEVES_SECURITY__ENCRYPTION_KEY: ci-only-not-a-real-key-0123456789
+        run: uv run pytest backend/tests -q
+
+  frontend:
+    name: 前端
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 装依赖
+        working-directory: frontend
+        # ci 而非 install：严格按 lockfile 装，装不上就失败而不是自己改 lockfile
+        run: npm ci
+
+      - name: 类型检查
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: 测试
+        working-directory: frontend
+        run: npm test
+
+      - name: 构建
+        working-directory: frontend
+        run: npm run build

@@ -56,7 +56,7 @@ class TestRedaction:
         """
         保留前缀，好让人判断"是哪一类 key"而不暴露它。
 
-        全遮掉的话排查时无法确认"用的是不是我以为的那把钥匙"。
+        全遮掉的话排查时无法确认"用的是不是预期的那把钥匙"。
         """
         out = redact("sk-abc123def456ghi789")
         assert out.startswith("sk-")

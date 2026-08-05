@@ -229,3 +229,9 @@ cd frontend && npm test   # 前端测试
 后端 FastAPI + LangGraph + SQLAlchemy 2.0 + SQLite，前端 React 19 + TypeScript + Tailwind 4 + Zustand + TanStack Query。
 
 87 个后端源文件，914 个后端测试 + 30 个前端测试。
+
+---
+
+## 协议
+
+[MIT](LICENSE)。随便用、随便改、随便分发，出问题自己担着。

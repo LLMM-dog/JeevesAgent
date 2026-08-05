@@ -81,11 +81,11 @@ class TestSpecLoading:
         应该能直接改，不用换个名字。
         """
         (tmp_path / "researcher.md").write_text(
-            "---\nname: researcher\ndescription: 我自己的调研员\n---\n\n自定义提示词",
+            "---\nname: researcher\ndescription: 自定义调研员\n---\n\n自定义提示词",
             encoding="utf-8",
         )
         reg = load_specs(tmp_path)
-        assert reg.specs["researcher"].description == "我自己的调研员"
+        assert reg.specs["researcher"].description == "自定义调研员"
         assert "自定义提示词" in reg.specs["researcher"].prompt
 
     def test_missing_description_skipped(self, tmp_path: Path) -> None:

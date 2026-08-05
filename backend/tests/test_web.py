@@ -350,7 +350,7 @@ class TestToolRegistration:
         必须实现 `parameters()` 而非 `schema()`。
 
         Tool 是 Protocol，不做运行时检查 —— 名字写错时注册不报错，
-        直到 to_specs() 才 AttributeError。MCP 包装器上真实踩过这个坑。
+        直到 to_specs() 才 AttributeError。MCP 包装器上容易出现这种情况。
         """
         from app.core.config import settings
         from app.modules.agent.tools.base import ToolRegistry

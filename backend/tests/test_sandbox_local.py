@@ -364,7 +364,7 @@ class TestOutputTruncation:
         """
         落盘目录必须在 read_file 的白名单里。
 
-        实测踩过：输出被截断时我们告诉模型"完整输出在 data/tmp/xxx.txt"，
+        一个容易忽略的连带问题：输出被截断时会告诉模型"完整输出在 data/tmp/xxx.txt"，
         但那个目录不在白名单里 —— 模型照提示去 read_file，拿到的是
         "路径不在白名单内"。落盘做了、路径给了、读不到，整条链路白费。
 

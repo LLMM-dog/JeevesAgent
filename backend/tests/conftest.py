@@ -139,7 +139,7 @@ def code_only(src: str) -> str:
     ## 为什么需要
 
     源码断言（`assert "xxx" not in src`）会命中【注释里的字样】。
-    实测踩到多次：
+    这个坑很容易踩：
 
     - 断言"挂载参数里不该出现 .env"，而注释里写着"容器能读 .env"
     - 断言"不该 import app.main"，而注释里解释着"不在这里 import app.main"

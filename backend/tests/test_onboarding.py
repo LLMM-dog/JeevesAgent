@@ -7,7 +7,7 @@
 都很隐蔽：setup 静默跳过某一步，用户直到启动失败才发现，
 而那时错误已经指向别处。
 
-实测踩到的：Windows 上 npm 永远被跳过（`subprocess` 不执行 .cmd），
+典型表现：Windows 上 npm 永远被跳过（`subprocess` 不执行 .cmd），
 而第 1 步的环境检查却显示 "✓ Node v22" —— 看起来自相矛盾。
 """
 

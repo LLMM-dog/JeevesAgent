@@ -2,6 +2,7 @@
 name = "jeeves"
 version = "0.1.0"
 description = "本地个人 Agent 工作台"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 
 # 直接依赖钉精确版本。个人项目最怕"上周还能跑，今天装完就挂了" ——
