@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useChatStore } from "@/store/chat";
 import { File, Folder, Sparkles, Wrench } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -51,14 +52,18 @@ export function RefPicker({
   onPick: (item: RefCandidate) => void;
   onClose: () => void;
 }) {
+  // 文件候选的搜索范围来自会话的工作目录，所以要带上 session_id。
+  // 不带的话后端不知道搜哪里，只能返回空 —— 那正是之前
+  // "@ 永远显示没有匹配的文件" 的原因。
+  const sessionId = useChatStore((s) => s.sessionId);
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLUListElement>(null);
 
   // 文件候选必须走后端搜索 —— 文件可能上万个，前端拉全量不现实。
   // 技能/工具是几十个量级，但为了接口统一也走同一个端点。
   const { data, isError } = useQuery({
-    queryKey: ["refCandidates", kind, query],
-    queryFn: () => api.refCandidates(kind, query),
+    queryKey: ["refCandidates", kind, query, sessionId],
+    queryFn: () => api.refCandidates(kind, query, sessionId ?? undefined),
     // 打字时频繁触发，短暂缓存避免每个字符都打一次库
     staleTime: 3000,
   });
@@ -128,7 +133,12 @@ export function RefPicker({
       </div>
       {items.length === 0 ? (
         <div className="px-3 py-3 text-xs text-[var(--color-muted)]">
-          {query ? `没有匹配 “${query}” 的${meta.label}` : meta.empty}
+          {/* 区分"没设工作目录"和"目录里真的没有匹配"。
+              一律显示"没有匹配的文件"的话，用户不知道要先去设工作目录 ——
+              那正是这个提示存在的原因。 */}
+          {data?.reason === "no_work_dir"
+            ? (data.hint ?? "这个对话还没设置工作目录")
+            : query ? `没有匹配 “${query}” 的${meta.label}` : meta.empty}
         </div>
       ) : (
         <ul ref={listRef} className="py-1">

@@ -32,6 +32,7 @@ from app.modules.agent import prompts, run_registry
 from app.modules.agent import refs as ref_expander
 from app.modules.agent.loop import AgentLoop
 from app.modules.agent.messages import Msg
+from app.modules.agent.pathguard import load_session_allowed, scoped_guard
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.memory import service as memory_service
 from app.modules.provider import service as provider_service
@@ -153,7 +154,16 @@ class ChatService:
                     hint="等待当前回复结束或先取消",
                 )
 
+            # 工作目录：会话自己设的优先，没设就回落到默认工作区。
+            #
+            # 为什么回落而不是直接拒绝：用户可能只想聊天，不碰文件。这时候没有
+            # 工作目录完全正常，强制他先选一个目录才能说话是荒谬的。
+            #
+            # 回落到默认工作区（项目内的 workspace/）意味着：不设工作目录时
+            # agent 仍能读写文件，但只能在项目自己的沙箱目录里 ——
+            # 这是最小权限的合理默认。要它操作你的代码，在对话页指定工作目录。
             workspace = await repo.get_workspace(db, session.workspace_id)
+            work_root = session.work_dir or workspace.root_path
 
             # 图片校验在这里做，不在流里做。
             #
@@ -177,7 +187,7 @@ class ChatService:
         return PreparedChat(
             session_id=session_id,
             run_id=new_run_id(),
-            workspace_path=workspace.root_path,
+            workspace_path=work_root,
             user_message_id=user_mid,
             title_empty=not session.title,
             images=checked,
@@ -250,15 +260,25 @@ class ChatService:
             try:
                 with run_scope(run_id):
                     async with self._sessionmaker() as pdb:
-                        await self._run_agent(
-                            db=pdb,
-                            session_id=session_id,
-                            run_id=run_id,
-                            workspace_path=prep.workspace_path,
-                            title_empty=prep.title_empty,
-                            images=prep.images,
-                            refs=prep.refs,
-                        )
+                        # 会话级白名单。
+                        #
+                        # 必须在【这个 task 内部】设置：ContextVar 在 task
+                        # 创建时快照，在外面设的话 produce() 读不到 ——
+                        # 表现为白名单加了却不生效。
+                        #
+                        # 子代理在自己的 task 里跑，会继承这里的 context，
+                        # 所以它拿到的权限不会超过派它的会话。
+                        allowed = await load_session_allowed(pdb, session_id)
+                        with scoped_guard(allowed):
+                            await self._run_agent(
+                                db=pdb,
+                                session_id=session_id,
+                                run_id=run_id,
+                                workspace_path=prep.workspace_path,
+                                title_empty=prep.title_empty,
+                                images=prep.images,
+                                refs=prep.refs,
+                            )
             except asyncio.CancelledError:
                 await emit(Ev.CANCELLED, run_id=run_id, partial_saved=True)
                 raise

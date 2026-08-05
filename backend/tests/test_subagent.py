@@ -3,7 +3,7 @@ SubAgent 的测试。
 
 覆盖这几个容易做错的地方：
 
-| | | | pi |
+| | | | 同类实现 |
 | --- | --- | --- | --- |
 | 返回值截断 | 无（operator.add 无限累加） | 无 | 有（50KB） |
 | 并发上限 | 无 | 无 | 有 |
@@ -128,7 +128,7 @@ class TestSpecLoading:
     ) -> None:
         """
         不声明 tools 时给保守默认，【不是全集】。 同类实现.md 没写 tools 字段就拿到全集，成了潜在的无限递归口子
-        —— 而 pi 没有任何深度防护。
+        —— 而有的实现 没有任何深度防护。
         """
         (tmp_path / "c.md").write_text(
             "---\nname: c\ndescription: d\n---\n\n提示词", encoding="utf-8"
@@ -320,7 +320,7 @@ class TestConcurrencyTimeoutCancel:
     并发上限、超时、取消级联 —— 三件必须一起做。
 
     这三件很容易只做一到两件：
-      并发上限   只有 pi 有
+      并发上限   只有 有实现有
       超时       三个都没有
       取消级联   不级联（子代理跑在全局 worker 的独立 Task 里）
     """
@@ -379,7 +379,7 @@ class TestConcurrencyTimeoutCancel:
 
         常见实现没有超时。后果：永久占 worker slot、
         永久阻塞父代理（裸 await pending_future）、
-        pi 永久占并发槽位。
+        同类实现 永久占并发槽位。
         """
         from app.modules.agent import subagent_runner
         from app.modules.agent.tools import subagent as sa
@@ -540,7 +540,7 @@ class TestToolDescription:
 
     def test_says_when_not_to_use(self) -> None:
         """
-        "什么时候不该用"必须写。pi 完全没有这类指引，而它委派成本很低，
+        "什么时候不该用"必须写。有实现完全没有这类指引，而它委派成本很低，
         模型容易过度委派。
         """
         d = SubAgentTool.description

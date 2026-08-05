@@ -33,9 +33,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest_asyncio
-from app.core.ids import binding_id, model_id, provider_id
+from app.core.ids import binding_id, model_id, path_id, provider_id
 from app.infra.db.base import Base
-from app.modules.provider.models import Model, ModelBinding, Provider
+from app.modules.provider.models import Model, ModelBinding, PathWhitelist, Provider
 from app.modules.session import repo
 from app.modules.todo.models import Todo  # noqa: F401
 from httpx import ASGITransport, AsyncClient
@@ -250,6 +250,22 @@ async def app_client(tmp_path, monkeypatch, upstream):  # type: ignore[no-untype
 
     async with maker() as db:
         await repo.ensure_default_workspace(db, str(ws))
+
+        # 会话级白名单的库记录。
+        #
+        # session_id=None 表示全局条目 —— 对所有会话生效，
+        # 这里用它是因为测试的会话 id 要等下面才生成。
+        db.add(
+            PathWhitelist(
+                id=path_id(),
+                session_id=None,
+                path=str(ws),
+                can_write=1,
+                note="e2e 测试工作区",
+                builtin=0,
+            )
+        )
+        await db.flush()
         p = Provider(
             id=provider_id(),
             name="fake-upstream",

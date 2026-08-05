@@ -121,7 +121,7 @@ class SandboxConfig(BaseModel):
     max_output_bytes: int = 50 * 1024
     # 进程退出后等管道空闲的宽限期（秒）。
     #
-    # 照 pi 对 issue #5303 的修复：短命的主进程可能已 exit，但它 fork 出的
+    # 一个已知问题的修复思路：短命的主进程可能已 exit，但它 fork 出的
     # 后台进程还持着 stdout。立即关流会静默丢掉还在写的输出 ——
     # 丢的通常正是错误信息。
     drain_grace: float = 0.5

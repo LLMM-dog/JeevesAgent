@@ -14,14 +14,21 @@
 check() 通过后又用原始 path 去 open，等于没检查。
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
 from app.core.exceptions import PathDeniedError
 from app.core.time import now_ms
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
@@ -152,8 +159,34 @@ class PathGuard:
 
 _guard: PathGuard | None = None
 
+# 当前会话的 guard。
+#
+# ## 为什么用 ContextVar
+#
+# 白名单是【会话级】的：给 A 会话开了 D:\proj 的写权限，不该让 B 会话
+# 也能写。但工具函数拿不到会话上下文 —— `get_guard()` 在 file.py 里
+# 被调用 6 次，exec.py 1 次，refs.py 2 次，全都是纯函数式的调用点。
+#
+# 改成层层传参要动所有工具的签名（而 ToolContext 里塞 guard 也一样要
+# 改每个调用点）。ContextVar 让"当前会话是谁"隐式可得，
+# 和事件总线用的是同一个模式。
+#
+# asyncio 里每个 Task 继承创建时的 context，所以子代理（在自己的 Task
+# 里跑）会拿到父会话的 guard —— 这是想要的行为：子代理不该有比
+# 派它的会话更大的权限。
+_session_guard: ContextVar[PathGuard | None] = ContextVar("session_guard", default=None)
+
 
 def get_guard() -> PathGuard:
+    """
+    取当前生效的 guard。
+
+    有会话级的就用会话级，否则回落到全局 —— 后者用于启动期、
+    定时任务、以及测试里直接调工具的场景。
+    """
+    scoped = _session_guard.get()
+    if scoped is not None:
+        return scoped
     global _guard
     if _guard is None:
         _guard = PathGuard()
@@ -161,7 +194,67 @@ def get_guard() -> PathGuard:
 
 
 def set_allowed(entries: list[AllowedPath]) -> None:
-    g = get_guard()
+    """设置【全局】白名单。启动时调一次。"""
+    g = _guard if _guard is not None else get_guard()
     g.allowed = entries
     g.clear_cache()
     log.info("pathguard_updated", count=len(entries))
+
+
+@contextmanager
+def scoped_guard(entries: list[AllowedPath]) -> Iterator[PathGuard]:
+    """
+    在一段代码里换用会话级白名单。
+
+    用法：
+
+        with scoped_guard(entries):
+            ...   # 这里的 get_guard() 返回会话级的
+
+    退出时自动还原 —— 用 reset(token) 而不是设回 None，
+    因为嵌套调用（子代理）时设回 None 会让外层也丢掉 guard。
+    """
+    g = PathGuard()
+    g.allowed = entries
+    token = _session_guard.set(g)
+    try:
+        yield g
+    finally:
+        _session_guard.reset(token)
+
+async def load_session_allowed(db: "AsyncSession", session_id: str) -> list[AllowedPath]:
+    """
+    取某个会话生效的白名单：会话级条目 + 全局条目。
+
+    ## 为什么要合并而不是只用会话级
+
+    全局条目里有内置的两条 —— 项目的 workspace/ 和 data/uploads。
+    只用会话级的话，没设工作目录的会话会一条白名单都没有，
+    agent 连上传的图片都读不了。
+
+    ## 为什么每次 run 都查一遍
+
+    用户可能在对话进行中改白名单。缓存的话新加的目录要等下一次
+    重启才生效，而界面上已经显示"已添加"—— 那种不一致很难排查。
+
+    一次 run 只查一次，成本是一条 SELECT，可以忽略。
+    """
+    from sqlalchemy import or_, select
+
+    from app.modules.provider.models import PathWhitelist
+
+    rows = list(
+        (
+            await db.execute(
+                select(PathWhitelist).where(
+                    or_(
+                        PathWhitelist.session_id == session_id,
+                        PathWhitelist.session_id.is_(None),
+                    )
+                )
+            )
+        ).scalars()
+    )
+    return [
+        AllowedPath(path=Path(r.path), can_write=bool(r.can_write)) for r in rows
+    ]

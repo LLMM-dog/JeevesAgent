@@ -6,10 +6,10 @@
 | | 提词器 | 后端展开 | 大小上限 | 死引用 |
 | --- | --- | --- | --- | --- |
 | | **无**（按钮选文件） | — | — | — |
-| pi | 有（@文件 /命令） | 有，读全文内联 | **无** | — |
+| 同类实现 | 有（@文件 /命令） | 有，读全文内联 | **无** | — |
 | | 有（@技能 #工具 !宏） | **完全不展开** | 不适用 | `web_link` |
 
-所以测试重点：真的展开（对 ）、有上限（对 pi）、没有死类型。
+所以测试重点：真的展开（对 ）、有上限（对 同类实现）、没有死类型。
 """
 
 from pathlib import Path
@@ -72,7 +72,7 @@ class TestFileRef:
         """
         超限截断，且【必须告诉模型截断了】。
 
-        pi 完全没有上限（file-processor.ts 搜 MAX/limit/truncat 零命中），
+        有实现完全没有上限（file-processor.ts 搜 MAX/limit/truncat 零命中），
         引用 5MB 日志会整个塞进请求。
 
         而截断不声明的话模型会基于半个文件下结论 ——
@@ -477,7 +477,7 @@ class TestCandidatesEndpoint:
         """
         候选里不能出现 node_modules / .venv。
 
-        pi 特意用 fd 并注明 `respects .gitignore`——
+        同类实现 特意用 fd 并注明 `respects .gitignore`——
         不排除的话候选列表会被依赖目录淹掉，功能等于废掉。
         """
         r = await client.get("/api/ref-candidates?kind=file&q=py")

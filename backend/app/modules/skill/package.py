@@ -193,7 +193,7 @@ def inspect_package(data: bytes) -> tuple[str, str]:
     meta, _body = parse_frontmatter(raw)
     desc = meta.get("description")
     if not desc or not str(desc).strip():
-        # 入口就拒收，不像 pi 那样宽松放行。
+        # 入口就拒收，不像 同类实现 那样宽松放行。
         #
         # description 是模型选择技能的唯一依据，没有它这个包装了也用不上。
         # 在上传时 fail-fast 是对的 —— 后续所有环节都能假定它合法。

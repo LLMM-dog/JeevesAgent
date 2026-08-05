@@ -179,7 +179,7 @@ async def load_skill_file(ctx, name: str, path: str) -> ToolResult:
 
 三者都有 Markdown 能力包机制，成熟度差异很大。
 
-| 维度 |  |  | pi | 本项目 |
+| 维度 |  |  | 同类实现 | 本项目 |
 | --- | --- | --- | --- | --- |
 | frontmatter 解析 | `yaml.safe_load` | **手写正则，两套且不一致** | `yaml` 库 | `yaml.safe_load` |
 | 解析失败 | 上传时拒收 | **无 try/except，拖垮整个提示词** | 单文件降级 | 单文件降级 + 诊断 |

@@ -5,7 +5,7 @@ span 异步写入。
 
 一条值得记住的原则：
 
-> Observability must never affect pi execution.
+> Observability must never affect 同类实现 execution.
 
 反面教材：追踪写入失败会
 `raise HTTPException` —— **整段对话被打断**，因为记日志失败。
@@ -305,7 +305,7 @@ class TraceWriter:
         # ── 子 run 结束时向上累加 ──
         #
         # 常见实现在这里全部不合格：在前端内存累加、
-        # pi 在展示层重建、没实现。共同结果是
+        # 有实现在展示层重建、没实现。共同结果是
         # 【后端无法回答"这次任务总共花了多少钱"】。
         if rec.parent_run_id and rec.status != "running":
             await self._rollup(db, rec.parent_run_id, rec.total_tokens, rec.cost_usd)

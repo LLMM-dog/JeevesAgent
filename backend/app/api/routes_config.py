@@ -37,7 +37,7 @@ from app.modules.agent.tools.todo import _serialize, _stats, load_active
 from app.modules.memory import service as memory_service
 from app.modules.provider import service as ps
 from app.modules.session import repo
-from app.modules.session.models import Workspace
+from app.modules.session.models import Session
 from app.modules.skill import macros as macro_registry
 from app.modules.skill import package as skill_package
 from app.modules.skill import registry as skill_registry
@@ -556,6 +556,7 @@ async def mcp_reload(request: Request) -> dict[str, object]:
 async def ref_candidates(
     q: str = Query("", description="模糊查询"),
     kind: str = Query("file", description="file | skill | tool | macro"),
+    session_id: str | None = Query(None, description="文件搜索的范围来自该会话的工作目录"),
     limit: int = Query(20, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
     registry: ToolRegistry = Depends(deps.get_registry),
@@ -570,7 +571,7 @@ async def ref_candidates(
 
     ## 必须排除忽略目录
 
-    pi 用 `fd` 并特意注明 `respects .gitignore`。
+    成熟实现会尊重 .gitignore。
     不排除的话候选列表会被 `node_modules` / `.venv` 淹掉，功能等于废掉 ——
     用户搜 "main" 会先看到几十个 `node_modules/.../main.js`。
     """
@@ -604,10 +605,37 @@ async def ref_candidates(
         ]
         return {"items": items[:limit]}
 
-    # 文件搜索
-    ws = (await db.execute(select(Workspace).limit(1))).scalars().first()
-    root = Path(ws.root_path) if ws else settings.workspace_dir
-    return {"items": _search_files(root, query, limit)}
+    # 文件搜索。
+    #
+    # ## 为什么必须按会话取目录
+    #
+    # 原来这里是 `select(Workspace).limit(1)` —— 取【任意一个】工作区，
+    # 而那恒等于项目自己的 workspace/ 目录（里面基本是空的）。
+    # 结果是 @ 补全永远显示"没有匹配的文件"，而用户的代码明明就在
+    # 他指定的目录里。
+    #
+    # 现在按 session_id 取该会话的工作目录。没给 session_id 或
+    # 会话还没设工作目录时，返回空列表并带上原因 ——
+    # 让前端能显示"先设置工作目录"而不是含糊的"没有匹配"。
+    roots: list[Path] = []
+    if session_id:
+        s = (
+            await db.execute(select(Session).where(Session.id == session_id))
+        ).scalars().first()
+        if s is not None and s.work_dir:
+            wd = Path(s.work_dir)
+            if wd.is_dir():
+                roots.append(wd)
+
+    if not roots:
+        return {
+            "items": [],
+            # 前端据此区分"目录里真的没有匹配"和"还没设工作目录"
+            "reason": "no_work_dir",
+            "hint": "这个对话还没设置工作目录，点输入框上方的目录名来指定",
+        }
+
+    return {"items": _search_files(roots[0], query, limit)}
 
 
 def _one_line_desc(text: object) -> str:
@@ -641,7 +669,7 @@ def _search_files(root: Path, query: str, limit: int) -> list[dict[str, object]]
     ## 打分按"文件名"优先于"路径"
 
     搜 `main` 时 `src/main.py` 必须排在 `src/domain/other.py`（路径里含 main
-    的目录）前面。pi 也是这么分档的：
+    的目录）前面。常见的分档是：
     文件名完全匹配 100 / 前缀 80 / 包含 50 / 路径包含 30。
     """
     scored: list[tuple[int, str, dict[str, object]]] = []

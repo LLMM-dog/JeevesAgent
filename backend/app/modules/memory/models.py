@@ -5,7 +5,7 @@
 
 只有 实现了真正的跨会话长期记忆。`memory_agent_node.py`
 是 **0 字节空文件**，它唯一的记忆表 `shortterm_memory` 索引带
-`conversation_uid`，天然不跨会话；pi 走静态 `AGENTS.md` 路线，模型只读不写。
+`conversation_uid`，天然不跨会话；同类实现 走静态 `AGENTS.md` 路线，模型只读不写。
 
 所以这块主要参考 ，但避开它的两个缺陷（`lru_cache` 永不失效、
 LLM 检索 O(记忆总量)）。

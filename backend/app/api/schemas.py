@@ -32,6 +32,8 @@ class SessionBrief(BaseModel):
 
 class SessionDetail(SessionBrief):
     approval_mode: str
+    # 空串 = 未设置。前端据此显示"选择工作目录"的提示
+    work_dir: str = ""
     private_mode: bool
     amnesia_mode: bool
     vision_mode: bool
@@ -52,6 +54,11 @@ class CreateSessionRequest(BaseModel):
 
 class PatchSessionRequest(BaseModel):
     title: str | None = None
+    # 这次对话的工作目录。传空串表示清除。
+    #
+    # 用 str 而不是 Path：Path 在 JSON 里没有对应类型，
+    # pydantic 会把 Windows 反斜杠当转义符处理。
+    work_dir: str | None = None
     pinned: bool | None = None
     approval_mode: Literal["manual", "auto"] | None = None
     private_mode: bool | None = None
@@ -259,3 +266,47 @@ class MetaResponse(BaseModel):
     macro_count: int
     mcp_tool_count: int
     tool_names: list[str]
+
+
+class WhitelistItem(BaseModel):
+    """一条路径白名单。"""
+
+    id: str
+    path: str
+    can_write: bool
+    note: str = ""
+    builtin: bool = False
+    # None = 全局条目（所有会话都生效）
+    session_id: str | None = None
+    # 路径当前是否真实存在。
+    #
+    # 必须告诉用户 —— 目录被移走或删掉时，白名单还在但工具会失败，
+    # 而错误信息只说"路径不在白名单内"，指向完全错误的方向。
+    exists: bool = True
+
+
+class WhitelistCreate(BaseModel):
+    path: str = Field(..., min_length=1)
+    can_write: bool = False
+    note: str = ""
+
+
+class WhitelistPatch(BaseModel):
+    can_write: bool | None = None
+    note: str | None = None
+
+
+class BrowseEntry(BaseModel):
+    name: str
+    path: str
+    is_dir: bool
+
+
+class BrowseResult(BaseModel):
+    """目录浏览结果，供工作目录选择器用。"""
+
+    path: str
+    parent: str | None = None
+    entries: list[BrowseEntry] = Field(default_factory=list)
+    # 常用起点（盘符 / 家目录 / 项目目录），让用户不用手打路径
+    roots: list[BrowseEntry] = Field(default_factory=list)

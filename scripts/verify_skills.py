@@ -174,7 +174,7 @@ async def main() -> int:
             print(f"   主动加载了技能: {'是' if loaded else '否'}")
             if not loaded:
                 failures.append(
-                    "相关任务没有触发 load_skill —— 这正是 pi 文档承认的"
+                    "相关任务没有触发 load_skill —— 这是渐进披露的固有弱点"
                     "'模型经常不读技能文件'问题"
                 )
 

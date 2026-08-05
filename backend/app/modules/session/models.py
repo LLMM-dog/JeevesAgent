@@ -31,6 +31,15 @@ class Session(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     # 空串时前端显示"新会话"。首轮对话后由 title 功能位的模型生成。
     title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 这次对话的工作目录。空串 = 未设置。
+    #
+    # 【新会话默认为空】是有意的：自动指向某个目录会让用户在不知情的
+    # 情况下让 agent 读写那里。要它干活先告诉它在哪干。
+    #
+    # 用空串而不是 NULL：SQLite 比较 NULL 要用 IS NULL，
+    # 空串可以直接 == ""，少一类查询写错的机会。
+    work_dir: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
     workspace_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("workspace.id"), nullable=False
     )

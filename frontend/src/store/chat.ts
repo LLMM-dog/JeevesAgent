@@ -101,6 +101,13 @@ interface ChatState {
     timeout_at: number;
   } | null;
   /** manual 时每个危险操作都要人确认；auto 直接执行 */
+  /**
+   * 这次对话的工作目录。空串 = 未设置。
+   *
+   * 放 store 而不是每个组件各自查：Composer 要显示它，
+   * RefPicker 的文件搜索也依赖它，两处必须看到同一个值。
+   */
+  workDir: string;
   approvalMode: "manual" | "auto";
   /** 视觉模式。开启后可发图片，但模型必须先通过核验 */
   visionMode: boolean;
@@ -121,6 +128,8 @@ interface ChatState {
   toggleReasoning: () => void;
   respondApproval: (approved: boolean) => Promise<void>;
   setApprovalMode: (mode: "manual" | "auto") => Promise<void>;
+  /** 设置这次对话的工作目录。传空串清除 */
+  setWorkDir: (dir: string) => Promise<void>;
   setVisionMode: (on: boolean) => Promise<void>;
 }
 
@@ -173,6 +182,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   recalledMemories: [],
   compacting: null,
   approval: null,
+  workDir: "",
   approvalMode: "manual",
   visionMode: false,
   artifact: null,
@@ -215,6 +225,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 审批模式是会话级设置，落在库里。不读回来的话切换会话或刷新页面后
         // 开关会显示成 manual 而后端其实是 auto —— 用户会以为开关坏了。
         approvalMode: session.approval_mode ?? "manual",
+        // 空串兜底：老会话在迁移前没有这个字段
+        workDir: session.work_dir ?? "",
       visionMode: session.vision_mode ?? false,
       });
     } catch (err) {
@@ -312,6 +324,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (err instanceof ApiError && err.status === 404) return;
       set({ banner: toBanner(err) });
     }
+  },
+
+  async setWorkDir(dir) {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    // 不做乐观更新：后端要校验目录存在、还会顺手加一条白名单。
+    // 先改本地的话，校验失败时界面显示的目录和实际生效的不一致 ——
+    // 而那种不一致会让人以为"设了但没用"。
+    const s = await api.patchSession(sessionId, { work_dir: dir });
+    set({ workDir: s.work_dir ?? "" });
   },
 
   async setApprovalMode(mode) {

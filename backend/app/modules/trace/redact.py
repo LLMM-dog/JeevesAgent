@@ -20,7 +20,7 @@ span 的 input/output 会捕获工具参数和模型配置 —— 密钥泄漏�
 白名单适合结构化的 attributes，但 input/output 是自由文本 ——
 密钥可能出现在任何位置。这里两种都用：文本走正则，attributes 走白名单。
 
-注意 pi 那三个 `sanitize*` 函数（`shell-output.ts:30`、
+注意 同类实现 那三个 `sanitize*` 函数（`shell-output.ts:30`、
 `sanitize-unicode.ts:21`、相关实现）都不是干这个的，
 名字容易误导。
 """

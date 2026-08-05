@@ -5,7 +5,15 @@
 """
 
 from app.infra.db.base import Base, TimestampMixin
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 
@@ -80,10 +88,26 @@ class PathWhitelist(Base, TimestampMixin):
     __tablename__ = "path_whitelist"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    # 绝对路径，插入时就 resolve，避免每次校验都做
-    path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+
+    # 属于哪个会话。NULL = 全局条目（内置项、以及用户加的全局项）。
+    #
+    # "这个对话能读写哪些目录"本质上是会话级的决定 —— 给 A 会话开了
+    # D:\proj 的写权限，不该让 B 会话也能写。
+    session_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("session.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+
+    # 绝对路径，插入时就 resolve，避免每次校验都做。
+    #
+    # 唯一性是 (session_id, path) 复合 —— 同一个路径可以在不同会话里
+    # 各有一条，权限还可能不同。
+    path: Mapped[str] = mapped_column(Text, nullable=False)
     can_write: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # 内置项不可删 —— 删了 agent 就完全不能读写文件，
     # 且用户不容易想到是这个原因
     builtin: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "path", name="uq_whitelist_session_path"),
+    )

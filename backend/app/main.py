@@ -26,7 +26,7 @@ from sqlalchemy import select
 # except 子类抓不到父类实例，而表现和没写这段代码一样。
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import routes_chat, routes_config, routes_cron
+from app.api import routes_chat, routes_config, routes_cron, routes_files
 from app.core.config import PROJECT_ROOT, settings
 from app.core.exceptions import AppError
 from app.core.ids import path_id
@@ -431,6 +431,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_chat.router, prefix=settings.api_prefix, tags=["chat"])
     app.include_router(routes_config.router, prefix=settings.api_prefix, tags=["config"])
     app.include_router(routes_cron.router, prefix=settings.api_prefix, tags=["cron"])
+    app.include_router(routes_files.router, prefix=settings.api_prefix, tags=["files"])
 
     # 静态文件【必须最后挂载】，在所有 API 路由注册之后 ——
     # 否则 "/" 的通配会吃掉 /api/*

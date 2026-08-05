@@ -3,7 +3,7 @@
 
 ## 为什么要专用工具，而不是让模型用 read_file
 
-pi 让模型自己用 `read` 读 SKILL.md，它的文档 `docs/skills.md:68` 承认了
+一种做法是让模型自己读 SKILL.md，但那样
 这条路的问题：
 
 > When a task matches, the agent uses `read` to load the full SKILL.md
@@ -13,13 +13,13 @@ pi 让模型自己用 `read` 读 SKILL.md，它的文档 `docs/skills.md:68` 承
 可观测（前端能显示"正在加载技能 X"）、能在返回值里追加必要的上下文
 （比如把 ${SKILL_DIR} 替换掉、把附件清单一并给出）。
 
-做了专用的 `load_skill`，这一点它比 pi 强。
+做了专用的 `load_skill`，这一点它比 同类实现 强。
 
 ## 为什么返回值是 role=tool 而不是 system
 
 **别把技能正文放进 system 位。** 那是
 `SystemMessage(content=f"# [SKILL.md ...]\\n\\n{guide}")`，
-和 pi 是拼进系统提示词。
+和 有的实现是拼进系统提示词。
 
 技能是**用户上传的内容**，信任级别应该和 web_fetch 抓回来的网页、
 read_file 读到的文件相同 —— 数据，不是指令。

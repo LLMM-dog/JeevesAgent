@@ -71,7 +71,7 @@ def _resolve_cwd(ctx: ToolContext, cwd: str | None) -> Path:
     模型说 `rm -rf *` 时，cwd 决定了它删的是工作区还是用户主目录。
     限制 cwd 不能阻止刻意的破坏，但能挡住绝大多数"路径写错了"的意外。
 
-    靠容器的 `-w /workspace`，pi 完全不限制（cwd 校验只检查存在性）。
+    靠容器的 `-w /workspace`，有的实现完全不限制（cwd 校验只检查存在性）。
     本项目走白名单，与文件工具同一套机制。
     """
     if not cwd:

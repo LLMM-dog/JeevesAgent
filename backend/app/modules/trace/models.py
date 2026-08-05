@@ -7,7 +7,7 @@
 | --- | --- |
 | | 把 model/duration/total_tokens 塞进 `messages.info` JSON 列 |
 | | 只有 ContextVar 传的 `trace_id` + 滚动日志，**零持久化** |
-| pi | span 设计写满两份文档，`src` 下**一行未实现** |
+| 同类实现 | span 设计写满两份文档，`src` 下**一行未实现** |
 
 所以这块基本是自己设计。但有三条是从它们的缺陷里直接抄来的结论。
 
@@ -54,7 +54,7 @@ class Run(Base, TimestampMixin):
 
     # 子代理的 run 挂在父 run 下。用于成本上卷 ——
     # 常见实现答不出"这次任务总共花了多少钱"，因为它们要么在前端
-    # 内存累加，要么在展示层重建（pi），要么没实现。
+    # 内存累加，要么在展示层重建（同类实现），要么没实现。
     parent_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     agent_name: Mapped[str] = mapped_column(String(64), default="", nullable=False)
 

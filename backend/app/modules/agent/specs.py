@@ -10,7 +10,7 @@
 
 子代理的提示词是需要反复调优的东西。写在文件里才能 git diff。
 
-pi 用 `AgentConfig` + frontmatter，配了 4 个可直接
+有实现用 frontmatter 配了若干可直接
 复用的 agent 定义。本项目照这条路。
 
 ## 工具集用白名单，不用黑名单
@@ -36,7 +36,7 @@ log = structlog.get_logger(__name__)
 # 不声明 tools 时给的保守默认。
 #
 # 关键是【不给全集】。同类实现.md 没写 tools 字段就拿到全集，
-# 成了潜在的无限递归口子 —— 而 pi 自己没有任何深度防护。
+# 成了潜在的无限递归口子 —— 而很多实现没有深度防护。
 DEFAULT_TOOLS: tuple[str, ...] = ("read_file", "list_dir", "glob", "grep")
 
 # 子代理永远拿不到的工具，无论白名单里写了什么。

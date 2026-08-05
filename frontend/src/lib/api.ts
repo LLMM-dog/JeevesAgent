@@ -8,6 +8,11 @@
 import { ApiError } from "./sse";
 import type {
   BindingOut,
+  BrowseResult,
+  CronRun,
+  CronTask,
+  CronValidateResult,
+  MemoryOut,
   MessageOut,
   MetaResponse,
   ModelOut,
@@ -17,12 +22,9 @@ import type {
   SessionDetail,
   SessionListResponse,
   TodoItem,
-  MemoryOut,
-  CronTask,
-  CronRun,
-  CronValidateResult,
   TodoStats,
   TraceSpan,
+  WhitelistItem,
 } from "./types";
 
 const BASE = "/api";
@@ -183,10 +185,67 @@ export const api = {
    * 文件候选【必须后端搜】—— 文件可能上万个，前端拉全量不现实。
    * 后端会跳过 node_modules / .venv 这类目录，否则候选列表会被淹掉。
    */
-  refCandidates: (kind: "file" | "skill" | "tool" | "macro", q: string) =>
+  refCandidates: (
+    kind: "file" | "skill" | "tool" | "macro",
+    q: string,
+    sessionId?: string,
+  ) =>
     request<{
       items: { name: string; path?: string; detail: string }[];
-    }>(`/ref-candidates?kind=${kind}&q=${encodeURIComponent(q)}`),
+      // 文件搜索时后端会带上这两个字段：没设工作目录 vs 目录里真的没有匹配。
+      // 少了它们前端只能一律显示"没有匹配的文件"，而用户根本不知道
+      // 要先去设工作目录。
+      reason?: string;
+      hint?: string;
+    }>(
+      `/ref-candidates?kind=${kind}&q=${encodeURIComponent(q)}` +
+        (sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""),
+    ),
+
+  // ── 文件访问：白名单与目录浏览 ──
+
+  /**
+   * 白名单列表。
+   *
+   * 带 sessionId 时返回【该会话实际生效的集合】—— 会话级条目加全局条目。
+   * 界面显示的必须和 agent 用的一致，否则用户看着白名单里有某个目录，
+   * 却不明白为什么工具还是被拒。
+   */
+  whitelist: (sessionId?: string) =>
+    request<{ items: WhitelistItem[] }>(
+      "/whitelist" + (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""),
+    ),
+
+  addWhitelist: (
+    body: { path: string; can_write: boolean; note?: string },
+    sessionId?: string,
+  ) =>
+    request<WhitelistItem>(
+      "/whitelist" + (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""),
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  patchWhitelist: (id: string, body: { can_write?: boolean; note?: string }) =>
+    request<WhitelistItem>(`/whitelist/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  deleteWhitelist: (id: string) =>
+    request<{ ok: boolean }>(`/whitelist/${id}`, { method: "DELETE" }),
+
+  /**
+   * 浏览目录，供工作目录选择器用。
+   *
+   * path 留空返回常用起点（盘符、主目录、项目目录）—— 让用户不用手打
+   * 绝对路径。Windows 路径又长又容易打错，打错了得到"目录不存在"，
+   * 试几次就放弃了。
+   */
+  browse: (path?: string, dirsOnly = true) =>
+    request<BrowseResult>(
+      `/browse?dirs_only=${dirsOnly}` +
+        (path ? `&path=${encodeURIComponent(path)}` : ""),
+    ),
 
   /**
    * 导出会话。
@@ -447,6 +506,8 @@ export const api = {
   patchSession: (
     id: string,
     body: Partial<{
+      /** 这次对话的工作目录。传空串清除 */
+      work_dir: string;
       title: string;
       pinned: boolean;
       approval_mode: "manual" | "auto";

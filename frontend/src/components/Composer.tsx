@@ -16,6 +16,7 @@ import {
 import clsx from "clsx";
 import { MacroPicker } from "@/components/MacroPicker";
 import { RefPicker, type RefCandidate, type RefKind } from "@/components/RefPicker";
+import { WorkDirPicker } from "@/components/WorkDirPicker";
 import { useChatStore } from "@/store/chat";
 import { speechUploadsAudio, useSpeechInput } from "@/hooks/useSpeechInput";
 
@@ -117,6 +118,8 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const visionMode = useChatStore((s) => s.visionMode);
   const setVisionMode = useChatStore((s) => s.setVisionMode);
   const stop = useChatStore((s) => s.stop);
+  const sessionId = useChatStore((s) => s.sessionId);
+  const workDir = useChatStore((s) => s.workDir);
   const approvalMode = useChatStore((s) => s.approvalMode);
   const setApprovalMode = useChatStore((s) => s.setApprovalMode);
   const pending = useChatStore((s) => s.pending);
@@ -188,7 +191,7 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
    * `@` 后一个字母，引用就静默失效了）。
    *
    * 也是这么做的，是它最好的
-   * 交互决定。pi 插纯文本是因为 TUI 没有 chip 这个选项。
+   * 交互决定。同类实现 插纯文本是因为 TUI 没有 chip 这个选项。
    */
   const pickRef = (hit: TriggerHit, item: RefCandidate) => {
     const el = ref.current;
@@ -547,6 +550,11 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
           )}
         </div>
         <div className="mt-1.5 flex items-center gap-1.5 px-1">
+          {/* 工作目录放在审批模式旁边：两者都是"这次对话的作用范围"，
+              而且用户在发第一句之前就该看到它 */}
+          {sessionId && (
+            <WorkDirPicker sessionId={sessionId} workDir={workDir} />
+          )}
           <button
             type="button"
             onClick={() =>

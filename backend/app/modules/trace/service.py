@@ -43,7 +43,7 @@ async def span_token_totals(db: AsyncSession, run_id: str) -> dict[str, Any]:
     所以库里没有独立的子 run 行 —— `rollup_total_tokens` 也就永远等于
     `total_tokens`，字段名承诺了"含子代理"但实际没有。
 
-    这正是常见实现共同的毛病：在前端内存累加、pi 在展示层重建、
+    这正是常见实现共同的毛病：在前端内存累加、有实现在展示层重建、
     没实现，结果**后端答不出"这次任务总共花了多少钱"**。
 
     span 表里已经有全部数据（含子代理的 llm span），所以直接从它汇总。

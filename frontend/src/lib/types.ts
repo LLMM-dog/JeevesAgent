@@ -27,6 +27,8 @@ export interface SessionBrief {
 }
 
 export interface SessionDetail extends SessionBrief {
+  /** 这次对话的工作目录。空串 = 未设置 */
+  work_dir: string;
   approval_mode: "manual" | "auto";
   private_mode: boolean;
   amnesia_mode: boolean;
@@ -477,4 +479,38 @@ export interface CronValidateResult {
   text?: string;
   /** 接下来 5 次触发时间（毫秒） */
   next: number[];
+}
+
+// ── 文件访问 ──
+
+export interface WhitelistItem {
+  id: string;
+  path: string;
+  can_write: boolean;
+  note: string;
+  /** 内置条目不可删、权限不可改 —— 删了 agent 就完全不能读写文件 */
+  builtin: boolean;
+  /** null = 全局条目，对所有会话生效 */
+  session_id: string | null;
+  /**
+   * 路径当前是否真实存在。
+   *
+   * 必须显示出来 —— 目录被移走时白名单还在但工具会失败，
+   * 而错误信息只说"路径不在白名单内"，指向完全错误的方向。
+   */
+  exists: boolean;
+}
+
+export interface BrowseEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export interface BrowseResult {
+  path: string;
+  parent: string | null;
+  entries: BrowseEntry[];
+  /** 常用起点：盘符、主目录、项目目录 */
+  roots: BrowseEntry[];
 }

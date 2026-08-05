@@ -179,7 +179,7 @@ class ToolRegistry:
         - ****：唯一真正实现的，asyncio.Future + WebSocket 往返。
           但**无超时**（tool_python.py:77 是裸 `await future`），用户不在电脑前
           就永久挂起。
-        - **pi**：明确不做，只给同步策略钩子。README:499 写着
+        - **一种常见实现**：明确不做，只给同步策略钩子。README:499 写着
           "No permission popups. Run in a container..."
 
         ## 超时视为拒绝

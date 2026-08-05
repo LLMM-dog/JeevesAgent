@@ -25,7 +25,7 @@ import type { MemoryOut } from "@/lib/types";
  * 那这个错误会在之后每一轮对话里持续生效 —— 这是记忆功能最大的风险。
  *
  * 少见实现做了记忆管理界面
- *（`MemoryGrid.vue` / `MemoryPanel.vue`）。pi 是让人直接编辑
+ *（`MemoryGrid.vue` / `MemoryPanel.vue`）。有的实现是让人直接编辑
  * `AGENTS.md` 文件，没有记忆功能。
  *
  * ## 为什么要显示变更历史

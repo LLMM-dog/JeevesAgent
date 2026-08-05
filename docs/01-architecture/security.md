@@ -4,7 +4,7 @@
 
 **本项目默认只绑 `127.0.0.1`，没有任何鉴权。** 任何能访问这个端口的进程都能完全控制 agent —— 读写白名单内的文件、执行命令、读取会话历史。
 
-这是单机个人项目的显式取舍，不是遗漏。pi 项目也是同样的立场（"Pi does not include a built-in permission system... If you need stronger boundaries, containerize or sandbox Pi"）。假装安全比明确不安全更危险。
+这是单机个人项目的显式取舍，不是遗漏。同类实现 项目也是同样的立场（"Pi does not include a built-in permission system... If you need stronger boundaries, containerize or sandbox Pi"）。假装安全比明确不安全更危险。
 
 ### 绑到 0.0.0.0 之前必须先做的事
 

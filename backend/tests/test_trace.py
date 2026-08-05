@@ -7,7 +7,7 @@
 | --- | --- | --- | --- | --- |
 | | 塞进 messages.info JSON 列 | **无** | **无** | 前端内存累加 |
 | | **零持久化**（只有日志） | **无** | **无** | 未实现 |
-| pi | 设计写了两份文档，**代码一行未实现** | **无** | **无** | 展示层重建 |
+| 同类实现 | 设计写了两份文档，**代码一行未实现** | **无** | **无** | 展示层重建 |
 
 所以这块几乎全是自己设计。测试重点在两条铁律：
 
@@ -246,7 +246,7 @@ class TestWriterNeverBreaksMainFlow:
     """
     第一原则：追踪写入永不影响主流程。
 
-    一条值得记住的原则：`Observability must never affect pi execution.`
+    一条值得记住的原则：`Observability must never affect 同类实现 execution.`
     反例：写失败 raise HTTPException，
     整段对话被打断 —— 因为记日志失败。
     """
@@ -627,7 +627,7 @@ class TestRunRollup:
         子 run 的 token 上卷到父 run。
 
         常见实现在这里全部不合格：在前端内存累加、
-        pi 在展示层按 parentSessionPath 重建、没实现。
+        有实现在展示层按 parentSessionPath 重建、没实现。
         共同结果是【后端无法回答"这次任务总共花了多少钱"】。
         """
         from app.modules.trace.models import Run
