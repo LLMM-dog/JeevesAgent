@@ -43,7 +43,11 @@ MIN_NODE = 20
 
 # 步骤总数。写死而不是 len(steps) —— 步骤是顺序执行的函数调用，
 # 不是列表，而进度提示"3/6"对用户判断"还要多久"有用。
-TOTAL = 6
+# 默认只有 4 步。模型和个人信息挪到界面里配 —— 见 main() 里的说明。
+#
+# 交互模式（--interactive）会把它改成 6。不改的话输出是 [5/4]，
+# 看起来像程序坏了。
+TOTAL = 4
 
 
 class AbortError(Exception):
@@ -453,29 +457,51 @@ def step6_persona() -> None:
 
 
 def outro() -> None:
+    r"""
+    收尾提示。
+
+    ## 为什么要和 README 对齐
+
+    这段话是用户装完之后唯一的指引。它和 README 说的不一致时，
+    用户会照这里做 —— 而这里写着旧的启动方式和旧端口的话，
+    第一步就走错。
+
+    改过一次：原来说 `.\start.ps1` 和 5173，而现在主入口是双击
+    start.bat（生产模式，9000）。5173 是 vite 的开发端口，
+    只在 -Dev 模式下才有。
+    """
     say()
     say("=" * 52)
-    say("初始化完成。启动：")
+    say("装好了。启动：")
     say()
     if os.name == "nt":
-        say("  .\\start.ps1              # 前后端一起起")
-        say()
-        say("或分开起：")
-        say("  uv run uvicorn app.main:app --reload --app-dir backend --port 9000")
-        say("  cd frontend; npm run dev")
+        say("  双击 start.bat")
     else:
-        say("  ./start.sh               # 前后端一起起")
-        say()
-        say("或分开起：")
-        say("  uv run uvicorn app.main:app --reload --app-dir backend --port 9000")
-        say("  cd frontend && npm run dev")
+        say("  chmod +x start.sh    # 只需第一次")
+        say("  ./start.sh --prod")
     say()
-    say("然后打开 http://127.0.0.1:5173（开发）或 :9000（生产构建后）")
+    say("然后浏览器打开 http://127.0.0.1:9000")
+    say()
+    say("第一次进去要做两件事：")
+    say("  1. 设置 → 模型：填一个 OpenAI 兼容端点，选要用的模型")
+    say("  2. 对话页输入框上方：选这次对话的工作目录")
+    say()
+    say("要改代码的话用开发模式（前端热更新，端口 5173）：")
+    if os.name == "nt":
+        say("  start.bat -Dev")
+    else:
+        say("  ./start.sh")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Jeeves 一键初始化")
     ap.add_argument("--no-deps", action="store_true", help="跳过装依赖")
+    ap.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="额外在命令行里配模型和个人信息（默认不问，去设置页配更方便）",
+    )
     args = ap.parse_args()
 
     say("Jeeves 初始化")
@@ -486,8 +512,23 @@ def main() -> int:
         step2_backend_deps(args.no_deps)
         step3_frontend_deps(args.no_deps)
         step4_env()
-        step5_model()
-        step6_persona()
+        # 【默认不进交互】。
+        #
+        # 原来这里必问模型配置和个人信息。三个问题的代价：
+        #
+        #   - 双击 setup.bat 的人以为是"装依赖"，结果卡在一个
+        #     要填 Base URL 和 API Key 的提示上
+        #   - 命令行里填 API Key 会进 shell 历史
+        #   - 同样的事在设置页里做更好：能看到探测到的模型列表、
+        #     能改、能删、填错了有明确报错
+        #
+        # 装完直接启动，在界面里配。要命令行配的加 --interactive。
+        if args.interactive:
+            # 多两步，总数要跟着变
+            global TOTAL
+            TOTAL = 6
+            step5_model()
+            step6_persona()
     except AbortError as e:
         say()
         say(f"中止：{e}")

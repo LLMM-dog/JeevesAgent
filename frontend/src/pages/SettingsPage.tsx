@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, Loader2, Trash2, TriangleAlert } from "lucide-react";
+import { CircleAlert, Loader2, TriangleAlert } from "lucide-react";
 import clsx from "clsx";
 import McpPanel from "@/components/McpPanel";
 import WebSearchPanel from "@/components/WebSearchPanel";
@@ -9,6 +9,7 @@ import MemoryPanel from "@/components/MemoryPanel";
 import VisionPanel from "@/components/VisionPanel";
 import SkillsPanel from "@/components/SkillsPanel";
 import TracePanel from "@/components/TracePanel";
+import ModelsPanel from "@/components/ModelsPanel";
 import PersonaPanel from "@/components/PersonaPanel";
 import WhitelistPanel from "@/components/WhitelistPanel";
 import { api } from "@/lib/api";
@@ -381,10 +382,6 @@ export default function SettingsPage() {
     onSuccess: refreshAll,
   });
 
-  const removeProvider = useMutation({
-    mutationFn: (id: string) => api.deleteProvider(id),
-    onSuccess: refreshAll,
-  });
 
   const byPurpose = new Map(bindings?.items.map((b) => [b.purpose, b]) ?? []);
   const providerName = new Map(providers?.items.map((p) => [p.id, p.name]) ?? []);
@@ -426,40 +423,7 @@ export default function SettingsPage() {
             <AddProvider onDone={refreshAll} />
 
             {providers && providers.items.length > 0 && (
-              <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-                <h2 className="mb-3 text-sm font-medium">已配置的供应商</h2>
-                <ul className="space-y-2">
-                  {providers.items.map((p) => (
-                    <li
-                      key={p.id}
-                      className="flex items-center gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm">{p.name}</p>
-                        <p className="truncate font-mono text-[11px] text-[var(--color-muted)]">
-                          {p.base_url} · Key ····{p.key_hint} · {p.model_count} 个模型
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        aria-label={`删除供应商 ${p.name}`}
-                        onClick={() => {
-                          if (
-                            confirm(
-                              `删除「${p.name}」？它的所有模型和绑定也会一起删除。`,
-                            )
-                          ) {
-                            removeProvider.mutate(p.id);
-                          }
-                        }}
-                        className="shrink-0 rounded p-1.5 text-[var(--color-muted)] transition hover:text-[var(--color-err)]"
-                      >
-                        <Trash2 size={14} aria-hidden />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </section>
+              <ModelsPanel />
             )}
 
             {models && models.items.length > 0 && (

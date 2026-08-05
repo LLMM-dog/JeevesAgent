@@ -526,3 +526,128 @@ class TestBuildSkip:
             assert "vite.config.ts" in src, f"{name} 没监视 vite.config.ts"
             assert "package.json" in src, f"{name} 没监视 package.json"
 
+class TestSetupNonInteractive:
+    """
+    setup 默认不问任何问题。
+
+    ## 为什么
+
+    双击 setup.bat 的人以为是"装依赖"，结果卡在一个要填 Base URL 和
+    API Key 的提示上 —— 而它前面已经跑了几分钟的依赖安装，
+    用户可能已经走开了。
+
+    另外命令行里填 API Key 会进 shell 历史。
+
+    同样的事在设置页里做更好：能看到探测到的模型列表、能改、能删、
+    填错了有明确报错。
+    """
+
+    def test_default_skips_interactive_steps(self) -> None:
+        src = (ROOT / "scripts" / "setup.py").read_text(encoding="utf-8")
+        # 两个交互步骤必须在 args.interactive 分支里
+        idx = src.index("if args.interactive:")
+        branch = src[idx : idx + 400]
+        assert "step5_model()" in branch, "配模型没放进 --interactive 分支"
+        assert "step6_persona()" in branch, "填个人信息没放进 --interactive 分支"
+
+    def test_interactive_flag_exists(self) -> None:
+        """要保留命令行配置的入口 —— 有人就想在终端里做完。"""
+        src = (ROOT / "scripts" / "setup.py").read_text(encoding="utf-8")
+        assert '"--interactive"' in src
+
+    def test_step_count_matches_default(self) -> None:
+        """
+        默认 TOTAL=4。写死 6 的话输出是 [4/6] 然后就结束了，
+        用户以为还有两步没跑完。
+        """
+        src = (ROOT / "scripts" / "setup.py").read_text(encoding="utf-8")
+        assert "TOTAL = 4" in src
+
+    def test_outro_matches_readme(self) -> None:
+        r"""
+        收尾提示是用户唯一的指引，和 README 不一致时他会照这里做。
+
+        踩过：这里写着 `.\start.ps1` 和 5173，而主入口已经变成
+        双击 start.bat（生产模式，9000）。
+        """
+        src = (ROOT / "scripts" / "setup.py").read_text(encoding="utf-8")
+        idx = src.index("def outro(")
+        body = src[idx : idx + 1600]
+        assert "start.bat" in body, "收尾没提 start.bat"
+        assert "9000" in body, "收尾没给正确端口"
+        # 5173 只该出现在"开发模式"的说明里
+        if "5173" in body:
+            assert "开发" in body, "提到 5173 但没说明那是开发模式"
+
+
+class TestModelsPanelGrouping:
+    """
+    模型配置按供应商分组，但增删以【单个模型】为单位。
+
+    ## 原来的问题
+
+    设置页只有一个"已配置的供应商"列表，删除按钮删的是整个供应商 ——
+    连带它下面所有模型和功能位绑定。用户只想去掉一个不用的模型，
+    结果配置全没了。
+    """
+
+    def test_panel_exists(self) -> None:
+        f = ROOT / "frontend" / "src" / "components" / "ModelsPanel.tsx"
+        assert f.is_file(), "ModelsPanel 不存在"
+
+    def test_has_per_model_delete(self) -> None:
+        src = (
+            ROOT / "frontend" / "src" / "components" / "ModelsPanel.tsx"
+        ).read_text(encoding="utf-8")
+        assert "deleteModel" in src, "没有单个模型的删除"
+        assert "同组的其它模型不受影响" in src, "删除提示没说清影响范围"
+
+    def test_has_collapsible_groups(self) -> None:
+        src = (
+            ROOT / "frontend" / "src" / "components" / "ModelsPanel.tsx"
+        ).read_text(encoding="utf-8")
+        assert "aria-expanded" in src, "可收起的分组要有 aria-expanded"
+        assert "collapsed" in src
+
+    def test_has_enable_toggle(self) -> None:
+        src = (
+            ROOT / "frontend" / "src" / "components" / "ModelsPanel.tsx"
+        ).read_text(encoding="utf-8")
+        assert "patchModel" in src
+        assert "enabled" in src
+        # 要说清禁用不等于删除
+        assert "配置保留" in src
+
+    def test_provider_delete_warns_about_scope(self) -> None:
+        """
+        删整个供应商仍然可以，但提示必须写清后果，
+        并指出"只想删一个模型"的做法。
+        """
+        src = (
+            ROOT / "frontend" / "src" / "components" / "ModelsPanel.tsx"
+        ).read_text(encoding="utf-8")
+        assert "删除整个供应商" in src
+        assert "用模型行上的删除按钮" in src
+
+    def test_settings_page_uses_it(self) -> None:
+        src = (ROOT / "frontend" / "src" / "pages" / "SettingsPage.tsx").read_text(
+            encoding="utf-8"
+        )
+        assert "<ModelsPanel />" in src
+        # 旧的供应商列表不该还在
+        assert "已配置的供应商" not in src, "旧的供应商列表没删掉"
+
+    def test_settings_shows_all_models(self) -> None:
+        """
+        设置页要看到【全部】模型，包括禁用的 —— 否则没法重新启用。
+        对话页的菜单才用 enabled_only。
+        """
+        src = (
+            ROOT / "frontend" / "src" / "components" / "ModelsPanel.tsx"
+        ).read_text(encoding="utf-8")
+        assert "api.models()" in src, "设置页不该只拉启用的"
+        switcher = (
+            ROOT / "frontend" / "src" / "components" / "ModelSwitcher.tsx"
+        ).read_text(encoding="utf-8")
+        assert "enabledOnly: true" in switcher, "对话页菜单该只列启用的"
+
