@@ -174,6 +174,52 @@ const emptyStreaming = (run_id: string): StreamingTurn => ({
   reasoningOpen: false,
 });
 
+/**
+ * 从历史消息里恢复上下文占用。
+ *
+ * ## 为什么不能只靠 context_usage 事件
+ *
+ * 那个事件只在 run 期间发。切到一个有历史的会话时没有任何事件，
+ * 计数就是空的 —— 而那个会话已经用掉几千 token，显示空是错的。
+ *
+ * ## 为什么取最后一条助手消息的 prompt_tokens
+ *
+ * prompt_tokens 是那一轮【发出去】的提示词大小，等于当轮的上下文占用。
+ * 用 completion_tokens 或两者之和都不对：前者只是回复长度，
+ * 后者会把回复重复算一次（下一轮它会被算进 prompt 里）。
+ *
+ * 找不到就返回 null —— 空会话、或者上游从不返回 usage 的情况。
+ * 那时进度条不显示，比显示一个错的数字好。
+ */
+function restoreUsage(
+  items: MessageOut[],
+  contextWindow: number,
+): ContextUsageEvent | null {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const m = items[i];
+    if (m.role === "assistant" && m.prompt_tokens) {
+      // 窗口大小按会话选的模型算。拿不到就用一个保守的默认值 ——
+      // 宁可比率偏大（提前提示压缩），也不要偏小让用户以为还很空。
+      const win = contextWindow || 32768;
+      return {
+        // EventCommon 的字段：这不是真事件，用零值填。
+        // 事件流里的 span 信息对"恢复历史占用"没有意义。
+        ts: m.created_at,
+        span_id: null,
+        parent_span_id: null,
+        depth: 0,
+        used_tokens: m.prompt_tokens,
+        window_tokens: win,
+        ratio: Math.round((m.prompt_tokens / Math.max(1, win)) * 10000) / 10000,
+        compact_at: Math.round(win * 0.8),
+        // 这是历史值，不是本轮实测 —— 标成估算，UI 会加"（估算）"
+        is_estimate: true,
+      };
+    }
+  }
+  return null;
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessionId: null,
   messages: [],
@@ -214,6 +260,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       approval: null,
       artifact: null,
       cancelStream: null,
+      // 【必须清掉】。usage 是上一个会话的上下文占用，
+      // 不清的话切会话后计数不变 —— 用户看到的是上一个会话的数字，
+      // 而它下一轮才会被新的 context_usage 事件覆盖。
+      //
+      // 会话是独立的上下文，token 计数必须跟着会话走。
+      usage: null,
     });
 
     try {
@@ -229,6 +281,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         todoStats: todos.stats,
         // 审批模式是会话级设置，落在库里。不读回来的话切换会话或刷新页面后
         // 开关会显示成 manual 而后端其实是 auto —— 用户会以为开关坏了。
+        // 从历史消息恢复上下文占用。
+        //
+        // context_usage 只在 run 期间发。不恢复的话切到一个有历史的
+        // 会话时计数是空的，要等下一轮才出现 —— 而那个会话明明已经
+        // 用掉了几千 token，显示为空是错的。
+        //
+        // 取最后一条带 prompt_tokens 的助手消息：那就是上一轮真实
+        // 发出去的提示词大小，也就是当前的上下文占用。
+        usage: restoreUsage(items, session.context_window ?? 0),
         approvalMode: session.approval_mode ?? "manual",
         // 空串兜底：老会话在迁移前没有这个字段
         workDir: session.work_dir ?? "",

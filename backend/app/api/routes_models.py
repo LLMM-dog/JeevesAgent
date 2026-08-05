@@ -49,6 +49,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 log = structlog.get_logger(__name__)
 router = APIRouter(tags=["模型与人格"])
 
+# 功能位的中文名。
+#
+# 错误信息里要说清是哪个功能在用这个模型 —— 只报 chat 的话
+# 用户还得自己去对照设置页才知道那是什么。
+_PURPOSE_CN = {
+    "chat": "对话",
+    "vision": "看图",
+    "title": "标题",
+    "compact": "压缩",
+}
+
 
 def _out(m: Model, provider_name: str = "") -> ModelOut:
     return ModelOut(
@@ -130,7 +141,31 @@ async def patch_model(
 
     data = body.model_dump(exclude_unset=True)
     if "enabled" in data and data["enabled"] is not None:
-        m.enabled = 1 if data["enabled"] else 0
+        want = bool(data["enabled"])
+        if not want:
+            # 【禁用被功能位绑定的模型要拒绝】。
+            #
+            # 删除有这个检查，禁用却没有 —— 而后果是一样的：那个功能位
+            # 指向一个禁用的模型，下次对话报错或静默降级，而用户只是
+            # "把一个看起来没在用的模型关掉了"，完全联系不起来。
+            #
+            # 尤其是对话位：禁用它等于让整个应用不能对话，
+            # 而报错信息不会提"你刚才禁用了它"。
+            bound = list(
+                (
+                    await db.execute(
+                        select(ModelBinding).where(ModelBinding.model_pk == model_pk)
+                    )
+                ).scalars()
+            )
+            if bound:
+                used = "、".join(_PURPOSE_CN.get(b.purpose, b.purpose) for b in bound)
+                raise ConflictError(
+                    f"这个模型正被【{used}】使用，禁用会让那些功能不可用。"
+                    "先在下面的功能位绑定里换成别的模型。",
+                    code="model_in_use",
+                )
+        m.enabled = 1 if want else 0
     if "display_name" in data and data["display_name"] is not None:
         m.display_name = data["display_name"]
     if "context_window" in data and data["context_window"] is not None:
@@ -177,8 +212,7 @@ async def delete_model(
         ).scalars()
     )
     if bound:
-        names = {"chat": "对话", "vision": "看图", "title": "标题", "compact": "压缩"}
-        used = "、".join(names.get(b.purpose, b.purpose) for b in bound)
+        used = "、".join(_PURPOSE_CN.get(b.purpose, b.purpose) for b in bound)
         raise ConflictError(
             f"这个模型正被【{used}】使用，先在功能位绑定里换成别的",
             code="model_in_use",

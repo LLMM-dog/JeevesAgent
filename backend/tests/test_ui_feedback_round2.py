@@ -91,7 +91,7 @@ class TestApiUsesJsonNotBody:
             id=provider_id(),
             name="ct-test",
             base_url="https://example.com/v1",
-            api_key_cipher=encrypt("sk-x"),
+            api_key_cipher=encrypt("sk-test-x-000000000000"),
         )
         db.add(p)
         await db.flush()
@@ -145,7 +145,7 @@ class TestProviderUpsert:
         body = {
             "name": "同名测试",
             "base_url": "https://api.example.com/v1",
-            "api_key": "sk-first-key-000000",
+            "api_key": "sk-test-first-000000",
             "models": [{"model_id": "m-a", "context_window": 8192}],
         }
         r1 = await client.post("/api/providers", json=body)
@@ -166,7 +166,7 @@ class TestProviderUpsert:
         """
         base = {
             "base_url": "https://api.same.com/v1",
-            "api_key": "sk-identical-key-11111",
+            "api_key": "sk-test-identical-11111",
             "models": [{"model_id": "x-1", "context_window": 8192}],
         }
         r1 = await client.post("/api/providers", json=dict(base, name="第一次"))
@@ -185,10 +185,10 @@ class TestProviderUpsert:
             "models": [{"model_id": "s-1", "context_window": 8192}],
         }
         r1 = await client.post(
-            "/api/providers", json=dict(base, name="个人", api_key="sk-personal-aaaa")
+            "/api/providers", json=dict(base, name="个人", api_key="sk-fake-personal-0001")
         )
         r2 = await client.post(
-            "/api/providers", json=dict(base, name="团队", api_key="sk-team-bbbbbbb")
+            "/api/providers", json=dict(base, name="团队", api_key="sk-fake-team-0002")
         )
         assert r1.json()["id"] != r2.json()["id"]
 
@@ -202,7 +202,7 @@ class TestProviderUpsert:
         body = {
             "name": "去重测试",
             "base_url": "https://api.dedup.com/v1",
-            "api_key": "sk-dedup-key-2222",
+            "api_key": "sk-test-dedup-000022",
             "models": [
                 {"model_id": "same-one", "context_window": 8192},
                 {"model_id": "same-one", "context_window": 8192},
@@ -224,14 +224,14 @@ class TestProviderUpsert:
         body = {
             "name": "换key测试",
             "base_url": "https://api.rekey.com/v1",
-            "api_key": "sk-old-key-33333333",
+            "api_key": "sk-test-rotated-000001",
             "models": [{"model_id": "k-1", "context_window": 8192}],
         }
         r1 = await client.post("/api/providers", json=body)
         old_hint = r1.json()["key_hint"]
 
         r2 = await client.post(
-            "/api/providers", json=dict(body, api_key="sk-new-key-99999999")
+            "/api/providers", json=dict(body, api_key="sk-test-rotated-000002")
         )
         assert r2.json()["key_hint"] != old_hint
 

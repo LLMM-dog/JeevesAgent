@@ -3,7 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>jeeves</title>
+
+    <!--
+      标签页图标。
+
+      三个尺寸各有用途：
+        favicon-32.png     标签页和书签栏，浏览器实际显示的那个
+        apple-touch-icon   iOS 添加到主屏幕时用，苹果只认这个文件名
+        icon-512.png       PWA / 高分屏，也是 manifest 里引用的
+
+      不用 .ico：现代浏览器都认 PNG，而 ico 要额外工具生成，
+      多一个构建步骤换不到任何东西。
+
+      源图是 1024x1024 的 1.png（890KB）。直接拿它当 favicon 的话
+      每次开页面都要下 890KB 去渲染一个 16px 的图标 —— 所以预先缩好
+      放在 public/，vite 会原样拷进 dist。
+    -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+
+    <title>Jeeves</title>
   </head>
   <body>
     <div id="root"></div>

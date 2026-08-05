@@ -12,6 +12,7 @@ import { useState } from "react";
 
 import { api } from "@/lib/api";
 import type { TraceSpan } from "@/lib/types";
+import { useChatStore } from "@/store/chat";
 
 /**
  * 执行树面板。
@@ -38,9 +39,26 @@ function fmtDur(ms: number | null): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/**
+ * token 数。
+ *
+ * ## 单位由这个函数自己带上
+ *
+ * 原来它只返回数字，各处调用方自己拼 "tok"—— 结果是 "5.4Ktok"：
+ * 挤在一起、缩写没人认得、还看不出是不是 5.4 千个 token。
+ *
+ * 单位跟着值走就不会再出现这种拼接错误，也不会有的地方带空格、
+ * 有的地方不带。
+ *
+ * ## 为什么阈值是 10000 而不是 1000
+ *
+ * 1000 以上就缩写的话，"1.2K token" 反而比 "1200 token" 难读 ——
+ * 精确到个位的四位数没有阅读负担。到五位数才值得缩写。
+ */
 function fmtTok(n: number): string {
   if (!n) return "";
-  return n > 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+  if (n < 10000) return `${n.toLocaleString()} token`;
+  return `${(n / 1000).toFixed(1)}K token`;
 }
 
 function SpanRow({ span, maxMs }: { span: TraceSpan; maxMs: number }) {
@@ -99,7 +117,7 @@ function SpanRow({ span, maxMs }: { span: TraceSpan; maxMs: number }) {
         </span>
         {span.total_tokens > 0 && (
           <span className="shrink-0 tabular-nums text-[10px] text-[var(--color-muted)]">
-            {fmtTok(span.total_tokens)}tok
+            {fmtTok(span.total_tokens)}
           </span>
         )}
         {/* 成本只在配过单价时显示。
@@ -203,7 +221,7 @@ function TraceDetail({ runId }: { runId: string }) {
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--color-muted)]">
         <span>{data.turns} 轮</span>
         <span>{fmtDur(data.duration_ms)}</span>
-        <span>{fmtTok(totals.total_tokens)} tok</span>
+        <span>{fmtTok(totals.total_tokens)}</span>
         {data.stop_reason !== "final" && (
           <span className="text-[var(--color-warn)]">{data.stop_reason}</span>
         )}
@@ -218,7 +236,7 @@ function TraceDetail({ runId }: { runId: string }) {
               key={a.agent_name}
               className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 text-[var(--color-muted)]"
             >
-              {a.agent_name} {fmtTok(a.total_tokens)}tok / {a.llm_calls} 次
+              {a.agent_name} {fmtTok(a.total_tokens)} / {a.llm_calls} 次
             </span>
           ))}
         </div>
@@ -238,13 +256,28 @@ export default function TracePanel() {
   const [openRun, setOpenRun] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
+  // 默认只看当前会话。
+  //
+  // ## 为什么
+  //
+  // 追踪是"这次对话都发生了什么"的记录，而用户打开它几乎总是因为
+  // 当前这个对话有问题。混着别的会话的执行记录，第一屏可能一条
+  // 相关的都没有 —— 而列表默认只取 50 条，真正想看的那条可能被挤掉。
+  //
+  // 仍然保留"全部会话"，因为跨会话看花费和失败率是合理需求。
+  const sessionId = useChatStore((s) => s.sessionId);
+  const [onlyThisSession, setOnlyThisSession] = useState(true);
+  const scoped = onlyThisSession && sessionId ? sessionId : undefined;
+
   const { data: stats } = useQuery({
     queryKey: ["traceStats"],
     queryFn: api.traceStats,
   });
   const { data: runs, isLoading } = useQuery({
-    queryKey: ["traces"],
-    queryFn: () => api.listTraces(),
+    // scoped 进 key：切会话或切范围后必须重新拉，
+    // 否则显示的还是上一个会话的记录
+    queryKey: ["traces", scoped ?? "all"],
+    queryFn: () => api.listTraces(scoped),
   });
 
   const cleanup = useMutation({
@@ -267,9 +300,23 @@ export default function TracePanel() {
         )}
         <button
           type="button"
+          onClick={() => setOnlyThisSession((v) => !v)}
+          // ml-auto 挪到这里 —— 它要把两个按钮一起推到右边
+          aria-pressed={onlyThisSession}
+          title={
+            onlyThisSession
+              ? "当前只显示这个对话的执行记录"
+              : "正在显示所有对话的执行记录"
+          }
+          className="ml-auto rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg)]"
+        >
+          {onlyThisSession ? "只看当前对话" : "全部对话"}
+        </button>
+        <button
+          type="button"
           onClick={() => cleanup.mutate(stats?.retain_days ?? 14)}
           disabled={cleanup.isPending}
-          className="ml-auto rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg)]"
+          className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg)]"
         >
           {cleanup.isPending ? "清理中…" : `清理 ${stats?.retain_days ?? 14} 天前`}
         </button>
@@ -350,7 +397,7 @@ export default function TracePanel() {
                     </span>
                   )}
                   <span className="shrink-0 tabular-nums text-[10px] text-[var(--color-muted)]">
-                    {r.turns} 轮 · {fmtDur(r.duration_ms)} · {fmtTok(r.total_tokens)}tok
+                    {r.turns} 轮 · {fmtDur(r.duration_ms)} · {fmtTok(r.total_tokens)}
                   </span>
                 </button>
                 {open && (

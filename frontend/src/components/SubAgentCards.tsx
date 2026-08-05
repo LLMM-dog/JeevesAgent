@@ -72,9 +72,12 @@ function SubAgentCard({ agent }: { agent: AgentCard }) {
             少见实现做了 token 聚合 */}
         {agent.tokens != null && agent.tokens > 0 && (
           <span className="shrink-0 text-[10px] text-[var(--color-muted)]">
-            {agent.tokens > 1000
-              ? `${(agent.tokens / 1000).toFixed(1)}K tok`
-              : `${agent.tokens} tok`}
+            {/* 单位写全。"5.4Ktok" 挤在一起、缩写没人认得，
+                也看不出是不是 5.4 千个 token。
+                一万以下不缩写 —— "1.2K token" 比 "1200 token" 难读。 */}
+            {agent.tokens >= 10000
+              ? `${(agent.tokens / 1000).toFixed(1)}K token`
+              : `${agent.tokens.toLocaleString()} token`}
           </span>
         )}
         {!done && (

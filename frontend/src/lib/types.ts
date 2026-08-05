@@ -29,6 +29,8 @@ export interface SessionBrief {
 export interface SessionDetail extends SessionBrief {
   /** 这次对话用哪个模型。空串 = 跟随功能位绑定 */
   model_pk: string;
+  /** 实际生效的模型窗口。0 表示未配模型 */
+  context_window: number;
   /** 这次对话的工作目录。空串 = 未设置 */
   work_dir: string;
   approval_mode: "manual" | "auto";

@@ -22,7 +22,12 @@ from app.api.schemas import (
     SessionListResponse,
 )
 from app.core import runtime_state
-from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.core.exceptions import (
+    AppError,
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+)
 from app.core.ids import path_id
 from app.infra.db.session import get_db
 from app.infra.sandbox.factory import get_sandbox
@@ -52,6 +57,35 @@ def _brief(s: Session) -> SessionBrief:
         last_message_at=s.last_message_at,
         created_at=s.created_at,
     )
+
+
+async def _detail_with_window(db: AsyncSession, s: Session) -> SessionDetail:
+    """
+    带上实际生效的模型窗口。
+
+    ## 为什么要查库
+
+    _detail 是同步的、拿不到 db。而窗口大小取决于会话选了哪个模型
+    （model_pk），没选则取 chat 功能位绑定的那个 —— 两种情况都要查。
+
+    ## 为什么值得多一次查询
+
+    前端要用它算上下文占用比例。前端自己猜一个 32K 默认值的话，
+    实际是 128K 时进度条虚高四倍，用户以为快满了、开始手动开新会话。
+    """
+    d = _detail(s)
+    win = 0
+    try:
+        m = await provider_service.resolve(
+            db, purpose="chat", override_pk=s.model_pk or ""
+        )
+        win = m.context_window
+    except AppError:
+        # 没配模型时窗口未知。返回 0 让前端回落到默认值 ——
+        # 这时它连对话都发不出去，进度条准不准无关紧要。
+        win = 0
+    d.context_window = win
+    return d
 
 
 def _detail(s: Session) -> SessionDetail:
@@ -125,12 +159,12 @@ async def create_session(
     body: CreateSessionRequest, db: AsyncSession = Depends(get_db)
 ) -> SessionDetail:
     s = await repo.create_session(db, workspace_id=body.workspace_id, title=body.title)
-    return _detail(s)
+    return await _detail_with_window(db, s)
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetail, summary="会话详情")
 async def get_session(session_id: str, db: AsyncSession = Depends(get_db)) -> SessionDetail:
-    return _detail(await repo.get_session(db, session_id))
+    return await _detail_with_window(db, await repo.get_session(db, session_id))
 
 
 @router.get("/sessions/{session_id}/export", summary="导出会话")
@@ -344,7 +378,7 @@ async def patch_session(
             setattr(s, flag, 1 if data[flag] else 0)
 
     await db.commit()
-    return _detail(s)
+    return await _detail_with_window(db, s)
 
 
 @router.delete("/sessions/{session_id}", summary="删除会话")

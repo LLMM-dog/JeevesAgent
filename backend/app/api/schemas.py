@@ -36,6 +36,12 @@ class SessionDetail(SessionBrief):
     work_dir: str = ""
     # 空串表示跟随功能位绑定
     model_pk: str = ""
+    # 这次对话实际生效的模型窗口。
+    #
+    # 【必须带上】—— 前端要用它算上下文占用比例。没有的话只能猜一个
+    # 默认值 32K，而实际可能是 128K，进度条会虚高四倍，
+    # 用户以为快满了。
+    context_window: int = 0
     private_mode: bool
     amnesia_mode: bool
     vision_mode: bool

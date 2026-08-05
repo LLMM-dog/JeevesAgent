@@ -20,6 +20,7 @@ import asyncio
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from app.modules.trace.recorder import compute_cost
 from app.modules.trace.redact import ATTR_WHITELIST, redact, redact_attrs
 from app.modules.trace.writer import (
@@ -31,6 +32,25 @@ from app.modules.trace.writer import (
     TraceWriter,
     make_preview,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@pytest_asyncio.fixture
+async def trace_session(db: AsyncSession) -> str:
+    """
+    一个真实会话的 id。
+
+    run/span 有 ON DELETE CASCADE 外键指向 session，所以不能再用
+    编造的 session_id —— 会被外键拒绝。
+
+    这个约束是有意加的：追踪记录跟着会话走，删会话时一起清掉。
+    之前没有外键，删掉的会话留下一堆孤儿 span 永远占着磁盘。
+    """
+    from app.modules.session import repo as srepo
+
+    ws = await srepo.ensure_default_workspace(db, "/tmp/trace-test")
+    s = await srepo.create_session(db, workspace_id=ws.id, title="追踪测试")
+    return s.id
 
 
 class TestRedaction:
@@ -261,11 +281,11 @@ class TestWriterNeverBreaksMainFlow:
 
         return TraceWriter(sm), made  # type: ignore[arg-type]
 
-    def _span(self, sid: str = "sp1") -> SpanRecord:
+    def _span(self, session_id: str, sid: str = "sp1") -> SpanRecord:
         return SpanRecord(
             id=sid,
             run_id="r1",
-            session_id="s1",
+            session_id=session_id,
             kind="tool",
             name="read_file",
             started_at=1,
@@ -277,14 +297,14 @@ class TestWriterNeverBreaksMainFlow:
         """
         w, _ = self._mk()
         # 不 await 也能调用
-        w.submit(self._span())
+        w.submit(self._span(trace_session))
         assert w._q.qsize() == 1
 
     async def test_db_failure_does_not_raise(self) -> None:
         """写库失败只记 warning，绝不上抛。"""
         w, _ = self._mk(fail=True)
         w.start()
-        w.submit(self._span())
+        w.submit(self._span(trace_session))
         await asyncio.sleep(0.05)
         assert w.stats.failed >= 1
         assert w.stats.written == 0
@@ -304,10 +324,10 @@ class TestWriterNeverBreaksMainFlow:
 
         w = TraceWriter(sm)  # type: ignore[arg-type]
         w.start()
-        w.submit(self._span("bad"))
+        w.submit(self._span(trace_session, "bad"))
         await asyncio.sleep(0.05)
         state["fail"] = False
-        w.submit(self._span("good"))
+        w.submit(self._span(trace_session, "good"))
         await asyncio.sleep(0.05)
         assert w.stats.failed >= 1
         assert w.stats.written >= 1
@@ -333,8 +353,8 @@ class TestWriterNeverBreaksMainFlow:
         """
         w, made = self._mk()
         w.start()
-        w.submit(self._span("a"))
-        w.submit(self._span("b"))
+        w.submit(self._span(trace_session, "a"))
+        w.submit(self._span(trace_session, "b"))
         await asyncio.sleep(0.05)
         # 每条一个新 session
         assert len(made) >= 2
@@ -361,7 +381,7 @@ class TestWriterNeverBreaksMainFlow:
         saved = mod._writer
         mod._writer = None
         try:
-            mod.submit(self._span())  # 不抛就对了
+            mod.submit(self._span(trace_session))  # 不抛就对了
         finally:
             mod._writer = saved
 
@@ -374,6 +394,7 @@ class TestSpanTreeAndCleanup:
         db: Any,
         sid: str,
         *,
+        session_id: str,
         run_id: str = "r1",
         parent: str | None = None,
         depth: int = 0,
@@ -387,7 +408,7 @@ class TestSpanTreeAndCleanup:
             Span(
                 id=sid,
                 run_id=run_id,
-                session_id="s1",
+                session_id=session_id,
                 parent_span_id=parent,
                 depth=depth,
                 kind=kind,
@@ -398,14 +419,14 @@ class TestSpanTreeAndCleanup:
             )
         )
 
-    async def test_tree_reconstruction(self, db: Any) -> None:
+    async def test_tree_reconstruction(self, db: Any, trace_session: str) -> None:
         from app.modules.trace import service
 
         # agent(root) → llm, tool → 子 tool
-        await self._add_span(db, "root", kind="agent", started=1)
-        await self._add_span(db, "llm1", parent="root", depth=1, kind="llm", started=2)
-        await self._add_span(db, "tool1", parent="root", depth=1, started=3)
-        await self._add_span(db, "sub1", parent="tool1", depth=2, started=4)
+        await self._add_span(db, "root", session_id=trace_session, kind="agent", started=1)
+        await self._add_span(db, "llm1", session_id=trace_session, parent="root", depth=1, kind="llm", started=2)
+        await self._add_span(db, "tool1", session_id=trace_session, parent="root", depth=1, started=3)
+        await self._add_span(db, "sub1", session_id=trace_session, parent="tool1", depth=2, started=4)
         await db.commit()
 
         roots = await service.get_span_tree(db, "r1")
@@ -415,7 +436,9 @@ class TestSpanTreeAndCleanup:
         tool_node = next(c for c in roots[0].children if c.span.id == "tool1")
         assert [c.span.id for c in tool_node.children] == ["sub1"]
 
-    async def test_orphan_span_attached_to_root_not_dropped(self, db: Any) -> None:
+    async def test_orphan_span_attached_to_root_not_dropped(
+        self, db: Any, trace_session: str
+    ) -> None:
         """
         父 span 不在本 run 里时挂到根上，不丢掉。
 
@@ -424,13 +447,15 @@ class TestSpanTreeAndCleanup:
         """
         from app.modules.trace import service
 
-        await self._add_span(db, "orphan", parent="nonexistent", depth=3)
+        await self._add_span(db, "orphan", session_id=trace_session, parent="nonexistent", depth=3)
         await db.commit()
         roots = await service.get_span_tree(db, "r1")
         assert len(roots) == 1
         assert roots[0].span.id == "orphan"
 
-    async def test_tree_to_dict_exposes_truncation(self, db: Any) -> None:
+    async def test_tree_to_dict_exposes_truncation(
+        self, db: Any, trace_session: str
+    ) -> None:
         """
         截断事实要出现在 API 响应里 —— 否则前端无法提示"内容不全"。
         """
@@ -441,7 +466,7 @@ class TestSpanTreeAndCleanup:
             Span(
                 id="sp1",
                 run_id="r1",
-                session_id="s1",
+                session_id=trace_session,
                 kind="tool",
                 name="x",
                 started_at=1,
@@ -456,7 +481,9 @@ class TestSpanTreeAndCleanup:
         assert d[0]["output_truncated"] is True
         assert d[0]["output_bytes"] == 99999
 
-    async def test_has_price_distinguishes_zero_from_unpriced(self, db: Any) -> None:
+    async def test_has_price_distinguishes_zero_from_unpriced(
+        self, db: Any, trace_session: str
+    ) -> None:
         """
         has_price 让前端能区分"零成本"和"没配价"。
 
@@ -470,7 +497,7 @@ class TestSpanTreeAndCleanup:
             Span(
                 id="priced",
                 run_id="r1",
-                session_id="s1",
+                session_id=trace_session,
                 kind="llm",
                 name="m",
                 started_at=1,
@@ -481,7 +508,7 @@ class TestSpanTreeAndCleanup:
             Span(
                 id="unpriced",
                 run_id="r1",
-                session_id="s1",
+                session_id=trace_session,
                 kind="llm",
                 name="m",
                 started_at=2,
@@ -523,7 +550,9 @@ class TestSpanTreeAndCleanup:
         assert "record_span(" in src, "agent span 没落库，会产生孤儿 span"
         assert "new_span(" not in src, "又用回 new_span 了，它不写表"
 
-    async def test_cleanup_removes_old_only(self, db: Any) -> None:
+    async def test_cleanup_removes_old_only(
+        self, db: Any, trace_session: str
+    ) -> None:
         """
         TTL 清理。常见实现没做 —— 落库了就必须管清理，
         否则这张表会无声长到几百 MB（span 增速是消息表的 5~10 倍）。
@@ -534,13 +563,13 @@ class TestSpanTreeAndCleanup:
 
         now = now_ms()
         old = now - 30 * 86_400_000
-        await self._add_span(db, "old_span", created=old)
-        await self._add_span(db, "new_span", created=now)
+        await self._add_span(db, "old_span", session_id=trace_session, created=old)
+        await self._add_span(db, "new_span", session_id=trace_session, created=now)
         db.add(
-            Run(id="old_run", session_id="s1", started_at=old, created_at=old, updated_at=old)
+            Run(id="old_run", session_id=trace_session, started_at=old, created_at=old, updated_at=old)
         )
         db.add(
-            Run(id="new_run", session_id="s1", started_at=now, created_at=now, updated_at=now)
+            Run(id="new_run", session_id=trace_session, started_at=now, created_at=now, updated_at=now)
         )
         await db.commit()
 
@@ -551,20 +580,22 @@ class TestSpanTreeAndCleanup:
         remaining = await service.get_span_tree(db, "r1")
         assert [n.span.id for n in remaining] == ["new_span"]
 
-    async def test_stats(self, db: Any) -> None:
+    async def test_stats(
+        self, db: Any, trace_session: str
+    ) -> None:
         from app.modules.trace import service
         from app.modules.trace.models import Run
 
         db.add(
             Run(
                 id="r1",
-                session_id="s1",
+                session_id=trace_session,
                 started_at=1,
                 total_tokens=500,
                 cost_usd=0.002,
             )
         )
-        await self._add_span(db, "sp1")
+        await self._add_span(db, "sp1", session_id=trace_session)
         await db.commit()
         s = await service.stats(db)
         assert s["runs"] == 1
@@ -573,15 +604,17 @@ class TestSpanTreeAndCleanup:
 
 
 class TestRunRollup:
-    async def test_run_record_shape(self) -> None:
+    async def test_run_record_shape(self, trace_session: str) -> None:
         """run 记录带 parent_run_id，用于成本上卷。"""
         r = RunRecord(
-            id="r1", session_id="s1", started_at=1, parent_run_id="r0", total_tokens=100
+            id="r1", session_id=trace_session, started_at=1, parent_run_id="r0", total_tokens=100
         )
         assert r.parent_run_id == "r0"
         assert r.total_tokens == 100
 
-    async def test_span_totals_include_subagent(self, db: Any) -> None:
+    async def test_span_totals_include_subagent(
+        self, db: Any, trace_session: str
+    ) -> None:
         """
         从 span 汇总时必须包含子代理的量，并按智能体拆开。
 
@@ -598,7 +631,7 @@ class TestRunRollup:
             return Span(
                 id=sid,
                 run_id="r1",
-                session_id="s1",
+                session_id=trace_session,
                 kind=kind,
                 name="m",
                 agent_name=agent,
@@ -622,7 +655,9 @@ class TestRunRollup:
         assert by["researcher"]["total_tokens"] == 1500
         assert by["main"]["llm_calls"] == 2
 
-    async def test_child_tokens_rollup_to_parent(self, db: Any) -> None:
+    async def test_child_tokens_rollup_to_parent(
+        self, db: Any, trace_session: str
+    ) -> None:
         """
         子 run 的 token 上卷到父 run。
 
@@ -647,13 +682,13 @@ class TestRunRollup:
 
         # 父 run 先落库
         await w._write(
-            RunRecord(id="parent", session_id="s1", started_at=1, total_tokens=100, cost_usd=0.001)
+            RunRecord(id="parent", session_id=trace_session, started_at=1, total_tokens=100, cost_usd=0.001)
         )
         # 两个子 run 结束
         await w._write(
             RunRecord(
                 id="c1",
-                session_id="s1",
+                session_id=trace_session,
                 started_at=2,
                 parent_run_id="parent",
                 status="done",
@@ -664,7 +699,7 @@ class TestRunRollup:
         await w._write(
             RunRecord(
                 id="c2",
-                session_id="s1",
+                session_id=trace_session,
                 started_at=3,
                 parent_run_id="parent",
                 status="done",
@@ -684,7 +719,9 @@ class TestRunRollup:
         # 自身的 total 不被污染 —— 要能分开看"我自己花了多少"和"总共花了多少"
         assert parent.total_tokens == 100
 
-    async def test_rollup_skips_running_child(self, db: Any) -> None:
+    async def test_rollup_skips_running_child(
+        self, db: Any, trace_session: str
+    ) -> None:
         """还在跑的子 run 不上卷，否则会重复计。"""
         from app.modules.trace.models import Run
         from app.modules.trace.writer import TraceWriter
@@ -701,11 +738,11 @@ class TestRunRollup:
                 return None
 
         w = TraceWriter(lambda: _Ctx(db))  # type: ignore[arg-type]
-        await w._write(RunRecord(id="p", session_id="s1", started_at=1))
+        await w._write(RunRecord(id="p", session_id=trace_session, started_at=1))
         await w._write(
             RunRecord(
                 id="c",
-                session_id="s1",
+                session_id=trace_session,
                 started_at=2,
                 parent_run_id="p",
                 status="running",
@@ -715,7 +752,9 @@ class TestRunRollup:
         p = (await db.execute(select(Run).where(Run.id == "p"))).scalar_one()
         assert p.rollup_total_tokens == 0
 
-    async def test_rollup_missing_parent_is_safe(self, db: Any) -> None:
+    async def test_rollup_missing_parent_is_safe(
+        self, db: Any, trace_session: str
+    ) -> None:
         """
         父 run 还没落库时（子先结束的竞态）丢掉这次上卷，不抛异常。
 
@@ -738,7 +777,7 @@ class TestRunRollup:
         await w._write(
             RunRecord(
                 id="orphan",
-                session_id="s1",
+                session_id=trace_session,
                 started_at=1,
                 parent_run_id="ghost",
                 status="done",

@@ -34,7 +34,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Float, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infra.db.base import Base, TimestampMixin
@@ -50,7 +50,11 @@ class Run(Base, TimestampMixin):
     __tablename__ = "run"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
 
     # 子代理的 run 挂在父 run 下。用于成本上卷 ——
     # 常见实现答不出"这次任务总共花了多少钱"，因为它们要么在前端
@@ -107,7 +111,11 @@ class Span(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     run_id: Mapped[str] = mapped_column(String(32), nullable=False)
-    session_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     parent_span_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
