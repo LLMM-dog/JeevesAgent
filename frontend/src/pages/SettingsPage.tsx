@@ -9,6 +9,7 @@ import MemoryPanel from "@/components/MemoryPanel";
 import VisionPanel from "@/components/VisionPanel";
 import SkillsPanel from "@/components/SkillsPanel";
 import TracePanel from "@/components/TracePanel";
+import PersonaPanel from "@/components/PersonaPanel";
 import WhitelistPanel from "@/components/WhitelistPanel";
 import { api } from "@/lib/api";
 import { ApiError } from "@/lib/sse";
@@ -253,6 +254,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
 // percent-encode 成一长串乱码，分享链接和翻日志时都不可读。
 const TABS = [
   { key: "models", label: "模型" },
+  { key: "persona", label: "人格与偏好" },
   { key: "skills", label: "技能" },
   { key: "mcp", label: "MCP" },
   { key: "memory", label: "记忆" },
@@ -522,6 +524,12 @@ export default function SettingsPage() {
         {active === "memory" && (
           <div {...panelProps("memory")}>
             <MemoryPanel />
+          </div>
+        )}
+
+        {active === "persona" && (
+          <div {...panelProps("persona")}>
+            <PersonaPanel />
           </div>
         )}
 

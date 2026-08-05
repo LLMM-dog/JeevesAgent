@@ -40,6 +40,12 @@ class Session(Base, TimestampMixin):
     # 空串可以直接 == ""，少一类查询写错的机会。
     work_dir: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
+    # 这次对话用哪个模型。空串 = 跟随功能位绑定的默认模型。
+    #
+    # 不加外键：模型被删掉时这里会悬空，但那时回落到默认绑定就行，
+    # 比级联删掉整个会话好得多。取用时校验存在性。
+    model_pk: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+
     workspace_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("workspace.id"), nullable=False
     )

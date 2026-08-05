@@ -52,6 +52,8 @@ class PreparedChat:
     session_id: str
     run_id: str
     workspace_path: str
+    # 会话选的模型。空串 = 跟随功能位绑定
+    model_pk: str
     user_message_id: str
     title_empty: bool
     # 本轮的图片 data URL。只在这一轮进 LLM 请求，不进历史 ——
@@ -145,7 +147,9 @@ class ChatService:
 
             # 预检 chat 位能否解析出模型，结果丢弃。
             # 目的是让"未配置模型"返回 400 而不是流中途的 error 事件。
-            await provider_service.resolve(db, purpose="chat")
+            await provider_service.resolve(
+                db, purpose="chat", override_pk=session.model_pk or ""
+            )
 
             if run_registry.active_run_of(session_id) is not None:
                 raise ConflictError(
@@ -188,6 +192,7 @@ class ChatService:
             session_id=session_id,
             run_id=new_run_id(),
             workspace_path=work_root,
+            model_pk=session.model_pk or "",
             user_message_id=user_mid,
             title_empty=not session.title,
             images=checked,
@@ -278,6 +283,7 @@ class ChatService:
                                 title_empty=prep.title_empty,
                                 images=prep.images,
                                 refs=prep.refs,
+                                model_pk=prep.model_pk,
                             )
             except asyncio.CancelledError:
                 await emit(Ev.CANCELLED, run_id=run_id, partial_saved=True)
@@ -357,8 +363,20 @@ class ChatService:
         title_empty: bool,
         images: list[str] | None = None,
         refs: list[dict[str, Any]] | None = None,
+        model_pk: str = "",
     ) -> None:
-        model = await provider_service.resolve(db, purpose="chat")
+        # 【必须把 model_pk 传进来】。
+        #
+        # 上面 prepare() 里也有一次 resolve，但那只是【预检】——
+        # 提前发现"没配模型"好在 400 里报出来，而不是等流开始后
+        # 才失败。真正跑的是这里。
+        #
+        # 只改预检不改这里的话：切换模型在界面上成功了、会话字段也存了，
+        # 但实际调用的还是默认模型 —— 而追踪里记的是真实用的那个，
+        # 所以现象是"切了但追踪显示没切"，很容易以为是追踪的 bug。
+        model = await provider_service.resolve(
+            db, purpose="chat", override_pk=model_pk
+        )
         registry = self._base_registry.forked()
 
         # 技能清单每轮都从 registry 现取，不缓存在 service 上 ——

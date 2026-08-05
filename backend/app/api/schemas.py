@@ -34,6 +34,8 @@ class SessionDetail(SessionBrief):
     approval_mode: str
     # 空串 = 未设置。前端据此显示"选择工作目录"的提示
     work_dir: str = ""
+    # 空串表示跟随功能位绑定
+    model_pk: str = ""
     private_mode: bool
     amnesia_mode: bool
     vision_mode: bool
@@ -59,6 +61,8 @@ class PatchSessionRequest(BaseModel):
     # 用 str 而不是 Path：Path 在 JSON 里没有对应类型，
     # pydantic 会把 Windows 反斜杠当转义符处理。
     work_dir: str | None = None
+    # 这次对话用哪个模型。传空串 = 回到默认绑定
+    model_pk: str | None = None
     pinned: bool | None = None
     approval_mode: Literal["manual", "auto"] | None = None
     private_mode: bool | None = None
@@ -180,13 +184,49 @@ class ProviderListResponse(BaseModel):
 class ModelOut(BaseModel):
     id: str
     provider_id: str
+    # 供应商名。对话页的切换菜单要显示"供应商 / 模型"，
+    # 只有 provider_id 的话前端还得再查一次
+    provider_name: str = ""
     model_id: str
     display_name: str
     context_window: int
     window_source: str
     supports_vision: str
     supports_tools: str
+    # 禁用的模型不出现在对话页快捷切换菜单里，但配置保留
     enabled: bool
+    price_in_per_1m: float | None = None
+    price_out_per_1m: float | None = None
+
+
+class ModelCreate(BaseModel):
+    """往已有供应商下加一个模型。不用重建供应商。"""
+
+    provider_id: str
+    model_id: str = Field(..., min_length=1)
+    display_name: str = ""
+    context_window: int = Field(32768, ge=1024)
+
+
+class ModelPatch(BaseModel):
+    enabled: bool | None = None
+    display_name: str | None = None
+    context_window: int | None = None
+    price_in_per_1m: float | None = None
+    price_out_per_1m: float | None = None
+
+
+class PersonaFile(BaseModel):
+    key: str
+    filename: str
+    label: str
+    hint: str
+    content: str
+    exists: bool = True
+
+
+class PersonaUpdate(BaseModel):
+    content: str
 
 
 class ModelListResponse(BaseModel):

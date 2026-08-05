@@ -29,7 +29,7 @@ from app.infra.sandbox.factory import get_sandbox
 from app.modules.agent import run_registry
 from app.modules.agent.chat_service import ChatService
 from app.modules.provider import service as provider_service
-from app.modules.provider.models import PathWhitelist
+from app.modules.provider.models import Model, PathWhitelist
 from app.modules.session import repo
 from app.modules.session.models import Message, Session
 from fastapi import APIRouter, Depends, Query, Response
@@ -62,6 +62,7 @@ def _detail(s: Session) -> SessionDetail:
         amnesia_mode=bool(s.amnesia_mode),
         vision_mode=bool(s.vision_mode),
         work_dir=s.work_dir or "",
+        model_pk=s.model_pk or "",
     )
 
 
@@ -199,6 +200,30 @@ async def export_session(
     )
 
 
+async def _check_model_pk(db: AsyncSession, raw: str) -> str:
+    """
+    校验会话选的模型。空串 = 回到功能位绑定的默认模型。
+
+    ## 为什么禁用的模型要拒绝
+
+    禁用的模型不出现在切换菜单里，所以能传上来说明前端拿的是过期
+    数据。这时报错比静默接受好 —— 否则用户以为切成功了，
+    实际下一轮又回到默认模型，而没有任何提示。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    m = (await db.execute(select(Model).where(Model.id == raw))).scalars().first()
+    if m is None:
+        raise BadRequestError("模型不存在", code="model_not_found")
+    if not m.enabled:
+        raise BadRequestError(
+            f"{m.display_name or m.model_id} 已被禁用，先在设置里启用它",
+            code="model_disabled",
+        )
+    return raw
+
+
 async def _resolve_work_dir(db: AsyncSession, session_id: str, raw: str) -> str:
     """
     校验工作目录，并把它加进该会话的白名单。
@@ -287,6 +312,8 @@ async def patch_session(
         s.pinned = 1 if data["pinned"] else 0
     if "work_dir" in data and data["work_dir"] is not None:
         s.work_dir = await _resolve_work_dir(db, session_id, data["work_dir"])
+    if "model_pk" in data and data["model_pk"] is not None:
+        s.model_pk = await _check_model_pk(db, data["model_pk"])
     if "approval_mode" in data and data["approval_mode"] is not None:
         s.approval_mode = data["approval_mode"]
         # 必须【立即】对正在运行的 run 生效。走模块级 dict 而非 ContextVar ——

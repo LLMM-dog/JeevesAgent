@@ -108,6 +108,8 @@ interface ChatState {
    * RefPicker 的文件搜索也依赖它，两处必须看到同一个值。
    */
   workDir: string;
+  /** 这次对话用哪个模型。空串 = 跟随功能位绑定 */
+  modelPk: string;
   approvalMode: "manual" | "auto";
   /** 视觉模式。开启后可发图片，但模型必须先通过核验 */
   visionMode: boolean;
@@ -183,6 +185,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   compacting: null,
   approval: null,
   workDir: "",
+  modelPk: "",
   approvalMode: "manual",
   visionMode: false,
   artifact: null,
@@ -227,6 +230,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         approvalMode: session.approval_mode ?? "manual",
         // 空串兜底：老会话在迁移前没有这个字段
         workDir: session.work_dir ?? "",
+        modelPk: session.model_pk ?? "",
       visionMode: session.vision_mode ?? false,
       });
     } catch (err) {

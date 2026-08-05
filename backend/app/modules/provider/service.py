@@ -195,10 +195,15 @@ async def list_bindings(db: AsyncSession) -> list[tuple[ModelBinding, Model, Pro
 
 
 async def resolve(
-    db: AsyncSession, *, purpose: str = "chat", agent_name: str = ""
+    db: AsyncSession,
+    *,
+    purpose: str = "chat",
+    agent_name: str = "",
+    override_pk: str = "",
 ) -> ResolvedModel:
     """
     解析顺序：
+      0. override_pk（会话自己选的模型）—— 只对 purpose="chat" 生效
       1. (agent_name, purpose) 精确匹配
       2. ("", purpose) 全局默认
       3. ("", "chat") 兜底
@@ -206,7 +211,38 @@ async def resolve(
 
     降级时发 model_fallback 事件 —— 降级必须可见。静默降级会让用户
     以为在用配好的模型，实际用的是另一个（可能贵 10 倍或弱很多）。
+
+    ## override_pk 为什么只管 chat
+
+    用户在对话页切的是"这轮对话用哪个模型"。标题生成和上下文压缩
+    是后台动作，用便宜模型是有意的配置 —— 跟着切会让每次压缩都
+    烧贵模型的 token，而用户完全看不到这件事发生。
+
+    ## 为什么找不到时静默回落
+
+    模型可能被删了（session.model_pk 没有外键，允许悬空）。
+    这时报错会让整个会话打不开，而回落到默认绑定至少能继续用。
     """
+    if override_pk and purpose == "chat":
+        m = (
+            await db.execute(select(Model).where(Model.id == override_pk))
+        ).scalars().first()
+        # 禁用的也放行：用户可能先在对话里选了它，之后才在设置页禁用。
+        # 这时打断正在进行的对话比让它继续用更糟。
+        if m is not None:
+            p_ = await get_provider(db, m.provider_id)
+            return ResolvedModel(
+                model_id=m.model_id,
+                base_url=p_.base_url,
+                api_key=decrypt(p_.api_key_cipher),
+                context_window=m.context_window,
+                supports_vision=m.supports_vision == "true",
+                provider_name=p_.name,
+                purpose=purpose,
+                price_in_per_1m=m.price_in_per_1m,
+                price_out_per_1m=m.price_out_per_1m,
+            )
+
     attempts: list[tuple[str, str]] = []
     if agent_name:
         attempts.append((agent_name, purpose))

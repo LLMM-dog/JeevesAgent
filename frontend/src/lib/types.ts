@@ -27,6 +27,8 @@ export interface SessionBrief {
 }
 
 export interface SessionDetail extends SessionBrief {
+  /** 这次对话用哪个模型。空串 = 跟随功能位绑定 */
+  model_pk: string;
   /** 这次对话的工作目录。空串 = 未设置 */
   work_dir: string;
   approval_mode: "manual" | "auto";
@@ -513,4 +515,32 @@ export interface BrowseResult {
   entries: BrowseEntry[];
   /** 常用起点：盘符、主目录、项目目录 */
   roots: BrowseEntry[];
+}
+
+// ── 模型与人格 ──
+
+export interface ModelItem {
+  id: string;
+  provider_id: string;
+  /** 供应商名，用于菜单里显示"供应商 / 模型" */
+  provider_name: string;
+  model_id: string;
+  display_name: string;
+  context_window: number;
+  window_source: string;
+  supports_vision: string;
+  supports_tools: string;
+  /** 禁用的不出现在对话页切换菜单里，但配置保留 */
+  enabled: boolean;
+  price_in_per_1m: number | null;
+  price_out_per_1m: number | null;
+}
+
+export interface PersonaFile {
+  key: string;
+  filename: string;
+  label: string;
+  hint: string;
+  content: string;
+  exists: boolean;
 }

@@ -36,6 +36,7 @@ from app.modules.agent.tools.base import ToolRegistry
 from app.modules.agent.tools.todo import _serialize, _stats, load_active
 from app.modules.memory import service as memory_service
 from app.modules.provider import service as ps
+from app.modules.provider.models import Provider
 from app.modules.session import repo
 from app.modules.session.models import Session
 from app.modules.skill import macros as macro_registry
@@ -139,14 +140,32 @@ async def delete_provider(provider_id: str, db: AsyncSession = Depends(get_db)) 
 
 @router.get("/models", response_model=ModelListResponse, summary="模型列表")
 async def list_models(
-    provider_id: str | None = Query(None), db: AsyncSession = Depends(get_db)
+    provider_id: str | None = Query(None),
+    enabled_only: bool = Query(
+        False, description="只返回已启用的。对话页的切换菜单用这个"
+    ),
+    db: AsyncSession = Depends(get_db),
 ) -> ModelListResponse:
+    """
+    模型列表。
+
+    带 enabled_only 时只返回启用的 —— 对话页的快捷切换菜单用它。
+    设置页要看到全部（包括禁用的），否则用户没法把它重新启用。
+    """
     rows = await ps.list_models(db, provider_id)
+    if enabled_only:
+        rows = [m for m in rows if m.enabled]
+
+    # 一次查出所有供应商名，避免每个模型查一次
+    pmap = {
+        p.id: p.name for p in (await db.execute(select(Provider))).scalars()
+    }
     return ModelListResponse(
         items=[
             ModelOut(
                 id=m.id,
                 provider_id=m.provider_id,
+                provider_name=pmap.get(m.provider_id, ""),
                 model_id=m.model_id,
                 display_name=m.display_name,
                 context_window=m.context_window,
@@ -154,6 +173,8 @@ async def list_models(
                 supports_vision=m.supports_vision,
                 supports_tools=m.supports_tools,
                 enabled=bool(m.enabled),
+                price_in_per_1m=m.price_in_per_1m,
+                price_out_per_1m=m.price_out_per_1m,
             )
             for m in rows
         ]

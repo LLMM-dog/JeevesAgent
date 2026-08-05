@@ -15,7 +15,9 @@ import type {
   MemoryOut,
   MessageOut,
   MetaResponse,
+  ModelItem,
   ModelOut,
+  PersonaFile,
   ProbeResponse,
   ProviderOut,
   Purpose,
@@ -201,6 +203,54 @@ export const api = {
       `/ref-candidates?kind=${kind}&q=${encodeURIComponent(q)}` +
         (sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""),
     ),
+
+// ── 模型个体管理 ──
+
+  /**
+   * 模型列表。
+   *
+   * enabledOnly 给对话页的切换菜单用 —— 设置页要看到全部（含禁用的），
+   * 否则用户没法把它重新启用。
+   */
+  models: (opts?: { providerId?: string; enabledOnly?: boolean }) => {
+    const q = new URLSearchParams();
+    if (opts?.providerId) q.set("provider_id", opts.providerId);
+    if (opts?.enabledOnly) q.set("enabled_only", "true");
+    const s = q.toString();
+    return request<{ items: ModelItem[] }>(`/models${s ? `?${s}` : ""}`);
+  },
+
+  addModel: (body: {
+    provider_id: string;
+    model_id: string;
+    display_name?: string;
+    context_window?: number;
+  }) => request<ModelItem>("/models", { method: "POST", body: JSON.stringify(body) }),
+
+  patchModel: (
+    pk: string,
+    body: { enabled?: boolean; display_name?: string; context_window?: number },
+  ) =>
+    request<ModelItem>(`/models/${pk}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  deleteModel: (pk: string) =>
+    request<{ ok: boolean }>(`/models/${pk}`, { method: "DELETE" }),
+
+  // ── 人格与偏好 ──
+
+  personas: () => request<{ items: PersonaFile[] }>("/personas"),
+
+  savePersona: (key: string, content: string) =>
+    request<PersonaFile>(`/personas/${key}`, {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
+
+  resetPersona: (key: string) =>
+    request<PersonaFile>(`/personas/${key}/reset`, { method: "POST" }),
 
   // ── 文件访问：白名单与目录浏览 ──
 
@@ -506,6 +556,8 @@ export const api = {
   patchSession: (
     id: string,
     body: Partial<{
+      /** 这次对话用哪个模型。传空串回到默认绑定 */
+      model_pk: string;
       /** 这次对话的工作目录。传空串清除 */
       work_dir: string;
       title: string;
