@@ -132,6 +132,8 @@ interface ChatState {
   setApprovalMode: (mode: "manual" | "auto") => Promise<void>;
   /** 设置这次对话的工作目录。传空串清除 */
   setWorkDir: (dir: string) => Promise<void>;
+  /** 设置这次对话用哪个模型。传空串回到默认绑定 */
+  setWorkModel: (pk: string) => Promise<void>;
   setVisionMode: (on: boolean) => Promise<void>;
 }
 
@@ -328,6 +330,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (err instanceof ApiError && err.status === 404) return;
       set({ banner: toBanner(err) });
     }
+  },
+
+  async setWorkModel(pk) {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    // 用后端返回值而不是本地乐观更新：后端会拒绝禁用的模型，
+    // 乐观更新的话按钮先变成新模型、请求失败后又变回去，
+    // 那种闪回比一开始就不变更让人困惑。
+    const s = await api.patchSession(sessionId, { model_pk: pk });
+    set({ modelPk: s.model_pk ?? "" });
   },
 
   async setWorkDir(dir) {

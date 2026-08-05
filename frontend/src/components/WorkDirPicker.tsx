@@ -4,6 +4,7 @@ import { ChevronUp, Folder, FolderOpen, X } from "lucide-react";
 import clsx from "clsx";
 
 import { api } from "../lib/api";
+import { useChatStore } from "../store/chat";
 import type { BrowseEntry } from "../lib/types";
 
 /**
@@ -48,8 +49,13 @@ export function WorkDirPicker({
     enabled: open,
   });
 
+  // 【必须走 store 的 setter】。workDir 存在 zustand 里，
+  // 而 invalidateQueries 只影响 react-query 的缓存 —— 两套状态互不相干。
+  // 只 invalidate 的结果是库里改了但按钮上的文字还是旧的。
+  const setWorkDirInStore = useChatStore((s) => s.setWorkDir);
+
   const save = useMutation({
-    mutationFn: (dir: string) => api.patchSession(sessionId, { work_dir: dir }),
+    mutationFn: (dir: string) => setWorkDirInStore(dir),
     onSuccess: () => {
       // 会话详情和白名单都要刷 —— 设工作目录会顺手加一条白名单
       qc.invalidateQueries({ queryKey: ["session", sessionId] });
@@ -60,7 +66,27 @@ export function WorkDirPicker({
     onError: (e: Error) => setErr(e.message),
   });
 
-  const label = workDir ? workDir.split(/[\\/]/).filter(Boolean).pop() : null;
+  // 折叠时直接显示当前目录，用户不用点开就知道。
+  //
+  // 优先保留【尾部】：路径的信息量集中在末尾几段（项目名、子目录），
+  // 而开头往往是 C:\Users\某某\Documents 这类所有路径都一样的前缀。
+  // 从头截断的话十个目录看起来全都一样。
+  const shortDir = (() => {
+    if (!workDir) return null;
+    const MAX = 34;
+    if (workDir.length <= MAX) return workDir;
+    // 按分隔符切，从后往前塞，塞不下就停
+    const parts = workDir.split(/[\\/]/).filter(Boolean);
+    let out = "";
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const next = out ? parts[i] + "\\" + out : parts[i];
+      if (next.length + 1 > MAX) break;
+      out = next;
+    }
+    // 单个目录名本身就超长时，硬截尾部
+    if (!out) out = workDir.slice(-MAX);
+    return "…\\" + out;
+  })();
 
   return (
     <div className="relative">
@@ -75,7 +101,9 @@ export function WorkDirPicker({
         aria-expanded={open}
       >
         {workDir ? <FolderOpen size={12} /> : <Folder size={12} />}
-        <span className="truncate">{label ?? "选择工作目录"}</span>
+        <span className="truncate">
+          {shortDir ? `当前：${shortDir}` : "选择工作目录"}
+        </span>
         <ChevronUp
           size={12}
           className={clsx("shrink-0 transition-transform", !open && "rotate-180")}

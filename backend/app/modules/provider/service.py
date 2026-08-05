@@ -10,7 +10,7 @@ from typing import Any
 import structlog
 from app.core.crypto import decrypt, encrypt, key_hint
 from app.core.events import Ev, emit
-from app.core.exceptions import ConflictError, NoModelBoundError, NotFoundError
+from app.core.exceptions import NoModelBoundError, NotFoundError
 from app.core.ids import binding_id, model_id, provider_id
 from app.core.time import now_ms
 from app.infra.llm.openai_compat import normalize_base_url
@@ -70,22 +70,58 @@ async def create_provider(
     api_key: str,
     models: list[dict[str, Any]],
 ) -> Provider:
-    """一个事务里建 provider + 所有 model。"""
-    existing = (
+    """
+    建 provider + 它的 model。同名或同端点则【并入已有分组】。
+
+    ## 为什么不再报"名称已存在"
+
+    原来同名直接 409。但用户的实际操作路径是：先加一个端点，之后想
+    再加几个模型，于是又走一次「添加供应商」——得到"无法添加"。
+    而他并不想新建供应商，只是想往这个端点下加模型。
+
+    现在的行为：
+
+      - 同名，或者同 base_url + 同 Key 尾号 → 并入那个分组
+      - 并入时更新 Key（用户可能就是来换 Key 的）
+      - 模型按 model_id 去重，已有的静默跳过
+
+    判据里带 Key 尾号是有意的：同一个端点用两个不同的 Key
+    （比如个人额度和团队额度）是合理场景，那种情况该分成两组。
+    """
+    norm_url = normalize_base_url(base_url)
+    hint = key_hint(api_key)
+
+    # 先按名字找，再按"同端点同 Key"找
+    p = (
         await db.execute(select(Provider).where(Provider.name == name))
     ).scalar_one_or_none()
-    if existing is not None:
-        raise ConflictError(f"供应商名称已存在：{name}", code="provider_exists")
+    if p is None:
+        p = (
+            await db.execute(
+                select(Provider).where(
+                    Provider.base_url == norm_url, Provider.key_hint == hint
+                )
+            )
+        ).scalars().first()
 
-    p = Provider(
-        id=provider_id(),
-        name=name,
-        base_url=normalize_base_url(base_url),
-        api_key_cipher=encrypt(api_key),
-        key_hint=key_hint(api_key),
-        last_probe_at=now_ms(),
-    )
-    db.add(p)
+    if p is None:
+        p = Provider(
+            id=provider_id(),
+            name=name,
+            base_url=norm_url,
+            api_key_cipher=encrypt(api_key),
+            key_hint=hint,
+            last_probe_at=now_ms(),
+        )
+        db.add(p)
+    else:
+        # 并入：更新端点和 Key。用户重复走这个流程通常是因为
+        # 换了 Key 或者端点变了，沿用旧的会让他以为改了但没生效。
+        p.base_url = norm_url
+        p.api_key_cipher = encrypt(api_key)
+        p.key_hint = hint
+        p.last_probe_at = now_ms()
+
     # 【必须显式 flush】。本项目不声明 relationship()（async 下惰性加载
     # 会抛 MissingGreenlet，是个更大的坑），而没有 relationship 时
     # SQLAlchemy 的 unit of work 不保证父行先插 —— 实测它会先 INSERT model
@@ -93,10 +129,23 @@ async def create_provider(
     # 报错指向 model 表，完全不提示"顺序不对"。
     await db.flush()
 
+    # 已有的模型 id，用来去重。
+    #
+    # 不去重的话 (provider_id, model_id) 上的唯一索引会抛
+    # IntegrityError，而那个报错指向数据库约束，
+    # 完全不提示"这个模型你已经加过了"。
+    have = {
+        m.model_id
+        for m in (
+            await db.execute(select(Model).where(Model.provider_id == p.id))
+        ).scalars()
+    }
+
     for m in models:
         mid = str(m.get("model_id", "")).strip()
-        if not mid:
+        if not mid or mid in have:
             continue
+        have.add(mid)
         window = m.get("context_window")
         if window:
             source = "manual"

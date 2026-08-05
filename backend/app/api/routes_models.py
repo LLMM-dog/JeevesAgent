@@ -30,9 +30,17 @@ from app.api.schemas import (
     PersonaUpdate,
 )
 from app.core.config import PROJECT_ROOT
-from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.core.crypto import decrypt
+from app.core.exceptions import (
+    AppError,
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+)
 from app.core.ids import model_id as new_model_id
 from app.infra.db.session import get_db
+from app.infra.llm.openai_compat import get_llm
+from app.modules.provider import service as ps
 from app.modules.provider.models import Model, ModelBinding, Provider
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -289,3 +297,60 @@ async def reset_persona(key: str) -> PersonaFile:
     return PersonaFile(
         key=key, filename=fname, label=label, hint=hint, content=content, exists=True
     )
+
+@router.get(
+    "/providers/{provider_id}/available-models",
+    response_model=dict,
+    summary="拉这个供应商可用的模型列表",
+)
+async def available_models(
+    provider_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
+    """
+    用已存的 base_url + Key 去拉模型列表。
+
+    ## 为什么需要这个而不是复用 /providers/probe
+
+    那个要求请求体里带 base_url 和 api_key。而这里的场景是"往【已有】
+    供应商下加模型"—— 端点和 Key 都已经存过了，让用户再填一遍
+    是荒谬的（而且 Key 存的是密文，前端根本拿不到明文）。
+
+    ## 返回值里标出已添加的
+
+    前端要能把已加过的置灰或打勾。不标的话用户点了才知道重复，
+    而重复添加会撞 (provider_id, model_id) 唯一索引。
+    """
+    p_ = (
+        await db.execute(select(Provider).where(Provider.id == provider_id))
+    ).scalars().first()
+    if p_ is None:
+        raise NotFoundError("供应商不存在", code="provider_not_found")
+
+    have = {
+        m.model_id
+        for m in (
+            await db.execute(select(Model).where(Model.provider_id == provider_id))
+        ).scalars()
+    }
+
+    try:
+        _, probed = await ps.probe_models(
+            get_llm(), p_.base_url, decrypt(p_.api_key_cipher)
+        )
+    except AppError:
+        # 拉取失败不该让"加模型"整个不可用 —— 用户仍然可以手填。
+        # 所以返回空列表 + 原因，而不是把错误抛给前端。
+        raise
+    return {
+        "items": [
+            {
+                "model_id": m.model_id,
+                "context_window": m.context_window,
+                "window_source": m.window_source,
+                "looks_non_chat": m.looks_non_chat,
+                # 已经加过的，前端置灰
+                "already_added": m.model_id in have,
+            }
+            for m in probed
+        ]
+    }

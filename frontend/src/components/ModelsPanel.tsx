@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 
+import { AddModelForm } from "./AddModelForm";
 import { api } from "../lib/api";
 import type { ModelItem, ProviderOut } from "../lib/types";
 
@@ -36,8 +37,6 @@ export default function ModelsPanel() {
   // 记住的是"被手动收起的组"，而不是"被展开的组"。
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [addingTo, setAddingTo] = useState<string | null>(null);
-  const [newId, setNewId] = useState("");
-  const [newWindow, setNewWindow] = useState("32768");
   const [err, setErr] = useState("");
 
   const providers = useQuery({
@@ -56,21 +55,6 @@ export default function ModelsPanel() {
     qc.invalidateQueries({ queryKey: ["bindings"] });
   };
 
-  const addModel = useMutation({
-    mutationFn: (providerId: string) =>
-      api.addModel({
-        provider_id: providerId,
-        model_id: newId.trim(),
-        context_window: Number(newWindow) || 32768,
-      }),
-    onSuccess: () => {
-      setNewId("");
-      setAddingTo(null);
-      setErr("");
-      invalidate();
-    },
-    onError: (e: Error) => setErr(e.message),
-  });
 
   const toggle = useMutation({
     mutationFn: (m: ModelItem) =>
@@ -213,55 +197,16 @@ export default function ModelsPanel() {
                   </p>
                 )}
 
-                {/* 加模型的输入行 */}
+                {/* 加模型：自动拉可用列表 + 模糊搜索 + 也能手填 */}
                 {addingTo === p.id && (
-                  <div
-                    className="flex flex-wrap items-center gap-2 border-b px-3 py-2"
-                    style={{ borderColor: "var(--color-border)" }}
-                  >
-                    <input
-                      value={newId}
-                      onChange={(e) => setNewId(e.target.value)}
-                      placeholder="模型 ID，如 gpt-4o-mini"
-                      aria-label="模型 ID"
-                      autoFocus
-                      className="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
-                      style={{
-                        borderColor: "var(--color-border)",
-                        background: "var(--color-bg)",
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && newId.trim()) addModel.mutate(p.id);
-                        if (e.key === "Escape") setAddingTo(null);
-                      }}
-                    />
-                    <input
-                      value={newWindow}
-                      onChange={(e) => setNewWindow(e.target.value)}
-                      aria-label="上下文窗口"
-                      title="上下文窗口（token）"
-                      className="w-24 rounded border px-2 py-1 text-xs"
-                      style={{
-                        borderColor: "var(--color-border)",
-                        background: "var(--color-bg)",
-                      }}
-                    />
-                    <button
-                      onClick={() => addModel.mutate(p.id)}
-                      disabled={!newId.trim() || addModel.isPending}
-                      className="rounded px-2 py-1 text-xs disabled:opacity-50"
-                      style={{ background: "var(--color-accent)", color: "#fff" }}
-                    >
-                      添加
-                    </button>
-                    <button
-                      onClick={() => setAddingTo(null)}
-                      className="rounded px-2 py-1 text-xs"
-                      style={{ color: "var(--color-muted)" }}
-                    >
-                      取消
-                    </button>
-                  </div>
+                  <AddModelForm
+                    providerId={p.id}
+                    onDone={() => {
+                      setAddingTo(null);
+                      invalidate();
+                    }}
+                    onCancel={() => setAddingTo(null)}
+                  />
                 )}
 
                 {/* 模型列表 */}

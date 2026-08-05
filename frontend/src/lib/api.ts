@@ -220,12 +220,31 @@ export const api = {
     return request<{ items: ModelItem[] }>(`/models${s ? `?${s}` : ""}`);
   },
 
+/**
+   * 拉这个供应商可用的模型列表。
+   *
+   * 用已存的端点和 Key —— 往【已有】供应商下加模型时，让用户再填一遍
+   * base_url 和 Key 是荒谬的（而且 Key 存的是密文，前端拿不到明文）。
+   *
+   * already_added 标出已加过的，前端置灰。不标的话用户点了才知道重复。
+   */
+  availableModels: (providerId: string) =>
+    request<{
+      items: {
+        model_id: string;
+        context_window: number;
+        window_source: string;
+        looks_non_chat: boolean;
+        already_added: boolean;
+      }[];
+    }>(`/providers/${providerId}/available-models`),
+
   addModel: (body: {
     provider_id: string;
     model_id: string;
     display_name?: string;
     context_window?: number;
-  }) => request<ModelItem>("/models", { method: "POST", body: JSON.stringify(body) }),
+  }) => request<ModelItem>("/models", { method: "POST", json: body }),
 
   patchModel: (
     pk: string,
@@ -233,7 +252,7 @@ export const api = {
   ) =>
     request<ModelItem>(`/models/${pk}`, {
       method: "PATCH",
-      body: JSON.stringify(body),
+      json: body,
     }),
 
   deleteModel: (pk: string) =>
@@ -246,7 +265,7 @@ export const api = {
   savePersona: (key: string, content: string) =>
     request<PersonaFile>(`/personas/${key}`, {
       method: "PUT",
-      body: JSON.stringify({ content }),
+      json: { content },
     }),
 
   resetPersona: (key: string) =>
@@ -272,13 +291,13 @@ export const api = {
   ) =>
     request<WhitelistItem>(
       "/whitelist" + (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""),
-      { method: "POST", body: JSON.stringify(body) },
+      { method: "POST", json: body },
     ),
 
   patchWhitelist: (id: string, body: { can_write?: boolean; note?: string }) =>
     request<WhitelistItem>(`/whitelist/${id}`, {
       method: "PATCH",
-      body: JSON.stringify(body),
+      json: body,
     }),
 
   deleteWhitelist: (id: string) =>
@@ -425,13 +444,13 @@ export const api = {
   createMemory: (content: string, theme: string) =>
     request<MemoryOut>("/memories", {
       method: "POST",
-      body: JSON.stringify({ content, theme }),
+      json: { content, theme },
     }),
 
   updateMemory: (id: string, body: { content?: string; theme?: string; reason?: string }) =>
     request<MemoryOut>(`/memories/${id}`, {
       method: "PATCH",
-      body: JSON.stringify(body),
+      json: body,
     }),
 
   archiveMemory: (id: string) =>

@@ -4,6 +4,7 @@ import { Check, ChevronUp, Cpu } from "lucide-react";
 import clsx from "clsx";
 
 import { api } from "../lib/api";
+import { useChatStore } from "../store/chat";
 import type { ModelItem } from "../lib/types";
 
 /**
@@ -30,6 +31,7 @@ export function ModelSwitcher({
 }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const [err, setErr] = useState("");
 
   const { data } = useQuery({
     queryKey: ["models", "enabled"],
@@ -45,12 +47,22 @@ export function ModelSwitcher({
     enabled: open,
   });
 
+  // 【必须走 store 的 setter】。
+  //
+  // modelPk 存在 zustand 里，而 invalidateQueries 只影响 react-query
+  // 的缓存 —— 两套状态互不相干。之前只 invalidate 的结果是：
+  // 请求发出去了、库里也改了，但按钮上的文字还是旧的，
+  // 要刷新页面才对。用户看到的就是"切了没反应"。
+  const setWorkModel = useChatStore((s) => s.setWorkModel);
+
   const pick = useMutation({
-    mutationFn: (pk: string) => api.patchSession(sessionId, { model_pk: pk }),
+    mutationFn: (pk: string) => setWorkModel(pk),
     onSuccess: () => {
+      // 会话详情的缓存也刷一下 —— 别处可能读它
       qc.invalidateQueries({ queryKey: ["session", sessionId] });
       setOpen(false);
     },
+    onError: (e: Error) => setErr(e.message),
   });
 
   const items = data?.items ?? [];
@@ -116,6 +128,16 @@ export function ModelSwitcher({
               </div>
             </div>
           </button>
+
+          {err && (
+            <p
+              role="alert"
+              className="border-b px-3 py-2 text-xs"
+              style={{ borderColor: "var(--color-border)", color: "var(--color-err)" }}
+            >
+              {err}
+            </p>
+          )}
 
           {items.length === 0 ? (
             <p className="px-3 py-3 text-xs" style={{ color: "var(--color-muted)" }}>
