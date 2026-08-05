@@ -1,0 +1,174 @@
+@import "tailwindcss";
+
+/* Tailwind v4 用 CSS 变量做主题，不再需要 tailwind.config.js */
+@theme {
+  --color-bg: #0f1115;
+  --color-surface: #161920;
+  --color-surface-2: #1d212a;
+  --color-border: #272b36;
+  --color-text: #e6e8ec;
+  --color-muted: #9aa3b2;
+  --color-accent: #5b9dff;
+  --color-ok: #4ade80;
+  --color-warn: #fbbf24;
+  --color-err: #f87171;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    "Microsoft YaHei",
+    sans-serif;
+  /* 中文字体渲染：不加会在深色背景上显得过粗 */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 滚动条：默认的在深色主题下很突兀 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #39404f;
+}
+
+/* 焦点可见性：键盘导航必须能看出焦点在哪。
+   不要用 outline: none 去掉它 —— 那会让键盘用户完全无法使用。 */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Markdown 正文排版 */
+.md {
+  line-height: 1.7;
+  word-break: break-word;
+}
+.md > * + * {
+  margin-top: 0.75rem;
+}
+.md h1,
+.md h2,
+.md h3 {
+  font-weight: 600;
+  line-height: 1.35;
+  margin-top: 1.25rem;
+}
+.md h1 {
+  font-size: 1.35rem;
+}
+.md h2 {
+  font-size: 1.2rem;
+}
+.md h3 {
+  font-size: 1.05rem;
+}
+.md ul,
+.md ol {
+  padding-left: 1.4rem;
+}
+.md ul {
+  list-style: disc;
+}
+.md ol {
+  list-style: decimal;
+}
+.md li + li {
+  margin-top: 0.25rem;
+}
+.md a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--color-surface-2);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.md pre {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+}
+.md pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+.md blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 0.9rem;
+  color: var(--color-muted);
+}
+.md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.md th,
+.md td {
+  border: 1px solid var(--color-border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+.md th {
+  background: var(--color-surface-2);
+}
+.md hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+}
+
+/* 光标：流式输出时跟在文字末尾 */
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+.caret::after {
+  content: "▍";
+  margin-left: 1px;
+  color: var(--color-accent);
+  animation: blink 1s step-end infinite;
+}
+
+/* 尊重系统的"减少动画"设置 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

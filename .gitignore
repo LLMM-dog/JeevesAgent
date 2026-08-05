@@ -1,0 +1,53 @@
+# ─── 密钥与运行时配置 ───
+.env
+# 真实模型验证用的凭证，只给 scripts/verify_real.py 读
+.env.verify
+config/*.yaml
+!config/*.example.yaml
+
+# ─── 个人数据 ───
+# 判据：换一台机器 clone 下来能不能跑起来 + 会不会泄露隐私
+data/
+workspace/
+personas/SOUL.md
+personas/USER.md
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── 前端 ───
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ─── IDE / OS ───
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── 数据库备份（迁移前自动生成）───
+*.bak.*
+
+# MCP 配置里有 token（Authorization: Bearer xxx），不能进仓库。
+# 示例见 config/mcp_servers.example.yaml
+config/mcp_servers.yaml
+
+# ── 开发过程，不发布 ──
+#
+# .dev/ 放调研笔记、踩坑记录、路线图 —— 它们是【开发过程】的产物，
+# 对使用者没有价值，而且会把"这个项目是怎么做出来的"混进产品文档里。
+#
+# 发布给用户的应该是一个完整的产品：介绍、使用说明、API 参考。
+# 就像开发布会不会讲内部会议记录。
+#
+# 这些内容仍然有价值，所以保留在本地而不是删掉 —— 只是不进仓库。
+.dev/

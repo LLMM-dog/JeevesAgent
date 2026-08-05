@@ -1,0 +1,383 @@
+"""
+会话与对话路由。
+"""
+
+import json
+from typing import Any
+
+import structlog
+from app.api import deps
+from app.api.schemas import (
+    AnswerRequest,
+    ApproveRequest,
+    CancelResponse,
+    ChatRequest,
+    CreateSessionRequest,
+    MessageListResponse,
+    MessageOut,
+    PatchSessionRequest,
+    SessionBrief,
+    SessionDetail,
+    SessionListResponse,
+)
+from app.core import runtime_state
+from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.infra.db.session import get_db
+from app.infra.sandbox.factory import get_sandbox
+from app.modules.agent import run_registry
+from app.modules.agent.chat_service import ChatService
+from app.modules.provider import service as provider_service
+from app.modules.session import repo
+from app.modules.session.models import Message, Session
+from fastapi import APIRouter, Depends, Query, Response
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
+
+log = structlog.get_logger(__name__)
+router = APIRouter()
+
+
+def _brief(s: Session) -> SessionBrief:
+    return SessionBrief(
+        id=s.id,
+        title=s.title,
+        workspace_id=s.workspace_id,
+        pinned=bool(s.pinned),
+        message_count=s.message_count,
+        last_message_at=s.last_message_at,
+        created_at=s.created_at,
+    )
+
+
+def _detail(s: Session) -> SessionDetail:
+    return SessionDetail(
+        **_brief(s).model_dump(),
+        approval_mode=s.approval_mode,
+        private_mode=bool(s.private_mode),
+        amnesia_mode=bool(s.amnesia_mode),
+        vision_mode=bool(s.vision_mode),
+    )
+
+
+def _loads(v: str | None) -> Any:
+    if not v:
+        return None
+    try:
+        return json.loads(v)
+    except json.JSONDecodeError:
+        return None
+
+
+def _msg_out(m: Message) -> MessageOut:
+    return MessageOut(
+        id=m.id,
+        seq=m.seq,
+        role=m.role,
+        agent_name=m.agent_name,
+        content=m.content,
+        reasoning=m.reasoning,
+        tool_calls=_loads(m.tool_calls),
+        tool_call_id=m.tool_call_id,
+        tool_name=m.tool_name,
+        tool_display=_loads(m.tool_display),
+        is_error=bool(m.is_error),
+        refs=_loads(m.refs),
+        attachments=_loads(m.attachments),
+        artifact_kind=m.artifact_kind,
+        artifact_path=m.artifact_path,
+        run_id=m.run_id,
+        span_id=m.span_id,
+        prompt_tokens=m.prompt_tokens,
+        completion_tokens=m.completion_tokens,
+        created_at=m.created_at,
+    )
+
+
+# ─────────────────────────── sessions ───────────────────────────
+
+
+@router.get("/sessions", response_model=SessionListResponse, summary="会话列表")
+async def list_sessions(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    q: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> SessionListResponse:
+    rows, total = await repo.list_sessions(db, page=page, size=size, q=q)
+    return SessionListResponse(
+        items=[_brief(s) for s in rows],
+        total=total,
+        page=page,
+        size=size,
+        pages=(total + size - 1) // size,
+    )
+
+
+@router.post("/sessions", response_model=SessionDetail, status_code=201, summary="新建会话")
+async def create_session(
+    body: CreateSessionRequest, db: AsyncSession = Depends(get_db)
+) -> SessionDetail:
+    s = await repo.create_session(db, workspace_id=body.workspace_id, title=body.title)
+    return _detail(s)
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetail, summary="会话详情")
+async def get_session(session_id: str, db: AsyncSession = Depends(get_db)) -> SessionDetail:
+    return _detail(await repo.get_session(db, session_id))
+
+
+@router.get("/sessions/{session_id}/export", summary="导出会话")
+async def export_session(
+    session_id: str,
+    fmt: str = Query("markdown", pattern="^(markdown|md|json)$"),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """
+    导出会话为 Markdown 或 JSON。
+
+    ## 为什么要用 Response 而不是返回 dict
+
+    需要设 `Content-Disposition` 让浏览器【下载】而不是显示。
+    返回 dict 的话 FastAPI 会当成 JSON 响应体，浏览器直接渲染在页面上。
+
+    ## 文件名必须用 RFC 5987 编码
+
+    标题是模型生成的，几乎总是中文。而 HTTP 头只能放 latin-1 ——
+    直接写 `filename="中文.md"` 会让 uvicorn 在编码响应头时抛
+    UnicodeEncodeError，表现是 500 而错误信息完全不指向文件名。
+
+    所以要给两个：`filename=` 放 ASCII 兜底名（老浏览器用），
+    `filename*=UTF-8''<percent-encoded>` 放真名（现代浏览器优先用这个）。
+    """
+    from urllib.parse import quote
+
+    from app.modules.session import export as exp
+
+    s = await repo.get_session(db, session_id)
+    # agent_name=None 表示取所有记忆线 —— 子智能体的消息也要导出，
+    # 否则导出的对话里会出现"助手说要派子智能体"然后突然有了结论
+    msgs = await repo.load_messages(db, session_id, agent_name=None)
+
+    # 序列化放线程池 —— 【它是纯 CPU 的同步操作】。
+    #
+    # 直接在 event loop 上做的话，整个进程在这期间无法处理任何请求。
+    # 而这个应用的核心是 SSE 流式对话：某人导出大会话时，所有正在
+    # 进行的对话会一起卡住不吐字。
+    #
+    # 用户看到的是"模型突然卡死了"，而排查方向会跑到模型供应商、
+    # 网络上去，完全不指向导出。
+    #
+    # 实测：3000 条消息（正文合计 71MB）的会话，json.dumps 阻塞
+    # event loop 0.39 秒，产物 73MB。单次不致命但会累积 ——
+    # 而挪到线程池的成本几乎是零。
+    def _render() -> tuple[str, str, str]:
+        if fmt == "json":
+            return (
+                json.dumps(exp.to_json(s, msgs), ensure_ascii=False, indent=2),
+                "application/json; charset=utf-8",
+                ".json",
+            )
+        return exp.to_markdown(s, msgs), "text/markdown; charset=utf-8", ".md"
+
+    body, media, ext = await run_in_threadpool(_render)
+
+    fname = exp.safe_filename(s.title, session_id, ext)
+    # ASCII 兜底名：非 ASCII 字符全替掉，保证 latin-1 能编码
+    ascii_name = fname.encode("ascii", errors="replace").decode("ascii").replace("?", "_")
+    disp = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(fname)}"
+
+    return Response(
+        content=body,
+        media_type=media,
+        headers={"Content-Disposition": disp},
+    )
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionDetail, summary="修改会话")
+async def patch_session(
+    session_id: str, body: PatchSessionRequest, db: AsyncSession = Depends(get_db)
+) -> SessionDetail:
+    s = await repo.get_session(db, session_id)
+    # 只更新请求体里出现的字段（model_fields_set 区分"没传"和"传了 null"）
+    data = body.model_dump(exclude_unset=True)
+
+    if "title" in data and data["title"] is not None:
+        s.title = data["title"]
+    if "pinned" in data and data["pinned"] is not None:
+        s.pinned = 1 if data["pinned"] else 0
+    if "approval_mode" in data and data["approval_mode"] is not None:
+        s.approval_mode = data["approval_mode"]
+        # 必须【立即】对正在运行的 run 生效。走模块级 dict 而非 ContextVar ——
+        # ContextVar 在 task 创建时快照，已运行的 task 读不到新值，
+        # 用户会觉得"我都切成自动了它还在弹框"。
+        runtime_state.set_approval_mode(session_id, data["approval_mode"])
+    # 开视觉模式前先确认模型支持。
+    #
+    # 不拦的话用户开了开关、发了图，得到的是上游 400，而错误信息通常是
+    # "Invalid content type" 这类 —— 完全不指向"你的模型不支持图片"。
+    # 排查方向会跑到网络、图片格式、base64 编码上去。
+    #
+    # 在这里拦掉，把真因和下一步动作直接说清。
+    if data.get("vision_mode"):
+        model = await provider_service.resolve(db, purpose="chat")
+        if not model.supports_vision:
+            raise BadRequestError(
+                "当前对话模型未确认支持图片输入",
+                code="vision_unverified",
+                hint=(
+                    f"模型 {model.model_id} 的图片能力尚未核验，或核验结果为不支持。"
+                    "去设置页对该模型点「核验视觉」，通过后才能开启此开关"
+                ),
+            )
+
+    for flag in ("private_mode", "amnesia_mode", "vision_mode"):
+        if flag in data and data[flag] is not None:
+            setattr(s, flag, 1 if data[flag] else 0)
+
+    await db.commit()
+    return _detail(s)
+
+
+@router.delete("/sessions/{session_id}", summary="删除会话")
+async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, bool]:
+    await repo.delete_session(db, session_id)
+
+    # 清掉该会话的沙箱资源。
+    #
+    # Docker 后端下这是删容器 —— 不删的话每个删掉的会话都留一个容器
+    # 在跑（保活命令不会自己停），跑一天宿主上几十个容器占着内存。
+    #
+    # 放在删会话【之后】：删库失败时不该白清容器。
+    # 而清理失败不该让接口报错 —— 会话已经删了，返回 500 会让前端
+    # 以为没删成功而重试。
+    try:
+        sandbox = await get_sandbox()
+        await sandbox.cleanup_session(session_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("sandbox_cleanup_failed", session=session_id, err=str(e)[:200])
+
+    return {"ok": True}
+
+
+@router.get(
+    "/sessions/{session_id}/messages",
+    response_model=MessageListResponse,
+    summary="会话消息（不分页）",
+)
+async def list_messages(
+    session_id: str,
+    agent_name: str = Query("", description='智能体记忆线，"*" 表示全部'),
+    db: AsyncSession = Depends(get_db),
+) -> MessageListResponse:
+    await repo.get_session(db, session_id)
+    rows = await repo.load_messages(
+        db, session_id, agent_name=None if agent_name == "*" else agent_name
+    )
+    return MessageListResponse(items=[_msg_out(m) for m in rows])
+
+
+@router.delete(
+    "/sessions/{session_id}/messages/{message_id}", summary="从该消息处截断（用于重发）"
+)
+async def truncate_messages(
+    session_id: str, message_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, int]:
+    """
+    截断删除：删掉该消息及其之后的全部消息。
+
+    ## 为什么要拦正在运行的 run
+
+    流式生成过程中删历史，会让那个 run 继续往【已被删掉的会话历史】里
+    写消息 —— 结果是删了一半又冒出来几条，seq 还可能和保留的消息撞上。
+
+    表现很怪：用户点了"从这里重发"，界面上旧消息先消失、然后又蹦回来
+    几条，而重发的新内容夹在中间。
+
+    POST /api/chat 已经有这个检查（chat_service.py:135），截断也必须有 ——
+    否则用户只要在流没结束时点重发就能撞上。
+    """
+    active = run_registry.active_run_of(session_id)
+    if active is not None:
+        raise ConflictError(
+            "该会话正在生成回复，无法截断历史",
+            code="run_in_progress",
+            hint="先停止当前生成，再从这条消息重发",
+        )
+    n = await repo.truncate_from(db, session_id, message_id)
+    return {"deleted_count": n}
+
+
+# ─────────────────────────── chat ───────────────────────────
+
+
+@router.post("/chat", summary="对话（SSE 流式）")
+async def chat(
+    body: ChatRequest, service: ChatService = Depends(deps.get_chat_service)
+) -> StreamingResponse:
+    """
+    必须用 POST —— 请求体里有消息内容、引用列表、附件 ID。
+    前端因此【不能用 EventSource】（它只能发 GET），必须 fetch + getReader。
+
+    ## 两阶段的原因
+
+    prepare() 必须在构造 StreamingResponse 【之前】await ——
+    校验写在生成器里的话，函数体要等 FastAPI 开始迭代才执行，
+    而那时响应头已发出，raise 无法变成 400/404/409，
+    客户端只会看到 "peer closed connection without sending complete
+    message body"，完全不指向真实原因。
+    """
+    prep = await service.prepare(
+        session_id=body.session_id,
+        content=body.content,
+        refs=body.refs,
+        images=body.images,
+    )
+    return StreamingResponse(
+        service.stream(prep),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # 关掉 nginx 等反代的缓冲，否则事件会被攒起来批量发出，
+            # 流式效果完全消失
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/runs/{run_id}/cancel", response_model=CancelResponse, summary="取消生成")
+async def cancel_run(run_id: str) -> CancelResponse:
+    """
+    幂等：已结束的 run 重复调用返回 200 而非报错 —— 用户可能连点两次。
+    """
+    handle = run_registry.get(run_id)
+    if handle is None:
+        raise NotFoundError("run 不存在", code="run_not_found")
+    run_registry.cancel(run_id)
+    return CancelResponse(run_id=run_id, status="cancelled")
+
+
+@router.post("/runs/{run_id}/approve", summary="审批工具调用")
+async def approve(run_id: str, body: ApproveRequest) -> dict[str, bool]:
+    handle = run_registry.get(run_id)
+    if handle is None:
+        raise NotFoundError("run 不存在", code="run_not_found")
+    ok = runtime_state.resolve_approval(handle.session_id, body.call_id, body.approved)
+    if not ok:
+        # 不幂等：重复审批同一个 call_id 返回 409。
+        # 超时后再来审批也是 409 —— 超时已被视为拒绝，工具已经执行完了。
+        raise ConflictError("该审批已完成或已超时", code="run_already_finished")
+    return {"ok": True}
+
+
+@router.post("/runs/{run_id}/answer", summary="回答交互提问")
+async def answer(run_id: str, body: AnswerRequest) -> dict[str, bool]:
+    handle = run_registry.get(run_id)
+    if handle is None:
+        raise NotFoundError("run 不存在", code="run_not_found")
+    value: Any = body.selected if body.selected is not None else body.answer
+    ok = runtime_state.resolve_interact(handle.session_id, body.call_id, value)
+    if not ok:
+        raise ConflictError("该提问已回答或已超时", code="run_already_finished")
+    return {"ok": True}

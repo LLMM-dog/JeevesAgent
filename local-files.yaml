@@ -1,0 +1,195 @@
+# =============================================================================
+# 本地文件清单
+# =============================================================================
+#
+# 登记所有【不被 git 追踪、但在本机真实存在】的文件和目录。
+#
+# ## 为什么需要这份清单
+#
+# 它同时回答三个问题，而这三个问题散在文档里都会过时：
+#
+#   升级时  ——  哪些文件必须保留（覆盖了就丢数据）
+#   卸载时  ——  删项目文件夹到底删掉了什么
+#   排查时  ——  某个状态存在哪、谁写的
+#
+# 这个模式抄自常见实现 local-config-manifest.yaml。
+# 它本来是为升级写的，副作用是成了一份权威的"本项目会留下什么"的清单
+# —— 比 README 里的一段说明可靠，因为它跟着代码走，不会过时。
+#
+# ## 维护约定
+#
+# 新增任何"运行时产生且不进 git"的路径时，同步更新这里。
+# backend/tests/test_onboarding.py 会检查这份清单和 .gitignore 是否一致。
+#
+# ## 关键结论
+#
+# 下面每一条都在【项目文件夹内】。项目不往家目录、注册表、
+# 系统服务、PATH、浏览器存储写任何东西 —— 所以删掉项目文件夹
+# 就等于删掉下面全部内容。
+#
+# 唯一的例外见文件末尾的 external 段。
+# =============================================================================
+
+metadata:
+  project: Jeeves
+  description: 本机文件登记表。升级要保留的、卸载会删掉的，都在这里
+  note: >
+    这份文件自身受 git 追踪。
+    paths 里的所有条目都在 .gitignore 中排除。
+
+# ── 必须保留（升级时覆盖了就丢数据） ────────────────────────────────────
+paths:
+  - path: .env
+    kind: config
+    description: 配置与加密后的 API Key
+    created_by: scripts/setup.py 第 4 步
+    template: .env.example
+    critical: true
+    note: >
+      【最重要的一个文件】。里面的 JEEVES_SECURITY__ENCRYPTION_KEY 是
+      解密所有已存 API Key 的唯一凭据 —— 丢了就只能重新填一遍。
+      备份项目时优先备份它。
+
+  - path: data/jeeves.db
+    kind: data
+    description: 对话、消息、记忆、定时任务、追踪、路径白名单、模型配置
+    created_by: 启动时自动跑 alembic 迁移
+    critical: true
+    note: SQLite 单文件。想整体备份就复制这一个文件
+
+  - path: data/uploads/
+    kind: data
+    description: 上传的图片（视觉模式）
+    created_by: backend/app/api/routes_chat.py 上传接口
+    critical: true
+    note: >
+      这里是图片的【唯一副本】—— 会话导出的 JSON 只记录数量，
+      不含 base64。删了就没了。
+
+  - path: workspace/
+    kind: data
+    description: agent 的工作目录，它读写文件默认只能在这里
+    created_by: 启动时创建（backend/app/main.py）
+    critical: true
+
+  - path: config/mcp_servers.yaml
+    kind: config
+    description: MCP 服务器配置
+    created_by: 用户手动复制 example 并编辑
+    template: config/mcp_servers.example.yaml
+    critical: false
+    note: 默认不存在。不配的话不连任何 MCP 服务器
+
+  - path: personas/SOUL.md
+    kind: config
+    description: 助手的人设
+    created_by: scripts/setup.py 第 6 步
+    template: personas/SOUL.example.md
+    critical: false
+
+  - path: personas/USER.md
+    kind: config
+    description: 关于使用者的信息
+    created_by: scripts/setup.py 第 6 步
+    template: personas/USER.example.md
+    critical: false
+
+  - path: .env.verify
+    kind: config
+    description: verify_*.py 脚本用的真实模型凭据
+    created_by: 用户手动复制 example 并编辑
+    template: .env.verify.example
+    critical: false
+    note: 只有跑真实环境验证脚本时才需要
+
+# ── 可以随便删（会自动重建） ────────────────────────────────────────────
+ephemeral:
+  - path: data/logs/
+    description: 日志。dev 模式只输出到 stdout，非 dev 才落文件
+    created_by: backend/app/core/logging.py
+
+  - path: data/tmp/
+    description: 工具输出过长时的落盘文件
+    created_by: backend/app/infra/sandbox/local.py
+    note: >
+      启动时会清理超过 24 小时的文件。
+      放这里而不是系统临时目录，是为了让 read_file 能读到它们
+      （系统临时目录不在路径白名单里）。
+
+  - path: data/backend.log
+    description: start.ps1 / start.sh 重定向的后端 stdout
+    created_by: start.ps1 / start.sh
+
+  - path: .venv/
+    description: Python 虚拟环境
+    created_by: uv sync
+    note: 删了跑 uv sync 重建
+
+  - path: frontend/node_modules/
+    description: 前端依赖
+    created_by: npm install
+
+  - path: frontend/dist/
+    description: 前端构建产物。生产模式下后端从这里伺服静态文件
+    created_by: npm run build
+
+  - path: .pytest_cache/
+    description: pytest 缓存
+  - path: .mypy_cache/
+    description: mypy 缓存
+  - path: .ruff_cache/
+    description: ruff 缓存
+  - path: __pycache__/
+    description: Python 字节码缓存
+
+# ── 项目文件夹【之外】的东西 ────────────────────────────────────────────
+#
+# 这一段是这份清单最该被读到的部分：删项目文件夹带不走的东西。
+# scripts/uninstall.py 处理前两项。
+external:
+  - what: Docker 容器
+    where: Docker 存储
+    naming: jeeves-*
+    created_by: backend/app/infra/sandbox/docker.py（仅 sandbox.backend=docker 时）
+    cleanup: uv run python scripts/uninstall.py
+    note: >
+      【项目自己创建的，但删文件夹带不走】。
+      --rm 救不了：保活命令 tail -f /dev/null 永不退出，所以永不触发。
+      而清理依赖"下次启动"—— 删了文件夹就没有下次了。
+
+  - what: Docker 镜像
+    where: Docker 存储，约 130MB
+    naming: python:3.12-slim
+    created_by: 用户手动 docker pull（项目不自动拉）
+    cleanup: uv run python scripts/uninstall.py --all
+    note: 默认不删 —— 别的项目可能也在用
+
+  - what: uv / npm 缓存
+    where: "%LOCALAPPDATA%\\uv\\cache  ·  ~/.cache/uv  ·  ~/.npm"
+    created_by: uv 和 npm 自身，不是项目行为
+    cleanup: uv cache clean / npm cache clean --force
+    note: 默认不删 —— 全局缓存，清了别的项目要重新下载
+
+  - what: agent 写到项目外的文件
+    where: 取决于你把哪些目录加进了路径白名单
+    created_by: 文件工具（受白名单约束）或 run_shell（不受约束）
+    cleanup: 无法自动清理
+    note: >
+      【唯一真正无法自动清理的一项】。
+      默认白名单只含项目内目录，但用户可以在设置页加别的目录。
+      而 run_shell 压根不受白名单约束 —— 它能做的事没有上界。
+      删项目前想查的话，data/jeeves.db 里有完整的执行记录。
+
+# ── 确认不会写的地方 ────────────────────────────────────────────────────
+#
+# 这些是审计并实测验证过的（在一个全新 git clone 里跑完再删掉，
+# 检查家目录、AppData、注册表、计划任务、服务，全部无痕迹）。
+never_touched:
+  - 注册表
+  - 计划任务 / cron / systemd / launchd
+  - 系统服务
+  - PATH 环境变量
+  - 桌面快捷方式 / 开始菜单
+  - 协议注册（xxx:// 关联）
+  - 浏览器 localStorage / sessionStorage / IndexedDB / cookie
+  - 家目录（~ / %APPDATA% / %LOCALAPPDATA% / Library/Application Support）

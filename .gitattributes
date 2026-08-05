@@ -1,0 +1,56 @@
+# 行尾规范化。
+#
+# ## 为什么必须有这个文件
+#
+# git 在 Windows 上默认 core.autocrlf=true，检出时把 LF 转成 CRLF。
+# 对 .sh 文件这是致命的：CRLF 的 shebang 行会让 bash 报
+#
+#     /usr/bin/env: 'bash\r': No such file or directory
+#
+# 或者更迷惑的 "bad interpreter: ^M"。而错误信息完全不提"行尾"这回事，
+# 排查方向会跑到 shebang 路径、bash 是否存在、文件权限上去。
+#
+# 反过来 .bat / .ps1 在 Windows 上要 CRLF —— 虽然现代 cmd 能容忍 LF，
+# 但老版本和某些编辑器不行。
+
+# 默认：让 git 自动判断文本文件并在仓库里统一存 LF
+* text=auto eol=lf
+
+# ── 必须 LF ──
+#
+# 这些文件会在 Linux/macOS 上被解释执行，CRLF 会直接让它们跑不起来。
+*.sh text eol=lf
+*.py text eol=lf
+
+# ── 必须 CRLF ──
+#
+# Windows 批处理和 PowerShell 脚本。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# ── 二进制，不要碰 ──
+#
+# 对这些做行尾转换会直接损坏文件内容。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+
+# ── 锁文件 ──
+#
+# 标成 linguist-generated 让 GitHub 的 diff 默认折叠它们 ——
+# uv.lock 和 package-lock.json 的变更动辄几千行，
+# 混在 PR diff 里会把真正的改动埋掉。
+uv.lock linguist-generated=true
+frontend/package-lock.json linguist-generated=true
