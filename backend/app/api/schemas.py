@@ -356,3 +356,37 @@ class BrowseResult(BaseModel):
     entries: list[BrowseEntry] = Field(default_factory=list)
     # 常用起点（盘符 / 家目录 / 项目目录），让用户不用手打路径
     roots: list[BrowseEntry] = Field(default_factory=list)
+
+
+class MacroUpsert(BaseModel):
+    """
+    新建或更新一个宏。
+
+    ## 为什么 description 必填
+
+    加载器遇到缺 description 的文件会【静默跳过】，只在诊断里留一条
+    warning。用户在界面上填完保存、以为建好了，而列表里什么都没多 ——
+    这个失败模式必须在接口层挡掉。
+    """
+
+    name: str = Field(min_length=1, max_length=60)
+    description: str = Field(min_length=1)
+    body: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    # 默认不覆盖 —— 撞名时报错而不是悄悄冲掉用户已有的宏
+    overwrite: bool = False
+
+
+class MacroDetail(BaseModel):
+    name: str
+    description: str
+    body: str
+    keywords: list[str] = Field(default_factory=list)
+
+
+class SkillToggle(BaseModel):
+    enabled: bool
+
+
+class McpToggle(BaseModel):
+    enabled: bool

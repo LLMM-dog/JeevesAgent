@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  BrainCircuit,
   Eye,
+  EyeOff,
   File,
   ImagePlus,
+  // Lock 必须显式从 lucide 导入 —— 不导入的话它会解析到 DOM 的
+  // Web Locks API 全局类型，报 "'Lock' cannot be used as a JSX component"，
+  // 而那个错误完全不指向"你忘了 import"。
+  Lock,
   Mic,
   MicOff,
   Send,
@@ -119,6 +125,10 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const send = useChatStore((s) => s.send);
   const visionMode = useChatStore((s) => s.visionMode);
   const setVisionMode = useChatStore((s) => s.setVisionMode);
+  const privateMode = useChatStore((s) => s.privateMode);
+  const setPrivateMode = useChatStore((s) => s.setPrivateMode);
+  const amnesiaMode = useChatStore((s) => s.amnesiaMode);
+  const setAmnesiaMode = useChatStore((s) => s.setAmnesiaMode);
   const stop = useChatStore((s) => s.stop);
   const sessionId = useChatStore((s) => s.sessionId);
   const workDir = useChatStore((s) => s.workDir);
@@ -593,6 +603,53 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
           >
             <Eye size={11} aria-hidden />
             视觉
+          </button>
+
+          {/* 私密模式：这轮不写记忆。
+              后端在三个写工具里都拦了，而且查不到会话时默认按禁止写处理。 */}
+          <button
+            type="button"
+            onClick={() => void setPrivateMode(!privateMode)}
+            aria-pressed={privateMode}
+            title={
+              privateMode
+                ? "私密模式已开：这次对话的内容不会被记进长期记忆"
+                : "开启后这次对话不写入长期记忆（仍然会读取已有记忆）"
+            }
+            className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition ${
+              privateMode
+                ? "bg-[var(--color-warn)]/15 text-[var(--color-warn)]"
+                : "text-[var(--color-muted)] hover:bg-[var(--color-surface)]"
+            }`}
+          >
+            {privateMode ? (
+              <EyeOff size={11} aria-hidden />
+            ) : (
+              <Lock size={11} aria-hidden />
+            )}
+            私密
+          </button>
+
+          {/* 失忆模式：这轮不召回记忆。
+              和私密是两件事 —— 私密是"别记住我说的"，
+              失忆是"别拿以前的事来烦我"。 */}
+          <button
+            type="button"
+            onClick={() => void setAmnesiaMode(!amnesiaMode)}
+            aria-pressed={amnesiaMode}
+            title={
+              amnesiaMode
+                ? "失忆模式已开：不会读取长期记忆（仍然会写入）"
+                : "开启后不读取长期记忆，适合调试提示词或换个话题从零开始"
+            }
+            className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition ${
+              amnesiaMode
+                ? "bg-[var(--color-warn)]/15 text-[var(--color-warn)]"
+                : "text-[var(--color-muted)] hover:bg-[var(--color-surface)]"
+            }`}
+          >
+            <BrainCircuit size={11} aria-hidden />
+            失忆
           </button>
         </div>
       </div>

@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FileText, Loader2, RefreshCw, Trash2, TriangleAlert, Upload } from "lucide-react";
+import {
+  FileText,
+  Loader2,
+  RefreshCw,
+  ToggleLeft,
+  ToggleRight,
+  Trash2,
+  TriangleAlert,
+  Upload,
+} from "lucide-react";
 import { useRef, useState } from "react";
 
 import { api } from "@/lib/api";
@@ -59,6 +68,17 @@ export default function SkillsPanel() {
       setErr(null);
       setNote(`已重扫，共 ${r.count} 个技能`);
       refresh();
+    },
+  });
+
+  const toggle = useMutation({
+    mutationFn: (v: { name: string; enabled: boolean }) =>
+      api.toggleSkill(v.name, v.enabled),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["skills"] });
+      // 固定开销跟着变 —— 关掉一个技能就少了它的名字和描述，
+      // 上下文条上的数字应该立刻反映这件事
+      void qc.invalidateQueries({ queryKey: ["contextOverhead"] });
     },
   });
 
@@ -163,7 +183,9 @@ export default function SkillsPanel() {
           {data.items.map((s) => (
             <li
               key={s.name}
-              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2"
+              className={`rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 ${
+                s.enabled === false ? "opacity-55" : ""
+              }`}
             >
               <div className="flex items-start gap-2">
                 <FileText size={13} className="mt-0.5 shrink-0 text-[var(--color-muted)]" aria-hidden />
@@ -175,6 +197,42 @@ export default function SkillsPanel() {
                         v{s.version}
                       </span>
                     )}
+                    {s.enabled === false && (
+                      <span className="rounded bg-[var(--color-border)] px-1 text-[10px] text-[var(--color-muted)]">
+                        已关闭
+                      </span>
+                    )}
+                    {/* 开关放在标题行右侧。
+                        关掉的技能不进系统提示词 —— 也就是模型看不到它的
+                        名字和描述，不会主动想起来用。但用户在消息里明确
+                        点名时 load_skill 仍然读得到（那是 L2，按名字查表）。
+                        开关控制的是常驻上下文成本，不是访问权限。 */}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        toggle.mutate({
+                          name: s.name,
+                          enabled: s.enabled === false,
+                        })
+                      }
+                      aria-pressed={s.enabled !== false}
+                      title={
+                        s.enabled === false
+                          ? "已关闭：不会出现在系统提示词里。点击开启"
+                          : "已启用：名字和描述常驻上下文。点击关闭以节省 token"
+                      }
+                      className="ml-auto shrink-0 text-[var(--color-muted)] hover:text-[var(--color-fg)]"
+                    >
+                      {s.enabled === false ? (
+                        <ToggleLeft size={18} aria-hidden />
+                      ) : (
+                        <ToggleRight
+                          size={18}
+                          className="text-[var(--color-accent)]"
+                          aria-hidden
+                        />
+                      )}
+                    </button>
                   </div>
                   <p className="mt-0.5 text-xs text-[var(--color-muted)]">
                     {s.description}

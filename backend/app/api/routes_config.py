@@ -12,6 +12,9 @@ from app.api.schemas import (
     BindingListResponse,
     BindingOut,
     CreateProviderRequest,
+    MacroDetail,
+    MacroUpsert,
+    McpToggle,
     MetaResponse,
     ModelListResponse,
     ModelOut,
@@ -22,6 +25,7 @@ from app.api.schemas import (
     ProviderListResponse,
     ProviderOut,
     SetBindingRequest,
+    SkillToggle,
     TodoListResponse,
     TodoOut,
 )
@@ -34,14 +38,17 @@ from app.infra.sandbox.factory import fallback_reason as sandbox_fallback_reason
 from app.infra.sandbox.factory import get_sandbox
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.agent.tools.todo import _serialize, _stats, load_active
+from app.modules.mcp.tools import build_tools
 from app.modules.memory import service as memory_service
 from app.modules.provider import service as ps
 from app.modules.provider.models import Provider
 from app.modules.session import repo
 from app.modules.session.models import Session
+from app.modules.skill import authoring
 from app.modules.skill import macros as macro_registry
 from app.modules.skill import package as skill_package
 from app.modules.skill import registry as skill_registry
+from app.modules.skill import state as skill_state
 from app.modules.todo.models import Todo
 from app.modules.trace import service as trace_service
 from app.modules.trace import writer as trace_writer
@@ -334,15 +341,21 @@ async def meta(
 
 
 @router.get("/skills", summary="技能列表")
-async def list_skills() -> dict[str, object]:
+async def list_skills(db: AsyncSession = Depends(get_db)) -> dict[str, object]:
     """
     列出已安装技能。
 
     诊断一并返回 —— 用户需要知道"我上传的技能为什么没出现"。
     诊断只写进日志的话，用户在界面上看不到，
     只能看到技能凭空消失。
+
+    ## 为什么这里【不】过滤被关掉的技能
+
+    界面要能显示被关掉的技能，否则用户没法再把它打开。
+    过滤只发生在"进系统提示词"那一步（chat_service）。
     """
     idx = skill_registry.get_index()
+    off = await skill_state.disabled_names(db)
     return {
         "items": [
             {
@@ -351,6 +364,8 @@ async def list_skills() -> dict[str, object]:
                 "version": m.version,
                 "keywords": m.keywords,
                 "files": m.files,
+                # 表里没记录 = 启用。见 skill/models.py 的模块说明
+                "enabled": m.name not in off,
             }
             for m in sorted(idx.skills.values(), key=lambda s: s.name)
         ],
@@ -487,11 +502,18 @@ async def mcp_servers() -> dict[str, object]:
     from app.modules.mcp.loader import estimate_tokens, load_configs
     from app.modules.mcp.manager import get_manager
 
-    _configs, errors = load_configs()
+    configs, errors = load_configs()
+    # enabled 从配置取，不从连接状态取。
+    #
+    # 【关掉的服务器没有连接状态】—— manager 直接跳过它，
+    # states() 里那一项的 status 是 disconnected。只看 status 的话
+    # "用户关掉的"和"连不上的"长得一样，而前者不该显示成错误。
+    enabled_map = {c.server_id: c.enabled for c in configs}
     items = []
     for st in get_manager().states():
         d = st.to_dict()
         d["estimated_tokens"] = estimate_tokens(st.tools)
+        d["enabled"] = enabled_map.get(st.server_id, True)
         items.append(d)
     return {"items": items, "config_errors": errors}
 
@@ -547,7 +569,6 @@ async def mcp_reload(request: Request) -> dict[str, object]:
     """
     from app.modules.mcp.loader import load_configs
     from app.modules.mcp.manager import get_manager
-    from app.modules.mcp.tools import build_tools
 
     mgr = get_manager()
     await mgr.disconnect_all()
@@ -555,15 +576,7 @@ async def mcp_reload(request: Request) -> dict[str, object]:
     configs, errors = load_configs()
     await mgr.connect_all(configs)
 
-    # 重新注册工具。先摘掉旧的 mcp__ 工具再加新的 ——
-    # 不摘的话上一次的工具会残留，而它们指向已关闭的连接。
-    reg: ToolRegistry = request.app.state.registry
-    for old_name in [n for n in reg.names() if n.startswith("mcp__")]:
-        reg.unregister(old_name)
-    added = 0
-    for tool in build_tools():
-        reg.register(tool)
-        added += 1
+    added = _reregister_mcp_tools(request.app.state.registry)
 
     return {
         "servers": len(configs),
@@ -571,6 +584,30 @@ async def mcp_reload(request: Request) -> dict[str, object]:
         "tools": added,
         "config_errors": errors,
     }
+
+
+def _reregister_mcp_tools(reg: "ToolRegistry") -> int:
+    """
+    摘掉旧的 mcp__ 工具再注册新的，返回注册数。
+
+    ## 为什么必须先摘
+
+    不摘的话上一次的工具会残留，而它们指向已关闭的连接 —— 模型调用时
+    才会发现连接没了，而那个报错完全不指向"这个服务器已经被关掉了"。
+
+    ## 为什么抽成函数
+
+    开关单个服务器（PATCH /mcp/servers/{id}/enabled）要做同样的事。
+    复制一遍的话两处迟早不一致 —— 而不一致的症状是"用开关关掉的服务器
+    工具还在，用 reload 关掉的就没了"。
+    """
+    for old_name in [n for n in reg.names() if n.startswith("mcp__")]:
+        reg.unregister(old_name)
+    n = 0
+    for tool in build_tools():
+        reg.register(tool)
+        n += 1
+    return n
 
 
 @router.get("/ref-candidates", summary="引用候选（@ 提词器用）")
@@ -838,6 +875,112 @@ async def delete_skill(name: str) -> dict[str, object]:
     shutil.rmtree(target, ignore_errors=True)
     new_idx = skill_registry.reload()
     return {"deleted": name, "skill_count": len(new_idx.skills)}
+
+
+@router.post("/macros", summary="新建或更新宏", status_code=201)
+async def upsert_macro(body: MacroUpsert) -> dict[str, object]:
+    """
+    建宏。
+
+    ## 为什么之前没有这个接口
+
+    MacroPicker 的空态文案写着"对我说'把这个流程存成宏'，我会帮你建"，
+    而 macros/ 不在文件工具的白名单里 —— 模型实际写不进去。
+    那句承诺一直落不了地。
+
+    现在两条路都通：用户在设置页建，模型用 manage_asset 工具建。
+    两者走同一个 authoring.upsert，所以格式和校验完全一致。
+    """
+    r = authoring.upsert(
+        kind="macro",
+        name=body.name,
+        description=body.description,
+        body=body.body,
+        keywords=body.keywords,
+        overwrite=body.overwrite,
+    )
+    return {"name": r.name, "created": r.created}
+
+
+@router.get("/macros/{name}/source", summary="取宏的可编辑字段")
+async def get_macro_source(name: str) -> MacroDetail:
+    """
+    拆好的字段，供编辑界面用。
+
+    ## 为什么不复用 GET /macros/{name}
+
+    那个返回渲染后的正文（${MACRO_DIR} 已替换成真实路径），是给模型用的。
+    编辑界面要【原始】内容 —— 把替换后的路径写回去，
+    宏就跟当前机器绑死了，换台机器不能用。
+    """
+    desc, mbody, kw, _raw = authoring.read_source(kind="macro", name=name)
+    return MacroDetail(name=name, description=desc, body=mbody, keywords=kw)
+
+
+@router.delete("/macros/{name}", summary="删除宏")
+async def delete_macro(name: str) -> dict[str, bool]:
+    authoring.remove(kind="macro", name=name)
+    return {"ok": True}
+
+
+@router.patch("/skills/{name}/enabled", summary="开关一个技能")
+async def toggle_skill(
+    name: str, body: SkillToggle, db: AsyncSession = Depends(get_db)
+) -> dict[str, object]:
+    """
+    关掉的技能不进系统提示词。
+
+    ## 关掉之后模型还能用它吗
+
+    不能"主动"用 —— 它看不到名字和描述，不会想起来调 load_skill。
+    但用户在消息里明确写了技能名时 load_skill 仍然读得到
+    （那是 L2，按名字查表，不受 L1 清单影响）。
+
+    这是有意的：开关控制的是常驻上下文成本，不是访问权限。
+    用户明确点名要用的东西不该被开关挡住。
+    """
+    idx = skill_registry.get_index()
+    if name not in idx.skills:
+        raise NotFoundError(f"技能 {name} 不存在", code="skill_not_found")
+    await skill_state.set_enabled(db, name, body.enabled)
+    return {"name": name, "enabled": body.enabled}
+
+
+@router.patch("/mcp/servers/{server_id}/enabled", summary="开关一个 MCP 服务器")
+async def toggle_mcp_server(
+    server_id: str, body: McpToggle, request: Request
+) -> dict[str, object]:
+    """
+    改 yaml 里的 enabled 并重连。
+
+    ## 为什么直接改配置文件
+
+    MCP 配置本身就是用户的文件（config/mcp_servers.yaml），改它没有
+    "污染第三方内容"的问题 —— 这和技能不一样，技能是 zip 装进来的。
+
+    而且 manager 已经在读 cfg.enabled。存到别处的话就有两个真源，
+    用户手工编辑 yaml 和界面点开关会互相打脸。
+
+    ## 为什么要立刻重连
+
+    关掉之后工具定义应该马上从上下文里消失 —— 那是用户点这个开关的
+    唯一目的。等下次重启的话他会以为开关没生效。
+    """
+    from app.modules.mcp.loader import load_configs, set_enabled
+    from app.modules.mcp.manager import get_manager
+
+    if not set_enabled(server_id, body.enabled):
+        raise NotFoundError(
+            f"配置里没有 {server_id} 这个服务器", code="server_not_found"
+        )
+
+    mgr = get_manager()
+    await mgr.disconnect_all()
+    configs, _errors = load_configs()
+    await mgr.connect_all(configs)
+    tools = _reregister_mcp_tools(request.app.state.registry)
+
+    return {"server_id": server_id, "enabled": body.enabled, "tools": tools}
 
 
 @router.get("/macros", summary="宏列表（前端提词器用）")

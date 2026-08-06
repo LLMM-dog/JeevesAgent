@@ -33,6 +33,7 @@ from app.modules.cron import models as cron_models  # noqa: E402,F401
 from app.modules.memory import models as memory_models  # noqa: E402,F401
 from app.modules.provider import models as provider_models  # noqa: E402,F401
 from app.modules.session import models as session_models  # noqa: E402,F401
+from app.modules.skill import models as skill_models  # noqa: E402,F401
 from app.modules.todo import models as todo_models  # noqa: E402,F401
 from app.modules.trace import models as trace_models  # noqa: E402,F401
 

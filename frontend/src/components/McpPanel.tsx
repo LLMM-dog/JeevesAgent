@@ -5,6 +5,8 @@ import {
   Loader2,
   Plug,
   RefreshCw,
+  ToggleLeft,
+  ToggleRight,
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
@@ -49,6 +51,16 @@ export default function McpPanel() {
   const { data: pending } = useQuery({
     queryKey: ["mcpPending"],
     queryFn: api.mcpPending,
+  });
+
+  const toggle = useMutation({
+    mutationFn: (v: { id: string; enabled: boolean }) =>
+      api.toggleMcpServer(v.id, v.enabled),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["mcpServers"] });
+      // 固定开销跟着变 —— 关掉一个服务器就少了它全部工具的定义
+      void qc.invalidateQueries({ queryKey: ["contextOverhead"] });
+    },
   });
 
   const reload = useMutation({
@@ -165,7 +177,9 @@ export default function McpPanel() {
               return (
                 <li
                   key={s.server_id}
-                  className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5"
+                  className={`rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 ${
+                    s.enabled === false ? "opacity-55" : ""
+                  }`}
                 >
                   <div className="flex items-center gap-2">
                     <Icon
@@ -182,8 +196,43 @@ export default function McpPanel() {
                       </span>
                     </span>
                     <span className={`shrink-0 text-[10px] ${meta.cls}`}>
-                      {meta.label}
+                      {/* 用户关掉的要和"连不上的"区分开。
+                          只看 status 的话两者都是 disconnected ——
+                          而"我自己关的"不该显示成错误。 */}
+                      {s.enabled === false ? "已关闭" : meta.label}
                     </span>
+                    {/* 开关。关掉后工具定义立刻从上下文里消失 ——
+                        改 yaml 的 enabled 并重连。
+                        直接写配置文件是有意的：manager 已经在读 cfg.enabled，
+                        存到别处就有两个真源，用户手工改 yaml 和点开关
+                        会互相打脸。 */}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        toggle.mutate({
+                          id: s.server_id,
+                          enabled: s.enabled === false,
+                        })
+                      }
+                      disabled={toggle.isPending}
+                      aria-pressed={s.enabled !== false}
+                      title={
+                        s.enabled === false
+                          ? "已关闭：不连接，工具定义不占上下文。点击开启"
+                          : `已启用：${s.tool_count} 个工具常驻上下文。点击关闭`
+                      }
+                      className="shrink-0 text-[var(--color-muted)] hover:text-[var(--color-fg)] disabled:opacity-50"
+                    >
+                      {s.enabled === false ? (
+                        <ToggleLeft size={18} aria-hidden />
+                      ) : (
+                        <ToggleRight
+                          size={18}
+                          className="text-[var(--color-accent)]"
+                          aria-hidden
+                        />
+                      )}
+                    </button>
                     {s.status === "ready" && (
                       <button
                         type="button"

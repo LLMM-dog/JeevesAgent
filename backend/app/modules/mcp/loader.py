@@ -13,6 +13,7 @@ MCP 配置里有 token（`Authorization: Bearer xxx`），而本项目的数据�
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -143,3 +144,111 @@ def estimate_tokens(cfg_tools: list[Any]) -> int:
             except (TypeError, ValueError):
                 pass
     return total // 3
+
+def set_enabled(server_id: str, enabled: bool, path: Path | None = None) -> bool:
+    """
+    改 yaml 里某个服务器的 enabled，返回是否找到了它。
+
+    ## 为什么是逐行文本编辑，不是 load + dump
+
+    mcp_servers.yaml 是用户手写并且要继续手写的文件。
+    yaml.safe_dump 会丢掉全部注释、重排键顺序、把中文转成 \\uXXXX ——
+    点一次开关就把用户写的注释全删了。
+
+    逐行编辑只碰 enabled 那一行，其余字节原样不动。这比任何
+    round-trip 库都保守，而且不需要新增依赖（项目只有 pyyaml，
+    它没有保留注释的能力）。
+
+    ## 为什么不用数据库存这个状态
+
+    manager 已经在读 cfg.enabled。存到别处就有两个真源 ——
+    用户手工编辑 yaml 和界面点开关会互相打脸。
+
+    ## 无法识别格式时返回 False
+
+    宁可告诉用户"没找到这个服务器"，也不要在看不懂的格式上乱写。
+    那个文件里可能有 token。
+    """
+    p = path or CONFIG_PATH
+    if not p.is_file():
+        return False
+    return _set_enabled_textual(p, server_id, enabled)
+
+
+def _set_enabled_textual(path: Path, server_id: str, enabled: bool) -> bool:
+    """
+    只改目标块里的 enabled 那一行。
+
+    ## 为什么按缩进判断块边界
+
+    顶层是列表，每项以 "- " 开头。下一个同级 "- " 就是下一个服务器 ——
+    在此之前的行都属于当前项。这个判断对本项目的配置格式够用，
+    而且看不懂的格式会返回 False 而不是写坏文件。
+
+    ## 实测踩到的两个坑
+
+    键名是 `server_id` 不是 `id`。照 "- id:" 写正则的话永远匹配不上，
+    而返回值是 False —— 看起来像"配置里没这个服务器"，
+    完全不指向"我的正则写错了"。
+
+    行尾注释（`- server_id: github    # 备注`）会让 `$` 锚点失配。
+    yaml 里行尾注释很常见，用 `$` 收尾等于要求用户不写注释。
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    # 块的起始行号
+    block_starts = [
+        i for i, ln in enumerate(lines) if re.match(r"^\s*-\s", ln)
+    ]
+    if not block_starts:
+        return False
+
+    def block_range(idx: int) -> tuple[int, int]:
+        s = block_starts[idx]
+        e = block_starts[idx + 1] if idx + 1 < len(block_starts) else len(lines)
+        return s, e
+
+    # 找 server_id 匹配的块。
+    # 值后面允许跟空白和 # 注释 —— 不允许的话有注释的行就匹配不上。
+    want = re.compile(
+        rf"^\s*(?:-\s+)?server_id:\s*['\"]?{re.escape(server_id)}['\"]?\s*(?:#.*)?$"
+    )
+    target = -1
+    for i in range(len(block_starts)):
+        s, e = block_range(i)
+        if any(want.match(lines[j]) for j in range(s, e)):
+            target = i
+            break
+    if target < 0:
+        return False
+
+    s, e = block_range(target)
+    flag = "true" if enabled else "false"
+
+    for j in range(s, e):
+        m = re.match(r"^(\s*)enabled:\s*.*$", lines[j])
+        if m:
+            lines[j] = f"{m.group(1)}enabled: {flag}"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+            return True
+
+    # 块里没有 enabled 行 —— 插一行。
+    #
+    # 缩进照块内其它键对齐。用固定两格的话遇到四格缩进的配置会
+    # 生成不合法的 yaml，而那时整个文件都读不了了。
+    indent = "  "
+    for j in range(s + 1, e):
+        m = re.match(r"^(\s+)\S", lines[j])
+        if m:
+            indent = m.group(1)
+            break
+    else:
+        # 单行块（所有键都在 "- " 那一行之后没有续行）——
+        # 照 "- " 的位置推缩进
+        lead = re.match(r"^(\s*)-\s", lines[s])
+        if lead:
+            indent = lead.group(1) + "  "
+
+    lines.insert(s + 1, f"{indent}enabled: {flag}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return True

@@ -47,6 +47,8 @@ from app.modules.agent.tools.base import ToolRegistry
 from app.modules.provider import service as ps
 from app.modules.provider.models import Model, ModelBinding, Provider
 from app.modules.session.models import Session
+from app.modules.skill import registry as skill_registry
+from app.modules.skill import state as skill_state
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -427,8 +429,17 @@ async def context_overhead(
     tool_names = [
         str((s.get("function") or {}).get("name", "")) for s in specs
     ]
+    # 【必须带 skills】。
+    #
+    # 不带的话这里算出的系统提示词比真实的小 —— 技能清单（每个技能一行
+    # 名字+描述）是常驻上下文的一部分，漏掉它会让上下文条少报几百 token。
+    #
+    # 而且开关技能时这个数字不会变，用户点了开关看不到任何反应，
+    # 会以为开关没生效。
     system = prompts.build_system_prompt(
-        workspace=str(settings.workspace_dir), tool_names=tool_names
+        workspace=str(settings.workspace_dir),
+        tool_names=tool_names,
+        skills=await skill_state.filter_l1(db, skill_registry.get_index().l1()),
     )
 
     win = 0

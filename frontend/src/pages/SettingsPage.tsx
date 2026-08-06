@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleAlert, Loader2, TriangleAlert } from "lucide-react";
 import clsx from "clsx";
+import MacroPanel from "@/components/MacroPanel";
 import McpPanel from "@/components/McpPanel";
 import WebSearchPanel from "@/components/WebSearchPanel";
 import MemoryPanel from "@/components/MemoryPanel";
@@ -476,6 +477,8 @@ export default function SettingsPage() {
         {active === "skills" && (
           <div {...panelProps("skills")}>
             <SkillsPanel />
+
+        <MacroPanel />
           </div>
         )}
 

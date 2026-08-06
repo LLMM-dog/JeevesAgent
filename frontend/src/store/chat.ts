@@ -120,6 +120,22 @@ interface ChatState {
   approvalMode: "manual" | "auto";
   /** 视觉模式。开启后可发图片，但模型必须先通过核验 */
   visionMode: boolean;
+  /**
+   * 私密模式：这轮对话不写记忆。
+   *
+   * 后端在三个写工具（remember / update_memory / forget_memory）里都拦了，
+   * 而且查不到会话时【默认按禁止写处理】—— 那是实测抓到的 bug 留下的：
+   * 最初只在召回侧做了拦截，模型看不到会话开关照样调 remember，真写进去了。
+   */
+  privateMode: boolean;
+  /**
+   * 失忆模式：这轮对话不召回记忆。
+   *
+   * 和私密模式是两件事：私密是"别记住我说的"，失忆是"别拿以前的事来烦我"。
+   * 拆成两个开关是因为它们的用途不同 —— 调试提示词时要失忆但不介意被记住，
+   * 聊敏感话题时要私密但仍然需要之前的上下文。
+   */
+  amnesiaMode: boolean;
   /** 当前工作成果的元信息（内容太大不放 store，需要时拉接口） */
   artifact: { kind: string; path: string | null; chars: number } | null;
   todos: TodoItem[];
@@ -142,6 +158,8 @@ interface ChatState {
   /** 设置这次对话用哪个模型。传空串回到默认绑定 */
   setWorkModel: (pk: string) => Promise<void>;
   setVisionMode: (on: boolean) => Promise<void>;
+  setPrivateMode: (on: boolean) => Promise<void>;
+  setAmnesiaMode: (on: boolean) => Promise<void>;
 }
 
 /**
@@ -254,6 +272,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   contextWindow: 0,
   approvalMode: "manual",
   visionMode: false,
+  privateMode: false,
+  amnesiaMode: false,
   artifact: null,
   todos: [],
   todoStats: null,
@@ -313,7 +333,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         workDir: session.work_dir ?? "",
         modelPk: session.model_pk ?? "",
         contextWindow: session.context_window ?? 0,
-      visionMode: session.vision_mode ?? false,
+        visionMode: session.vision_mode ?? false,
+        // 【必须读回来】。不读的话切会话后开关显示的是上一个会话的状态 ——
+        // 用户以为自己开着私密模式，而实际这个会话是关的。
+        privateMode: session.private_mode ?? false,
+        amnesiaMode: session.amnesia_mode ?? false,
       });
     } catch (err) {
       set({ banner: toBanner(err) });
@@ -445,6 +469,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.patchSession(sessionId, { approval_mode: mode });
     } catch (err) {
       set({ approvalMode: previous, banner: toBanner(err) });
+    }
+  },
+
+  async setPrivateMode(on) {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    const previous = get().privateMode;
+    set({ privateMode: on });
+    try {
+      await api.patchSession(sessionId, { private_mode: on });
+    } catch (err) {
+      // 回滚并显示原因。静默弹回去的话用户会以为开关坏了，
+      // 而这个开关关系到"我说的话会不会被记住"——
+      // 失败必须让他知道。
+      set({ privateMode: previous, banner: toBanner(err) });
+    }
+  },
+
+  async setAmnesiaMode(on) {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    const previous = get().amnesiaMode;
+    set({ amnesiaMode: on });
+    try {
+      await api.patchSession(sessionId, { amnesia_mode: on });
+    } catch (err) {
+      set({ amnesiaMode: previous, banner: toBanner(err) });
     }
   },
 

@@ -37,6 +37,7 @@ from app.infra.llm.openai_compat import close_llm
 from app.modules.agent import run_registry
 from app.modules.agent.chat_service import ChatService
 from app.modules.agent.pathguard import AllowedPath, set_allowed
+from app.modules.agent.tools.asset import ManageAssetTool
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.agent.tools.context import CompactContextTool
 from app.modules.agent.tools.exec import RunPythonTool, RunShellTool
@@ -119,6 +120,12 @@ def build_registry() -> ToolRegistry:
         ForgetMemoryTool(),
         TodoWriteTool(),
         TodoReadTool(),
+        # 宏和技能的增删改查。
+        #
+        # MacroPicker 的空态一直写着"对我说'把这个流程存成宏'，我会帮你建"，
+        # 但 macros/ 不在白名单里，模型写不进去 —— 那句承诺落不了地。
+        # 这个工具让它真的能建。
+        ManageAssetTool(),
         # 主动压缩。原来只有被动压缩（涨到窗口 75% 才触发）——
         # 那个时机不由模型决定，它只看总量，不知道"调研阶段已经结束、
         # 几十条工具输出已经没用了"。

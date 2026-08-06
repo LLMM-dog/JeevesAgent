@@ -419,6 +419,8 @@ export const api = {
         tools: { name: string; raw_name: string; description: string }[];
         estimated_tokens: number;
         connected_at: number | null;
+        /** 用户关掉的服务器不连接，工具定义不占上下文 */
+        enabled?: boolean;
       }[];
       config_errors: string[];
     }>("/mcp/servers"),
@@ -571,6 +573,8 @@ export const api = {
         version: string;
         keywords: string[];
         files: string[];
+        /** 关掉的技能不进系统提示词。缺省视为启用 */
+        enabled?: boolean;
       }[];
       diagnostics: { level: string; message: string; path: string }[];
     }>("/skills"),
@@ -600,6 +604,57 @@ export const api = {
     ),
 
   // ---- 宏 ----
+/** 新建或更新宏。overwrite=false 时撞名会 409 */
+  reloadMacros: () =>
+    request<{ count: number; names: string[] }>("/macros/reload", {
+      method: "POST",
+    }),
+
+  upsertMacro: (body: {
+    name: string;
+    description: string;
+    body: string;
+    keywords?: string[];
+    overwrite?: boolean;
+  }) =>
+    request<{ name: string; created: boolean }>("/macros", {
+      method: "POST",
+      json: body,
+    }),
+
+  /**
+   * 取宏的可编辑字段。
+   *
+   * 不用 getMacro —— 那个返回渲染后的正文（${MACRO_DIR} 已替换成真实
+   * 路径），保存时写回去宏就跟当前机器绑死了。
+   */
+  getMacroSource: (name: string) =>
+    request<{
+      name: string;
+      description: string;
+      body: string;
+      keywords: string[];
+    }>(`/macros/${encodeURIComponent(name)}/source`),
+
+  deleteMacro: (name: string) =>
+    request<{ ok: boolean }>(`/macros/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+
+  /** 开关一个技能。关掉的不进系统提示词 */
+  toggleSkill: (name: string, enabled: boolean) =>
+    request<{ name: string; enabled: boolean }>(
+      `/skills/${encodeURIComponent(name)}/enabled`,
+      { method: "PATCH", json: { enabled } },
+    ),
+
+  /** 开关一个 MCP 服务器。会改 yaml 并立刻重连 */
+  toggleMcpServer: (serverId: string, enabled: boolean) =>
+    request<{ server_id: string; enabled: boolean; tools: number }>(
+      `/mcp/servers/${encodeURIComponent(serverId)}/enabled`,
+      { method: "PATCH", json: { enabled } },
+    ),
+
   listMacros: () =>
     request<{
       items: { name: string; description: string; keywords: string[] }[];

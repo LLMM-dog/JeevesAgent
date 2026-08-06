@@ -38,6 +38,7 @@ from app.modules.memory import service as memory_service
 from app.modules.provider import service as provider_service
 from app.modules.session import repo
 from app.modules.skill import registry as skill_registry
+from app.modules.skill import state as skill_state
 from app.modules.trace import writer as trace_writer
 from app.modules.trace.recorder import compute_cost, record_span
 from app.modules.trace.writer import RunRecord
@@ -381,10 +382,16 @@ class ChatService:
 
         # 技能清单每轮都从 registry 现取，不缓存在 service 上 ——
         # 用户上传技能后应该立即可用，不需要重启也不需要新建会话。
+        #
+        # 【过滤点在这里】。技能的三级披露里只有 L1（名字+描述）常驻上下文，
+        # 所以"关掉一个技能"的含义就是别把它的 L1 发出去。
+        #
+        # 不在 load_index 里过滤：那个索引同时供设置页列表用，
+        # 在那里滤掉的话用户界面上也看不到被关掉的技能，就没法再打开了。
         system_prompt = prompts.build_system_prompt(
             workspace=workspace_path,
             tool_names=registry.names(),
-            skills=skill_registry.get_index().l1(),
+            skills=await skill_state.filter_l1(db, skill_registry.get_index().l1()),
         )
 
         run_started = now_ms()
