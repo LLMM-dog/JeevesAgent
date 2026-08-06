@@ -110,6 +110,13 @@ interface ChatState {
   workDir: string;
   /** 这次对话用哪个模型。空串 = 跟随功能位绑定 */
   modelPk: string;
+  /**
+   * 实际生效的模型窗口。
+   *
+   * 单独存一份是因为上下文条要在【发消息之前】就显示窗口大小 ——
+   * 那时还没有任何 context_usage 事件。
+   */
+  contextWindow: number;
   approvalMode: "manual" | "auto";
   /** 视觉模式。开启后可发图片，但模型必须先通过核验 */
   visionMode: boolean;
@@ -244,6 +251,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   approval: null,
   workDir: "",
   modelPk: "",
+  contextWindow: 0,
   approvalMode: "manual",
   visionMode: false,
   artifact: null,
@@ -304,6 +312,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 空串兜底：老会话在迁移前没有这个字段
         workDir: session.work_dir ?? "",
         modelPk: session.model_pk ?? "",
+        contextWindow: session.context_window ?? 0,
       visionMode: session.vision_mode ?? false,
       });
     } catch (err) {
@@ -410,7 +419,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 乐观更新的话按钮先变成新模型、请求失败后又变回去，
     // 那种闪回比一开始就不变更让人困惑。
     const s = await api.patchSession(sessionId, { model_pk: pk });
-    set({ modelPk: s.model_pk ?? "" });
+    // 窗口也要跟着变 —— 换成 65K 的模型后，条还按 131K 画的话
+    // 占用比例会显示成一半，用户以为还很空。
+    set({ modelPk: s.model_pk ?? "", contextWindow: s.context_window ?? 0 });
   },
 
   async setWorkDir(dir) {

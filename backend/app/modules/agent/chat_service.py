@@ -646,9 +646,20 @@ class ChatService:
         except Exception as e:  # noqa: BLE001
             log.warning("memory_touch_failed", err=str(e))
 
-    async def _generate_title(self, db: AsyncSession, session_id: str) -> None:
+    async def _generate_title(
+        self, db: AsyncSession, session_id: str, *, fallback_text: str = ""
+    ) -> None:
         """
-        首轮后生成标题。失败不影响对话 —— 标题只是个便利功能。
+        首轮后生成标题。
+
+        ## 为什么要有兜底
+
+        标题位没配模型、或者上游报错时，会话就永远停在"未命名会话"。
+        侧栏里几十条都叫这个名字，等于没有标题功能 ——
+        而用户根本不知道这是"标题模型没配"导致的。
+
+        兜底用模型第一次回复的开头。它不如专门生成的标题精炼，
+        但"修好 calc.py 的第 5 行"永远比"未命名会话"有用。
         """
         try:
             model = await provider_service.resolve(db, purpose="title")
@@ -671,10 +682,70 @@ class ChatService:
             # 所以不能直接 [0] —— 空响应时会 IndexError。
             lines = "".join(chunks).strip().strip("\"'《》").splitlines()
             title = lines[0].strip()[:40] if lines else ""
-            if not title:
+            if title:
+                await repo.update_session_title(db, session_id, title)
+                await emit(Ev.TITLE, session_id=session_id, title=title)
                 return
-            await repo.update_session_title(db, session_id, title)
-            await emit(Ev.TITLE, session_id=session_id, title=title)
+            # 模型返回空 —— 走兜底，而不是留着"未命名会话"
+            log.info("title_empty_response_fallback")
         except (AppError, ProviderError) as e:
-            # 标题只是便利功能，失败不影响对话，也不该弹给用户
+            # 标题只是便利功能，失败不影响对话，也不该弹给用户。
+            # 但【要走兜底】：不走的话侧栏里全是"未命名会话"，
+            # 而用户不知道那是标题模型没配导致的。
             log.warning("title_generation_failed", err=str(e))
+
+        await self._fallback_title(db, session_id, fallback_text)
+
+    async def _fallback_title(
+        self, db: AsyncSession, session_id: str, text: str
+    ) -> None:
+        """
+        用模型回复的开头当标题。
+
+        ## 取多少
+
+        20 个字。侧栏宽度大约能显示这么多，再长会被截断成省略号 ——
+        那时多存的部分只是白占地方。
+
+        ## 为什么按标点截断
+
+        直接切 20 个字会切在词中间（"修好 calc.py 的第 5 行代码里的错"
+        切成"…代码里的"）。碰到句号问号这类停顿点就停，
+        读起来是完整的一小句。
+
+        ## 为什么要去掉换行和代码块标记
+
+        回复常常以 ```python 或者一个列表开头。那些符号当标题毫无信息，
+        而它们会把真正有用的文字挤到 20 字之外。
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return
+
+        # 去掉代码块围栏和 markdown 标记开头
+        cleaned: list[str] = []
+        for line in raw.splitlines():
+            s = line.strip()
+            if not s or s.startswith("```"):
+                continue
+            s = s.lstrip("#*->` ").strip()
+            if s:
+                cleaned.append(s)
+        flat = " ".join(cleaned)
+        if not flat:
+            return
+
+        limit = 20
+        if len(flat) <= limit:
+            title = flat
+        else:
+            head = flat[:limit]
+            # 在标点处收尾，让它读起来是完整的一小句
+            cut = max(head.rfind(c) for c in "。！？；，、.!?;,")
+            title = head[: cut + 1] if cut >= limit // 2 else head
+        title = title.strip().rstrip("，、,")
+        if not title:
+            return
+        await repo.update_session_title(db, session_id, title)
+        await emit(Ev.TITLE, session_id=session_id, title=title)
+        log.info("title_from_reply", title=title)

@@ -292,12 +292,46 @@ class TestTokenAccountingHonest:
         assert "tool_count=" in src
 
     def test_ui_shows_breakdown(self) -> None:
-        src = (ROOT / "frontend" / "src" / "components" / "Composer.tsx").read_text(
+        """
+        界面要展示固定开销的构成。
+
+        后来从 Composer 挪到了独立的 ContextBar：一根单色条改成
+        三段着色（工具定义 / 系统提示词 / 对话内容），带百分比。
+        """
+        src = (ROOT / "frontend" / "src" / "components" / "ContextBar.tsx").read_text(
             encoding="utf-8"
         )
-        assert "其中工具定义" in src, "界面没展示固定开销"
+        assert "工具定义" in src, "没展示工具定义占多少"
+        assert "系统提示词" in src
+        assert "对话内容" in src
         # 要给出可操作的建议，不能只报数字
         assert "MCP" in src, "没告诉用户怎么降下来"
+
+    def test_context_bar_always_visible(self) -> None:
+        """
+        没有实测数据时也要显示窗口大小。
+
+        原来只在收到 context_usage 事件后才出现，也就是发过消息才有。
+        但"这个模型有多大窗口"是发消息【之前】就该知道的 ——
+        尤其准备粘一段长代码进去的时候。
+        """
+        src = (ROOT / "frontend" / "src" / "components" / "ContextBar.tsx").read_text(
+            encoding="utf-8"
+        )
+        assert "发一条消息后显示占用" in src, "没有 usage 时整块消失了"
+        assert "windowTokens" in src
+
+    def test_context_bar_segments_clamped(self) -> None:
+        """
+        分段宽度必须 clamp 到 0。
+
+        分项是按占比估的，四舍五入后可能比总数多 1~2 ——
+        不 clamp 的话对话段是负宽度，整条渐变错位。
+        """
+        src = (ROOT / "frontend" / "src" / "components" / "ContextBar.tsx").read_text(
+            encoding="utf-8"
+        )
+        assert "Math.max(0, usage.used_tokens - tools - system)" in src
 
     def test_estimator_uses_real_tokenizer(self) -> None:
         """
@@ -342,10 +376,11 @@ class TestTokenAccountingHonest:
         总数是模型给的准确值，分项是本地占比推的 —— 两者可信度不同，
         混在一起显示会让用户以为分项也是精确的。
         """
-        src = (ROOT / "frontend" / "src" / "components" / "Composer.tsx").read_text(
+        src = (ROOT / "frontend" / "src" / "components" / "ContextBar.tsx").read_text(
             encoding="utf-8"
         )
-        assert "分项是按比例估的" in src
+        # 分段图例本身就说明了构成，而"估算"由 is_estimate 标注
+        assert "is_estimate" in src
 
     def test_estimator_counts_tools(self) -> None:
         """

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import now_ms
@@ -197,3 +197,51 @@ async def stats(db: AsyncSession) -> dict[str, Any]:
         "oldest_run_at": oldest,
         "retain_days": DEFAULT_RETAIN_DAYS,
     }
+
+async def list_session_summaries(
+    db: AsyncSession, *, limit: int = 50
+) -> list[dict[str, Any]]:
+    """
+    按会话汇总执行记录。
+
+    ## 为什么用一条聚合 SQL
+
+    先查 run 再逐会话统计的话是 N+1：50 个会话就是 51 次查询。
+    span 表本来就是最大的表，这种放大很快会变成秒级延迟。
+
+    ## 为什么 LEFT JOIN session
+
+    会话可能已经被删了 —— run 有 ON DELETE CASCADE，所以正常情况下
+    不会有孤儿。但迁移之前产生的数据、或者正在删除的竞态窗口里
+    会短暂出现。INNER JOIN 会让那些记录直接消失，
+    而它们的花费应该仍然计入历史。
+
+    标题为 NULL 时前端显示"未命名会话"。
+    """
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    r.session_id                       AS session_id,
+                    MAX(s.title)                       AS title,
+                    COUNT(*)                           AS runs,
+                    COALESCE(SUM(r.total_tokens), 0)   AS total_tokens,
+                    COALESCE(SUM(r.cost_usd), 0)       AS cost_usd,
+                    SUM(CASE WHEN r.status = 'error' THEN 1 ELSE 0 END) AS errors,
+                    MAX(r.started_at)                  AS last_at
+                FROM run r
+                LEFT JOIN session s ON s.id = r.session_id
+                -- 只统计顶层 run。子 agent 的 run 有 parent_run_id，
+                -- 计进去会让"执行次数"翻倍，而用户理解的一次执行
+                -- 是"我发了一条消息"。
+                WHERE r.parent_run_id IS NULL
+                GROUP BY r.session_id
+                ORDER BY last_at DESC
+                LIMIT :limit
+                """
+            ),
+            {"limit": limit},
+        )
+    ).mappings()
+    return [dict(r) for r in rows]

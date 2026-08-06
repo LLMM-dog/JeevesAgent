@@ -16,6 +16,7 @@ import {
 import clsx from "clsx";
 import { MacroPicker } from "@/components/MacroPicker";
 import { RefPicker, type RefCandidate, type RefKind } from "@/components/RefPicker";
+import { ContextBar } from "@/components/ContextBar";
 import { ModelSwitcher } from "@/components/ModelSwitcher";
 import { WorkDirPicker } from "@/components/WorkDirPicker";
 import { useChatStore } from "@/store/chat";
@@ -122,6 +123,8 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const sessionId = useChatStore((s) => s.sessionId);
   const workDir = useChatStore((s) => s.workDir);
   const modelPk = useChatStore((s) => s.modelPk);
+  // 没有 usage 时也要能显示窗口大小，所以单独存一份
+  const contextWindow = useChatStore((s) => s.contextWindow);
   const approvalMode = useChatStore((s) => s.approvalMode);
   const setApprovalMode = useChatStore((s) => s.setApprovalMode);
   const pending = useChatStore((s) => s.pending);
@@ -290,61 +293,9 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
           />
         )}
 
-        {usage && (
-          <div className="mb-2 flex items-center gap-2 text-[11px] text-[var(--color-muted)]">
-            <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--color-border)]">
-              <div
-                className="h-full rounded-full transition-all"
-                style={{
-                  width: `${Math.min(100, usage.ratio * 100)}%`,
-                  background:
-                    usage.ratio > 0.75
-                      ? "var(--color-warn)"
-                      : "var(--color-accent)",
-                }}
-              />
-            </div>
-            <span
-              title={
-                usage.tools_tokens
-                  ? `工具定义 ${usage.tools_tokens.toLocaleString()}` +
-                    (usage.tool_count ? `（${usage.tool_count} 个）` : "") +
-                    ` + 系统提示词 ${(usage.system_tokens ?? 0).toLocaleString()}` +
-                    ` + 对话内容 ${Math.max(
-                      0,
-                      usage.used_tokens -
-                        usage.tools_tokens -
-                        (usage.system_tokens ?? 0),
-                    ).toLocaleString()}` +
-                    "\n\n（分项是按比例估的：本地分词器和模型的不一样，" +
-                    "只有总数是模型给的准确值）" +
-                    "\n\n前两项每一轮都会重发。数字偏大通常是工具太多，" +
-                    "去设置页关掉用不到的 MCP 服务器。"
-                  : undefined
-              }
-            >
-              {usage.used_tokens.toLocaleString()} /{" "}
-              {usage.window_tokens.toLocaleString()} token
-              {/* 估算值必须标出来 —— 用户看到"上下文 80%"时应该知道
-                  这是精确值还是估算。
-                  反过来同样要紧：真实值【不能】标成估算，
-                  否则用户会以为最可信的那个数字不可信。 */}
-              {usage.is_estimate && "（估算）"}
-              {/* 固定开销占大头时直接摆出来，不藏在 hover 里 ——
-                  用户看到"你好 = 4551 token"的第一反应是关掉界面，
-                  不是去 hover 一个数字。 */}
-              {usage.tools_tokens != null &&
-                usage.tools_tokens > 0 &&
-                usage.used_tokens > 0 &&
-                usage.tools_tokens / usage.used_tokens > 0.5 && (
-                  <span style={{ color: "var(--color-muted)" }}>
-                    {" "}
-                    · 其中工具定义 {usage.tools_tokens.toLocaleString()}
-                  </span>
-                )}
-            </span>
-          </div>
-        )}
+        {/* 上下文占用。一直显示 —— "窗口多大""固定开销多少"是发消息
+            【之前】就该知道的，尤其准备粘长代码进去的时候。 */}
+        <ContextBar usage={usage} windowTokens={contextWindow} />
 
         {/* 图片错误提示。放在预览上面 —— 它解释的是"为什么少了一张" */}
         {imgError && (

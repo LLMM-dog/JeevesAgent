@@ -61,15 +61,45 @@ function fmtTok(n: number): string {
   return `${(n / 1000).toFixed(1)}K token`;
 }
 
-function SpanRow({ span, maxMs }: { span: TraceSpan; maxMs: number }) {
+function SpanRow({
+  span,
+  maxMs,
+  runStart,
+  runSpan,
+}: {
+  span: TraceSpan;
+  maxMs: number;
+  /** 整个 run 的起始时刻，用来算这一步在时间轴上的位置 */
+  runStart: number;
+  /** 整个 run 的总时长，用来归一化 */
+  runSpan: number;
+}) {
+  // 【每一行自己管展开状态】。
+  //
+  // 用父级的单个 openSpanId 的话同时只能展开一条 —— 而对比两个工具
+  // 调用的输入输出恰恰是最常见的需求（"为什么这次成功那次失败"）。
   const [open, setOpen] = useState(false);
   const Icon = KIND_ICON[span.kind] ?? Wrench;
   const bad = span.status !== "ok";
   const hasDetail = span.input_preview || span.output_preview || span.error;
 
-  // 耗时条。绝对宽度按本次执行最慢的一步归一化 ——
-  // 按固定刻度的话快的步骤全挤成一条线，看不出差异。
-  const pct = maxMs > 0 && span.duration_ms ? (span.duration_ms / maxMs) * 100 : 0;
+  // 甘特式时间条：横向【位置】表示什么时候开始，长度表示持续多久。
+  //
+  // ## 原来的条为什么没用
+  //
+  // 它只按最慢的一步归一化宽度，所有条都从左边开始。于是同一行里
+  // "耗时 200ms"这个数字已经说明了一切，条本身没有增加任何信息 ——
+  // 用户看到的就是一根随机长度的装饰线。
+  //
+  // 加上起始偏移之后它能回答"哪些步骤是串行的、哪一步卡住了整个流程"，
+  // 这是纯数字列表读不出来的。
+  const offsetPct =
+    runSpan > 0 ? ((span.started_at - runStart) / runSpan) * 100 : 0;
+  const widthPct =
+    runSpan > 0 && span.duration_ms ? (span.duration_ms / runSpan) * 100 : 0;
+  // 太短的步骤给一个最小可见宽度，否则 5ms 的调用画不出来，
+  // 看起来像"这一步没发生"。
+  const drawWidth = Math.max(widthPct, 0.8);
 
   return (
     <li>
@@ -104,11 +134,22 @@ function SpanRow({ span, maxMs }: { span: TraceSpan; maxMs: number }) {
           </span>
         )}
 
-        {/* 耗时条 */}
-        <span className="mx-1 h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-[var(--color-border)]/50">
+        {/* 时间轴：位置=何时开始，长度=持续多久 */}
+        <span
+          className="relative mx-1 h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-[var(--color-border)]/50"
+          title={`第 ${fmtDur(span.started_at - runStart)} 开始，持续 ${fmtDur(span.duration_ms)}`}
+        >
           <span
-            className="block h-full rounded-full bg-[var(--color-accent)]/50"
-            style={{ width: `${pct}%` }}
+            className="absolute inset-y-0 rounded-full"
+            style={{
+              left: `${Math.min(99, offsetPct)}%`,
+              width: `${drawWidth}%`,
+              background: bad
+                ? "var(--color-err)"
+                : span.kind === "llm"
+                  ? "var(--color-accent)"
+                  : "color-mix(in srgb, var(--color-accent) 50%, transparent)",
+            }}
           />
         </span>
 
@@ -156,7 +197,13 @@ function SpanRow({ span, maxMs }: { span: TraceSpan; maxMs: number }) {
       {span.children.length > 0 && (
         <ul className="ml-3 border-l border-[var(--color-border)] pl-1">
           {span.children.map((c) => (
-            <SpanRow key={c.span_id} span={c} maxMs={maxMs} />
+            <SpanRow
+              key={c.span_id}
+              span={c}
+              maxMs={maxMs}
+              runStart={runStart}
+              runSpan={runSpan}
+            />
           ))}
         </ul>
       )}
@@ -204,6 +251,24 @@ function collectMax(spans: TraceSpan[]): number {
   return m;
 }
 
+function collectStarts(spans: TraceSpan[]): number[] {
+  const out: number[] = [];
+  for (const s of spans) {
+    out.push(s.started_at);
+    out.push(...collectStarts(s.children));
+  }
+  return out;
+}
+
+function collectEnds(spans: TraceSpan[]): number[] {
+  const out: number[] = [];
+  for (const s of spans) {
+    out.push(s.started_at + (s.duration_ms ?? 0));
+    out.push(...collectEnds(s.children));
+  }
+  return out;
+}
+
 function TraceDetail({ runId }: { runId: string }) {
   const { data, isLoading } = useQuery({
     queryKey: ["trace", runId],
@@ -215,6 +280,17 @@ function TraceDetail({ runId }: { runId: string }) {
 
   const maxMs = collectMax(data.spans);
   const totals = data.span_totals;
+
+  // 时间轴的基准：整个 run 的起点和总跨度。
+  //
+  // 用 span 里最早的 started_at 而不是 run.started_at —— 两者可能差
+  // 几十毫秒（run 记录先写、第一个 span 稍后开始），
+  // 用 run 的会让所有条都往右偏一点，看起来像开头有段空白。
+  const starts = collectStarts(data.spans);
+  const runStart = starts.length ? Math.min(...starts) : 0;
+  const ends = collectEnds(data.spans);
+  const runEnd = ends.length ? Math.max(...ends) : runStart;
+  const runSpan = Math.max(1, runEnd - runStart);
 
   return (
     <div className="space-y-2">
@@ -244,7 +320,13 @@ function TraceDetail({ runId }: { runId: string }) {
 
       <ul>
         {data.spans.map((s) => (
-          <SpanRow key={s.span_id} span={s} maxMs={maxMs} />
+          <SpanRow
+              key={s.span_id}
+              span={s}
+              maxMs={maxMs}
+              runStart={runStart}
+              runSpan={runSpan}
+            />
         ))}
       </ul>
     </div>
@@ -253,31 +335,52 @@ function TraceDetail({ runId }: { runId: string }) {
 
 export default function TracePanel() {
   const qc = useQueryClient();
-  const [openRun, setOpenRun] = useState<string | null>(null);
+  // 【用 Set 而不是单个 id】。
+  //
+  // 单个 id 时展开第二条会自动收起第一条 —— 而对比两次执行
+  // （"上次成功这次失败，差在哪"）恰恰需要同时看。
+  const [openRuns, setOpenRuns] = useState<Set<string>>(new Set());
+  // 选中的会话。null = 还在会话列表层
+  const [pickedSession, setPickedSession] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
-  // 默认只看当前会话。
+  // 两层结构：先会话列表，点进去才看这个会话的 run。
   //
-  // ## 为什么
+  // ## 为什么要分层
   //
-  // 追踪是"这次对话都发生了什么"的记录，而用户打开它几乎总是因为
-  // 当前这个对话有问题。混着别的会话的执行记录，第一屏可能一条
-  // 相关的都没有 —— 而列表默认只取 50 条，真正想看的那条可能被挤掉。
+  // 原来直接铺开所有 run，几十条 run_id 的后 8 位混在一起，没有任何
+  // 线索说明哪条属于哪个对话。想找"刚才那次出错的"只能一条条点开。
   //
-  // 仍然保留"全部会话"，因为跨会话看花费和失败率是合理需求。
+  // 会话是用户脑子里的单位 —— 他记得的是"那次让它改 calc.py 的对话"，
+  // 不是 run_38a91c04。
+  //
+  // 默认选中当前会话：打开追踪几乎总是因为当前对话有问题。
   const sessionId = useChatStore((s) => s.sessionId);
-  const [onlyThisSession, setOnlyThisSession] = useState(true);
-  const scoped = onlyThisSession && sessionId ? sessionId : undefined;
 
   const { data: stats } = useQuery({
     queryKey: ["traceStats"],
     queryFn: api.traceStats,
   });
+
+  const { data: sessions, isLoading: loadingSessions } = useQuery({
+    queryKey: ["traceSessions"],
+    queryFn: api.traceSessions,
+  });
+
+  // 当前会话优先。它没有记录时留在列表层，
+  // 而不是显示一个空的详情页。
+  const effective =
+    pickedSession ??
+    (sessions?.items.some((s) => s.session_id === sessionId)
+      ? sessionId
+      : null);
+
   const { data: runs, isLoading } = useQuery({
-    // scoped 进 key：切会话或切范围后必须重新拉，
+    // effective 进 key：切会话后必须重新拉，
     // 否则显示的还是上一个会话的记录
-    queryKey: ["traces", scoped ?? "all"],
-    queryFn: () => api.listTraces(scoped),
+    queryKey: ["traces", effective ?? "none"],
+    queryFn: () => api.listTraces(effective ?? undefined),
+    enabled: !!effective,
   });
 
   const cleanup = useMutation({
@@ -293,30 +396,42 @@ export default function TracePanel() {
     <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-sm font-medium">执行记录</h2>
-        {stats && (
-          <span className="text-xs text-[var(--color-muted)]">
-            {stats.runs} 次执行 · {stats.spans} 条 span
+        {/* 详情层显示会话标题 —— 不显示的话用户点进来之后
+            不知道自己在看哪个对话的记录。 */}
+        {effective ? (
+          <span className="min-w-0 truncate text-xs text-[var(--color-muted)]">
+            /{" "}
+            {sessions?.items.find((s) => s.session_id === effective)?.title ??
+              "未命名会话"}
           </span>
+        ) : (
+          stats && (
+            <span className="text-xs text-[var(--color-muted)]">
+              {stats.runs} 次执行 · {stats.spans} 条 span
+            </span>
+          )
         )}
-        <button
-          type="button"
-          onClick={() => setOnlyThisSession((v) => !v)}
-          // ml-auto 挪到这里 —— 它要把两个按钮一起推到右边
-          aria-pressed={onlyThisSession}
-          title={
-            onlyThisSession
-              ? "当前只显示这个对话的执行记录"
-              : "正在显示所有对话的执行记录"
-          }
-          className="ml-auto rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg)]"
-        >
-          {onlyThisSession ? "只看当前对话" : "全部对话"}
-        </button>
+        {/* 回到会话列表。只在详情层显示 —— 列表层显示它没有意义，
+            而一个点了没反应的按钮比没有按钮更让人困惑。 */}
+        {effective && (
+          <button
+            type="button"
+            onClick={() => {
+              setPickedSession(null);
+              setOpenRuns(new Set());
+            }}
+            className="ml-auto rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg)]"
+          >
+            ← 所有对话
+          </button>
+        )}
         <button
           type="button"
           onClick={() => cleanup.mutate(stats?.retain_days ?? 14)}
           disabled={cleanup.isPending}
-          className="rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg)]"
+          className={`${
+            effective ? "" : "ml-auto "
+          }rounded-lg border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg)]`}
         >
           {cleanup.isPending ? "清理中…" : `清理 ${stats?.retain_days ?? 14} 天前`}
         </button>
@@ -352,7 +467,67 @@ export default function TracePanel() {
         </div>
       )}
 
-      {isLoading ? (
+      {/* ── 第一层：会话列表 ── */}
+      {!effective ? (
+        loadingSessions ? (
+          <div className="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
+            <Loader2 size={12} className="animate-spin" aria-hidden />
+            加载中…
+          </div>
+        ) : !sessions || sessions.items.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-6 text-center text-xs text-[var(--color-muted)]">
+            还没有执行记录。发一条消息后这里会出现。
+          </div>
+        ) : (
+          <ul className="space-y-1">
+            {sessions.items.map((s) => (
+              <li key={s.session_id}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPickedSession(s.session_id);
+                    setOpenRuns(new Set());
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-left hover:border-[var(--color-accent)]"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate text-xs">{s.title}</span>
+                      {/* 当前对话标出来 —— 列表按时间排，
+                          用户未必认得出哪条是自己正在聊的 */}
+                      {s.session_id === sessionId && (
+                        <span className="shrink-0 rounded bg-[var(--color-accent)]/15 px-1 text-[9px] text-[var(--color-accent)]">
+                          当前
+                        </span>
+                      )}
+                      {s.errors > 0 && (
+                        <span className="shrink-0 text-[10px] text-[var(--color-err)]">
+                          {s.errors} 次失败
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-[var(--color-muted)]">
+                      {new Date(s.last_at).toLocaleString("zh-CN")}
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right text-[10px] tabular-nums text-[var(--color-muted)]">
+                    <div>{s.runs} 次执行</div>
+                    <div>{fmtTok(s.total_tokens)}</div>
+                    {/* 花费只在配过单价时显示。没配价时显示 $0.00
+                        会让人以为免费 —— 那是"不知道"，不是零。 */}
+                    {s.cost_usd > 0 && <div>${s.cost_usd.toFixed(4)}</div>}
+                  </div>
+                  <ChevronRight
+                    size={12}
+                    className="shrink-0 text-[var(--color-muted)]"
+                    aria-hidden
+                  />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )
+      ) : isLoading ? (
         <div className="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
           <Loader2 size={12} className="animate-spin" aria-hidden />
           加载中…
@@ -364,7 +539,7 @@ export default function TracePanel() {
       ) : (
         <ul className="space-y-1">
           {runs.items.map((r) => {
-            const open = openRun === r.run_id;
+            const open = openRuns.has(r.run_id);
             const bad = r.status === "error" || r.stop_reason !== "final";
             return (
               <li
@@ -373,7 +548,14 @@ export default function TracePanel() {
               >
                 <button
                   type="button"
-                  onClick={() => setOpenRun(open ? null : r.run_id)}
+                  onClick={() =>
+                    setOpenRuns((s) => {
+                      const n = new Set(s);
+                      if (n.has(r.run_id)) n.delete(r.run_id);
+                      else n.add(r.run_id);
+                      return n;
+                    })
+                  }
                   aria-expanded={open}
                   className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
                 >

@@ -1008,6 +1008,46 @@ async def search_memories(
     }
 
 
+@router.get("/traces-sessions", summary="按会话汇总的执行记录")
+async def trace_sessions(
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """
+    追踪的第一层：有哪些会话产生过执行记录。
+
+    ## 为什么要这一层
+
+    原来直接铺开所有 run，几十条 run_id 的后 8 位混在一起，
+    没有任何线索说明哪条属于哪个对话 —— 用户想找"刚才那次出错的"
+    只能一条条点开看。
+
+    先按会话分组、带上标题和汇总，点进去再看细节。
+
+    ## 为什么不复用 /traces 再让前端分组
+
+    前端分组拿不到会话标题（run 表里只有 session_id），
+    而且 /traces 有 limit —— 前端拿到的可能只是一部分会话的一部分 run，
+    汇总数字会是错的。
+    """
+    rows = await trace_service.list_session_summaries(db, limit=limit)
+    return {
+        "items": [
+            {
+                "session_id": r["session_id"],
+                # 会话可能已被删（run 有 CASCADE，但汇总是查历史）
+                "title": r["title"] or "未命名会话",
+                "runs": r["runs"],
+                "total_tokens": r["total_tokens"],
+                "cost_usd": r["cost_usd"],
+                "errors": r["errors"],
+                "last_at": r["last_at"],
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/traces", summary="执行记录列表")
 async def list_traces(
     session_id: str | None = Query(None),

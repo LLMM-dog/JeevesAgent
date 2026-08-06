@@ -503,6 +503,25 @@ export const api = {
       spans: TraceSpan[];
     }>(`/traces/${runId}`),
 
+/**
+   * 按会话汇总的执行记录。
+   *
+   * 追踪的第一层。原来直接铺开所有 run，几十条 run_id 后 8 位混在一起，
+   * 没有线索说明哪条属于哪个对话。
+   */
+  traceSessions: () =>
+    request<{
+      items: {
+        session_id: string;
+        title: string;
+        runs: number;
+        total_tokens: number;
+        cost_usd: number;
+        errors: number;
+        last_at: number;
+      }[];
+    }>("/traces-sessions"),
+
   traceStats: () =>
     request<{
       runs: number;

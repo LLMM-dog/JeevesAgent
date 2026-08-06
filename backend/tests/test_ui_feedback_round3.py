@@ -199,22 +199,71 @@ class TestTraceFollowsSession:
 
     def test_panel_defaults_to_current_session(self) -> None:
         """
-        面板默认只看当前会话。
+        面板默认选中当前会话。
 
-        用户打开追踪几乎总是因为当前这个对话有问题。混着别的会话，
-        第一屏可能一条相关的都没有 —— 而列表只取 50 条，
-        真正想看的那条可能被挤掉。
+        用户打开追踪几乎总是因为当前这个对话有问题。
+
+        ## 后来改成了两层
+
+        原来是一个"只看当前对话"的开关。改成"先会话列表、点进去看细节"
+        之后，默认选中当前会话仍然保留 —— 少一次点击。
         """
         src = (FRONT / "components" / "TracePanel.tsx").read_text(encoding="utf-8")
-        assert "onlyThisSession" in src, "没有会话范围控制"
-        assert "api.listTraces(scoped)" in src, "没有把会话 id 传下去"
-        # scoped 要进 queryKey，否则切会话不会重新拉
-        assert 'queryKey: ["traces", scoped' in src
+        assert "pickedSession" in src, "没有会话选择状态"
+        assert "api.listTraces(effective" in src, "没有把会话 id 传下去"
+        # effective 要进 queryKey，否则切会话不会重新拉
+        assert 'queryKey: ["traces", effective' in src
+        # 默认选当前会话
+        assert "s.session_id === sessionId" in src
 
     def test_panel_keeps_all_sessions_option(self) -> None:
-        """跨会话看花费和失败率是合理需求，不能只剩当前会话。"""
+        """
+        能回到全部会话。
+
+        跨会话看花费和失败率是合理需求 —— 而两层结构里"返回"这一步
+        没有的话用户就被锁在一个会话里了。
+        """
         src = (FRONT / "components" / "TracePanel.tsx").read_text(encoding="utf-8")
-        assert "全部对话" in src
+        assert "所有对话" in src, "没有返回会话列表的入口"
+        assert "setPickedSession(null)" in src
+
+    def test_panel_groups_by_session(self) -> None:
+        """
+        第一层是会话列表，不是铺开的 run。
+
+        run_id 的后 8 位混在一起没有任何线索说明哪条属于哪个对话 ——
+        用户记得的是"那次让它改 calc.py 的对话"，不是 run_38a91c04。
+        """
+        src = (FRONT / "components" / "TracePanel.tsx").read_text(encoding="utf-8")
+        assert "api.traceSessions" in src, "没有按会话汇总的查询"
+        # 列表要显示标题和汇总
+        assert "s.runs} 次执行" in src
+
+    def test_multiple_runs_expandable(self) -> None:
+        """
+        能同时展开多条。
+
+        单个 openRun 时展开第二条会自动收起第一条 —— 而对比两次执行
+        （"上次成功这次失败，差在哪"）恰恰需要同时看。
+        """
+        src = (FRONT / "components" / "TracePanel.tsx").read_text(encoding="utf-8")
+        assert "openRuns" in src
+        assert "Set<string>" in src
+        assert "openRuns.has(" in src
+
+    def test_span_bar_shows_timeline(self) -> None:
+        """
+        span 的横条要有信息量。
+
+        原来只按最慢的一步归一化宽度、所有条都从左边开始 —— 同一行里
+        "耗时 200ms"这个数字已经说明了一切，条本身是根装饰线。
+
+        改成甘特式（位置=何时开始，长度=持续多久）之后它能回答
+        "哪些步骤串行、哪一步卡住了整个流程"。
+        """
+        src = (FRONT / "components" / "TracePanel.tsx").read_text(encoding="utf-8")
+        assert "offsetPct" in src, "横条没有起始偏移，等于没有信息"
+        assert "runStart" in src
 
 
 class TestTokenCountFollowsSession:
