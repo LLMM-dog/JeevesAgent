@@ -246,8 +246,10 @@ class TestContextBarSegments:
         src = (FRONT / "components" / "ContextBar.tsx").read_text(encoding="utf-8")
         for label in ("工具定义", "系统提示词", "对话内容"):
             assert label in src, f"缺 {label} 分段"
-        # 每段要有百分比
-        assert "share(" in src, "没有百分比"
+        # 每段要有百分比，且【分母是窗口】
+        assert "const pct = (n: number) => (n / win) * 100" in src, (
+            "百分比不是按窗口算的 —— 分项之间互比会让用户以为窗口快满了"
+        )
 
     def test_has_legend(self) -> None:
         """

@@ -295,7 +295,11 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
 
         {/* 上下文占用。一直显示 —— "窗口多大""固定开销多少"是发消息
             【之前】就该知道的，尤其准备粘长代码进去的时候。 */}
-        <ContextBar usage={usage} windowTokens={contextWindow} />
+        <ContextBar
+          usage={usage}
+          windowTokens={contextWindow}
+          sessionId={sessionId}
+        />
 
         {/* 图片错误提示。放在预览上面 —— 它解释的是"为什么少了一张" */}
         {imgError && (

@@ -367,13 +367,15 @@ export default function TracePanel() {
     queryFn: api.traceSessions,
   });
 
-  // 当前会话优先。它没有记录时留在列表层，
-  // 而不是显示一个空的详情页。
-  const effective =
-    pickedSession ??
-    (sessions?.items.some((s) => s.session_id === sessionId)
-      ? sessionId
-      : null);
+  // 【打开时停在列表层】。
+  //
+  // 上一版默认选中当前会话，想的是"少一次点击"。但那样一来分组这件事
+  // 就白做了 —— 用户点开追踪看到的还是一个会话的 run 列表，
+  // 和改之前没区别，他甚至不知道上面还有一层。
+  //
+  // 当前会话在列表里用"当前"标签标出来，一眼能找到，
+  // 少那一次点击不值得把整个结构藏起来。
+  const effective = pickedSession;
 
   const { data: runs, isLoading } = useQuery({
     // effective 进 key：切会话后必须重新拉，

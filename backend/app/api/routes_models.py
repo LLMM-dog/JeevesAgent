@@ -22,6 +22,7 @@ prompts.py 的 _read 没有缓存，所以存盘即生效，不用重启。
 from __future__ import annotations
 
 import structlog
+from app.api.deps import get_registry
 from app.api.schemas import (
     ModelCreate,
     ModelOut,
@@ -29,7 +30,7 @@ from app.api.schemas import (
     PersonaFile,
     PersonaUpdate,
 )
-from app.core.config import PROJECT_ROOT
+from app.core.config import PROJECT_ROOT, settings
 from app.core.crypto import decrypt
 from app.core.exceptions import (
     AppError,
@@ -40,9 +41,13 @@ from app.core.exceptions import (
 from app.core.ids import model_id as new_model_id
 from app.infra.db.session import get_db
 from app.infra.llm.openai_compat import get_llm
+from app.modules.agent import prompts
+from app.modules.agent.tokens import count_text, count_tools
+from app.modules.agent.tools.base import ToolRegistry
 from app.modules.provider import service as ps
 from app.modules.provider.models import Model, ModelBinding, Provider
-from fastapi import APIRouter, Depends
+from app.modules.session.models import Session
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -387,4 +392,66 @@ async def available_models(
             }
             for m in probed
         ]
+    }
+
+@router.get("/context-overhead", summary="固定上下文开销")
+async def context_overhead(
+    session_id: str = Query("", description="留空则按 chat 功能位的模型算"),
+    db: AsyncSession = Depends(get_db),
+    registry: ToolRegistry = Depends(get_registry),
+) -> dict[str, object]:
+    """
+    工具定义 + 系统提示词占多少 token。
+
+    ## 为什么要有这个接口
+
+    这两项在【发消息之前】就确定了：工具集和人格文件都是配置，
+    不随对话变。而用户想知道"还剩多少空间粘代码"恰恰是在发消息之前。
+
+    只在 run 期间由 context_usage 事件报的话，切一次页面就只剩
+    对话内容那一段，看起来像固定开销凭空消失了。
+
+    ## 为什么不放进会话详情
+
+    会话详情的路由拿不到 ToolRegistry（它在 app.state 上，
+    要走依赖注入）。而且这个值和会话无关 —— 全局一份，
+    换会话不变。放进详情会让每次开会话都白算一遍。
+
+    ## 返回的是估算值
+
+    本地用 tiktoken(cl100k_base)，而各家模型用自己的分词器，
+    实测偏高 30% 左右。有真实 usage 时前端按比例校正 ——
+    所以这里必须标明 is_estimate。
+    """
+    specs = registry.to_specs()
+    tool_names = [
+        str((s.get("function") or {}).get("name", "")) for s in specs
+    ]
+    system = prompts.build_system_prompt(
+        workspace=str(settings.workspace_dir), tool_names=tool_names
+    )
+
+    win = 0
+    try:
+        sess_model_pk = ""
+        if session_id:
+            row = (
+                await db.execute(select(Session).where(Session.id == session_id))
+            ).scalars().first()
+            if row is not None:
+                sess_model_pk = row.model_pk or ""
+        m = await ps.resolve(db, purpose="chat", override_pk=sess_model_pk)
+        win = m.context_window
+    except AppError:
+        # 没配模型时窗口未知。返回 0，前端回落到默认值 ——
+        # 那时连对话都发不出去，比例准不准无关紧要。
+        win = 0
+
+    return {
+        "tools_tokens": count_tools(specs) if specs else 0,
+        "system_tokens": count_text(system),
+        "tool_count": len(specs),
+        "window_tokens": win,
+        # 【必须标出来】。这是本地分词器的数，不是模型给的。
+        "is_estimate": True,
     }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
+import { useChatStore } from "@/store/chat";
 
 export default function Sidebar() {
   const nav = useNavigate();
@@ -24,6 +25,22 @@ export default function Sidebar() {
     queryKey: ["sessions", q],
     queryFn: () => api.listSessions({ size: 50, q: q || undefined }),
   });
+
+  // 标题生成后刷新列表。
+  //
+  // ## 为什么需要这个
+  //
+  // 首轮结束时后端发 title 事件，store 里的 title 更新了 —— 但侧栏读的是
+  // ["sessions"] 这个 query 的缓存，它不会因为 store 变化而重新拉。
+  // 于是列表里一直显示"未命名会话"，要刷新页面或切一次会话才变。
+  //
+  // 监听 store 的 title 而不是在 store 里 invalidate：store 是纯状态层，
+  // 不持有 queryClient；从这里订阅也更符合"谁用谁负责刷新"。
+  const liveTitle = useChatStore((s) => s.title);
+  useEffect(() => {
+    if (!liveTitle) return;
+    void qc.invalidateQueries({ queryKey: ["sessions"] });
+  }, [liveTitle, qc]);
 
   const create = useMutation({
     mutationFn: () => api.createSession(),

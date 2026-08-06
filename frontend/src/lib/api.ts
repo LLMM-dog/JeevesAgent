@@ -228,6 +228,25 @@ export const api = {
    *
    * already_added 标出已加过的，前端置灰。不标的话用户点了才知道重复。
    */
+/**
+   * 固定上下文开销（工具定义 + 系统提示词）。
+   *
+   * 这两项在发消息之前就确定了，而"还剩多少空间粘代码"恰恰是发消息
+   * 之前的问题。只靠 run 期间的 context_usage 事件的话，
+   * 切一次页面就只剩对话内容那一段。
+   */
+  contextOverhead: (sessionId?: string) =>
+    request<{
+      tools_tokens: number;
+      system_tokens: number;
+      tool_count: number;
+      window_tokens: number;
+      is_estimate: boolean;
+    }>(
+      "/context-overhead" +
+        (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""),
+    ),
+
   availableModels: (providerId: string) =>
     request<{
       items: {

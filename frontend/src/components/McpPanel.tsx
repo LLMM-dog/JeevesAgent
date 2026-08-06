@@ -55,6 +55,9 @@ export default function McpPanel() {
     mutationFn: api.mcpReload,
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["mcpServers"] });
+      // 工具集/人格文件改了，固定开销跟着变 ——
+      // 不失效的话上下文条显示的还是旧值。
+      qc.invalidateQueries({ queryKey: ["contextOverhead"] });
       void qc.invalidateQueries({ queryKey: ["mcpPending"] });
     },
   });

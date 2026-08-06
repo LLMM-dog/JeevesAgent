@@ -12,6 +12,7 @@
  */
 
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Composer 依赖一堆 store 和子组件，全部打桩 ——
@@ -58,10 +59,24 @@ afterEach(() => {
   delete (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
 });
 
+/**
+ * Composer 里的 ContextBar 用 useQuery 拉固定开销，所以要有
+ * QueryClientProvider —— 没有的话报 "No QueryClient set"。
+ *
+ * retry: false 是必须的：测试里请求会失败（没有后端），
+ * 默认重试会让每个用例多等几秒。
+ */
+function renderWithQuery(ui: React.ReactElement) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+}
+
 describe("麦克风按钮", () => {
   it("浏览器不支持时【整个不渲染】", async () => {
     const C = (await import("./Composer")).default;
-    render(<C />);
+    renderWithQuery(<C />);
     expect(screen.queryByLabelText("语音输入")).toBeNull();
   });
 
@@ -70,7 +85,7 @@ describe("麦克风按钮", () => {
       FakeRecognition;
     vi.resetModules();
     const C = (await import("./Composer")).default;
-    render(<C />);
+    renderWithQuery(<C />);
     expect(screen.queryByLabelText("语音输入")).not.toBeNull();
   });
 
@@ -79,7 +94,7 @@ describe("麦克风按钮", () => {
       FakeRecognition;
     vi.resetModules();
     const C = (await import("./Composer")).default;
-    render(<C />);
+    renderWithQuery(<C />);
     expect(screen.queryByLabelText("语音输入")).not.toBeNull();
   });
 
@@ -90,7 +105,7 @@ describe("麦克风按钮", () => {
       FakeRecognition;
     vi.resetModules();
     const C = (await import("./Composer")).default;
-    render(<C />);
+    renderWithQuery(<C />);
     const btn = screen.getByLabelText("语音输入");
     expect(btn.getAttribute("title")).toContain("音频");
   });
@@ -100,7 +115,7 @@ describe("麦克风按钮", () => {
       FakeRecognition;
     vi.resetModules();
     const C = (await import("./Composer")).default;
-    render(<C />);
+    renderWithQuery(<C />);
     expect(screen.getByLabelText("语音输入").getAttribute("aria-pressed")).toBe(
       "false",
     );

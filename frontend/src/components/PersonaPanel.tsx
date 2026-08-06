@@ -51,6 +51,9 @@ export default function PersonaPanel() {
       setDirty(false);
       setMsg("已保存，下一轮对话生效");
       qc.invalidateQueries({ queryKey: ["personas"] });
+      // 工具集/人格文件改了，固定开销跟着变 ——
+      // 不失效的话上下文条显示的还是旧值。
+      qc.invalidateQueries({ queryKey: ["contextOverhead"] });
     },
     onError: (e: Error) => setMsg(e.message),
   });

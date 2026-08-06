@@ -318,7 +318,9 @@ class TestTokenAccountingHonest:
         src = (ROOT / "frontend" / "src" / "components" / "ContextBar.tsx").read_text(
             encoding="utf-8"
         )
-        assert "发一条消息后显示占用" in src, "没有 usage 时整块消失了"
+        # 没有实测数据时用 /context-overhead 的估算值，
+        # 而不是整块消失或只剩一段
+        assert "api.contextOverhead" in src, "没有 usage 时拿不到固定开销"
         assert "windowTokens" in src
 
     def test_context_bar_segments_clamped(self) -> None:
