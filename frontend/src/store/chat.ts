@@ -872,14 +872,36 @@ function handleEvent<K extends SseEventName>(
       break;
     }
 
-    case "memory_recalled": {
-      // 记忆被召回时要让用户看到用了哪些 ——
-      // 记忆是自动注入的，不显示的话用户不知道 AI 的回答受了什么影响，
-      // 更不知道某条错误记忆正在生效。
-      const d = data as SseEventMap["memory_recalled"];
-      set({ recalledMemories: d.items });
-      break;
-    }
+        case "memory_recalled": {
+          // 记忆被召回时要让用户看到用了哪些 ——
+          // 记忆是自动注入的，不显示的话用户不知道 AI 的回答受了什么影响，
+          // 更不知道某条错误记忆正在生效。
+          const d = data as SseEventMap["memory_recalled"];
+          set({ recalledMemories: d.items });
+          break;
+        }
+
+        case "refs_expanded": {
+          // 引用失败必须提示。
+          //
+          // 用户打了 @某个文件 却没生效时，不提示的话他只会觉得
+          // "AI 没看我给的文件"—— 而真相是那个引用展开失败了
+          // （文件不存在、超过 64KB 单文件上限、或者被路径白名单拒绝）。
+          //
+          // 成功时不提示：那是预期行为，弹一条"引用成功"只是噪音。
+          const d = data as SseEventMap["refs_expanded"];
+          if (d.failures && d.failures.length > 0) {
+            set({
+              banner: {
+                kind: "warn",
+                message: `${d.failures.length} 个引用没能展开`,
+                hint: d.failures.slice(0, 3).join("；"),
+                retryable: false,
+              },
+            });
+          }
+          break;
+        }
 
     case "context_usage":
       set({ usage: data as SseEventMap["context_usage"] });

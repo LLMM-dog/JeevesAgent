@@ -94,44 +94,42 @@ function parseEvent(raw: string): { event: string; data: any } | null {
 
 **JSON 解析失败不能抛异常**——一个坏事件不该终止整个流。记录并跳过。
 
-## dispatch
+## 事件分发
 
-```typescript
-function dispatch(e: { event: string; data: any }, h: EventHandlers): void {
-  switch (e.event) {
-    case "meta":              h.onMeta(e.data); break;
-    case "agent_start":       h.onAgentStart(e.data); break;
-    case "thinking":          h.onThinking(e.data); break;
-    case "message":           h.onMessage(e.data); break;
-    case "tool_start":        h.onToolStart(e.data); break;
-    case "tool_end":          h.onToolEnd(e.data); break;
-    case "approval_required": h.onApprovalRequired(e.data); break;
-    case "interact_required": h.onInteractRequired(e.data); break;
-    case "todo_updated":      h.onTodoUpdated(e.data); break;
-    case "artifact_updated":  h.onArtifactUpdated(e.data); break;
-    case "compacted":         h.onCompacted(e.data); break;
-    case "context_usage":     h.onContextUsage(e.data); break;
-    case "model_fallback":    h.onModelFallback(e.data); break;
-    case "sandbox_fallback":  h.onSandboxFallback(e.data); break;
-    case "mcp_unavailable":   h.onMcpUnavailable(e.data); break;
-    case "agent_end":         h.onAgentEnd(e.data); break;
-    case "title":             h.onTitle(e.data); break;
-    case "error":             h.onError(e.data); break;
-    case "cancelled":         h.onCancelled(e.data); break;
-    case "done":              h.onDone(e.data); break;
-    case "ping":              break;                    // 心跳，显式忽略
-    default:
-      // 绝不静默 break。后端加了事件而前端没跟上时，这行是唯一的发现途径。
-      // 一条教训：后端 14 种事件前端只处理 6 种，气泡树功能等于不存在，
-      // 且完全没有报错。
-      console.warn("[sse] 未处理的事件:", e.event, e.data);
-  }
-}
-```
+实现在 `store/chat.ts` 的 `handleEvent()`，一个 switch on `SseEventName`。
 
-`EventHandlers` 是一个**所有字段必需**的 interface（不用 `?` 可选）。这样后端加事件时，TS 编译会在 handler 定义处报错，强制处理。
+**不是 handlers 对象。** 早期设计是"所有字段必需的 EventHandlers interface"，靠 TS 在 handler 定义处报错来强制处理新事件。实际走的是 store 里的 switch + `SseEventMap` 类型 —— 漏了 case 时 TS 不报错（switch 不要求穷尽），所以守卫改成了后端的契约测试。
 
-这比运行时 `console.warn` 更早发现问题。两者都要有。
+### 必须处理的事件
+
+`SseEventMap` 声明了全部 25 个事件，store 的 switch 处理其中 22 个。三个明确不处理：
+
+| 不处理 | 原因 |
+| --- | --- |
+| `ping` | 心跳，显式 `break` |
+| `meta` | 在 `sse.ts` 里消费，拿 `run_id` |
+| `interact_required` / `sandbox_fallback` / `mcp_unavailable` | 枚举里有定义但后端从没 emit 过 —— 降级提示改成走 `GET /api/meta` 的字段 |
+
+`default` 分支**绝不静默 break**，一定 `console.warn`。后端加了事件而前端没跟上时，这行是运行时唯一的发现途径。
+
+一条教训：曾经后端发 14 种事件而前端只处理 6 种，气泡树功能等于不存在，且完全没有报错。
+
+### 守卫测试
+
+`backend/tests/test_events_contract.py` 扫描四处：`Ev` 枚举、`docs/03-api/sse-events.md` 的事件总表、`SseEventMap`、store 的 switch。不一致就失败。
+
+这个测试之前不存在（虽然 `events.py` 的 docstring 声称它存在），于是四个事件悄悄漏出了文档：`approval_resolved` / `compacting` / `memory_recalled` / `refs_expanded`。
+
+### 几个容易漏的事件
+
+| 事件 | 漏了会怎样 |
+| --- | --- |
+| `approval_resolved` | 审批弹框一直挂着。超时（视为拒绝）时用户那边不会有任何变化，看起来像卡死 |
+| `compacting` | 压缩要调一次 LLM，可能几秒。不显示"正在压缩"的话界面看起来卡住了 |
+| `memory_recalled` | 记忆是自动注入的。不显示的话用户不知道回答受了什么影响，更不知道某条错误记忆正在生效 |
+| `refs_expanded` | `failures` 非空时不提示的话，用户打了 `@某文件` 却没生效，他只会觉得"AI 没看我给的文件" |
+
+`refs_expanded` 成功时**不提示** —— 那是预期行为，弹一条"引用成功"只是噪音。
 
 ## 取消
 
@@ -190,6 +188,55 @@ h.onNetworkError = () => {
 
 已经开始接收数据后断开则不重试。
 
+## 切会话：后台 run 的恢复
+
+切会话时 `openSession` 会 abort 当前的 fetch。**这只停本地读取，不取消服务端的生成** —— 那是有意的，用户切走的意图是"让它在后台跑完"。
+
+于是切回来时需要知道"它还在跑吗"。
+
+### 检测 + 轮询
+
+`openSession` 末尾调 `watchBackgroundRun()`：
+
+```
+GET /api/sessions/{id}/active-run
+  → null    什么都不做
+  → run_id  锁输入框（pending: true）+ 显示提示 + 每 2 秒轮询
+             轮到 active-run 返回 null 时解锁
+```
+
+**必须锁输入框。** 不锁的话用户能输入，一发就撞 409（`run_in_progress`）—— 而那个错误原来被前端报成"连接中断"，措辞和真因完全对不上。
+
+轮询间隔 2 秒：再密就是在刷后端，再疏用户会觉得卡住了。每轮同时拉一次 `listMessages` 拿增量输出。
+
+### 为什么是轮询而不是重连 SSE
+
+一个 run 的 EventBus 只有一个队列、一个消费者。原来的消费者（切走时那个 HTTP 连接）已经 `detach()` 了，队列被清空 —— **那些事件已经永久丢失**，没有可重连的流。
+
+要真正支持重连，得让 bus 支持多消费者 + 事件重放缓冲，那是个大得多的改动。而 run 一直在往库里写消息，轮询就能拿到增量 —— 用户看到的是"每两秒多出一段"而不是逐字流式，但至少内容在动，而且能知道什么时候结束。
+
+见 [../01-architecture/events.md](../01-architecture/events.md#detach没人听的时候不能阻塞)。
+
+### 所有回调必须校验 sessionId
+
+`send` 的回调是闭包，捕获的是发消息那一刻的 `sessionId`。用户切走后它们仍会触发，无条件 `set()` 会把上一个会话的状态写进当前界面：
+
+| 回调 | 不校验的后果 |
+| --- | --- |
+| `onEvent` | 会话 A 的输出流进 B 的气泡列表 |
+| `onClose` | 清掉 B 正在进行的 pending/streaming，输入框提前解锁 |
+| `onClose("network")` 里的 `openSession(旧 id)` | 把 A 的历史灌进 store 而路由指向 B —— 之后在"B 的页面"发消息实际发往 A |
+| `done` 事件里的 `listMessages().then()` | 往返几百毫秒，期间切走就用旧会话的消息覆盖新会话 |
+| `openSession` 自己的响应 | 快速连点 A→B→C 时三个请求并发飞行，早发起的后到就会覆盖 |
+
+统一做法：回调开头 `if (get().sessionId !== sessionId) return;`。
+
+### 409 不能报成"连接中断"
+
+`sse.ts` 原来把 `ApiError` 也归到 network 分支。于是 409 显示成"连接中断：该会话已有正在进行的对话" —— 而且 `onClose("network")` 还会触发一次 `openSession` 重新拉历史，把用户刚发的那条乐观插入的消息抹掉（409 发生在后端落库**之前**）。
+
+现在分开：`onApiError` 撤掉乐观消息、显示真实错误码和 hint，并在 `run_in_progress` 时开始轮询等它跑完。
+
 ## 状态机
 
 前端的流式状态：
@@ -225,15 +272,21 @@ idle
 | `tool_start` | 插入工具卡片，状态"执行中" |
 | `tool_end` | 更新该卡片为完成/失败，填入 `display` |
 | `approval_required` | 弹模态框，高亮 `risks`，显示倒计时 |
-| `interact_required` | 弹模态框或在气泡内渲染选项按钮 |
+| `approval_resolved` | **收掉模态框**。漏了它超时后弹框会一直挂着 |
 | `todo_updated` | 更新顶栏进度条 + 看板 |
+| `refs_expanded` | `failures` 非空时显示警告条；成功不提示 |
+| `memory_recalled` | 在气泡上方显示"用了这几条记忆" |
+| `compacting` | 显示"正在压缩"（要调一次 LLM，可能几秒） |
 | `compacted` | 在时间线插入"已压缩 N 条消息"分隔条 |
-| `context_usage` | 更新顶栏占用条 |
+| `context_usage` | 更新占用条。固定开销另从 `/context-overhead` 拉 |
 | `model_fallback` | toast 提示一次 |
-| `sandbox_fallback` | **常驻警示条**，不是 toast |
 | `title` | 更新会话列表标题 |
 | `error` | 气泡内红色错误块，`retryable` 时显示重试按钮 |
 | `done` | 合并 streaming 到 messages，解锁输入框 |
+
+`context_usage` 在 run 收尾时会**再发一次**，值含 `completion_tokens`，语义是"下一轮会发多少"。只处理轮内那次的话，模型写了一大段而占用条几乎没动，用户会以为回复不占上下文。
+
+`interact_required` / `sandbox_fallback` / `mcp_unavailable` 后端目前不发 —— 降级提示走 `GET /api/meta` 的字段，前端读它渲染常驻警示条。
 
 ## Markdown 增量渲染的性能
 

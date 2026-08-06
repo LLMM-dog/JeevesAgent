@@ -115,8 +115,10 @@ export type SseEventName =
   | "compacted"
   | "artifact_updated"
   | "memory_recalled"
-  | "approval_required"
+  | "refs_expanded"
   | "interact_required"
+  | "sandbox_fallback"
+  | "mcp_unavailable"
   | "artifact"
   | "title"
   | "model_fallback"
@@ -297,7 +299,28 @@ export interface SseEventMap {
   compacting: CompactingEvent;
   compacted: CompactedEvent;
   artifact_updated: ArtifactUpdatedEvent;
+  /**
+   * 引用展开结果。
+   *
+   * failures 非空时必须让用户看到 —— 他打了 @文件 却没生效的话，
+   * 不提示的话他只会觉得"AI 没看我给的文件"，而不知道是引用失败了。
+   */
+  refs_expanded: {
+    ok: number;
+    failures: string[];
+    bytes_used: number;
+    skills?: string[];
+  } & EventCommon;
+
   memory_recalled: MemoryRecalledEvent;
+  /**
+   * 下面两个枚举里有定义但后端目前不 emit —— 降级提示最后改成走
+   * /api/meta 的字段（前端轮询读）。留着声明是为了将来启用时
+   * TS 能立刻检查到漏处理的地方。
+   */
+  sandbox_fallback: { reason: string } & EventCommon;
+  mcp_unavailable: { server_id: string; reason: string } & EventCommon;
+
   interact_required: EventCommon & {
     call_id: string;
     question: string;

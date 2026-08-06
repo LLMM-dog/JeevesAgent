@@ -18,7 +18,7 @@ _current_bus: ContextVar[EventBus | None] = ContextVar("current_bus", default=No
 def current_bus() -> EventBus | None:
     return _current_bus.get()
 
-async def emit(event: str, **data) -> None:
+async def emit(event: Ev, **data) -> None:
     bus = _current_bus.get()
     if bus is None:
         return          # 无订阅者时静默 no-op
@@ -45,26 +45,74 @@ async def emit(event: str, **data) -> None:
 
 ```python
 class EventBus:
-    def __init__(self, maxsize: int = 512):
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+    def __init__(self, maxsize: int | None = None):
+        self._queue = asyncio.Queue(maxsize=maxsize or settings.agent.event_queue_size)
+        self.dropped = 0
+        self._closed = False
+        self._detached = False
 
-    async def push(self, event: str, data: dict) -> None:
-        payload = {"event": event, "data": data, "ts": now_ms()}
+    async def push(self, event: Ev, data: dict) -> None:
+        if self._closed or self._detached:
+            return
+        payload = {"event": str(event), "data": {**data, "ts": ..., "span_id": ...}}
         if event in _DELTA_EVENTS:
-            # 增量类事件（thinking / message）队列满时直接丢弃，不阻塞生成。
+            # 增量类（thinking / message）队列满时直接丢弃，不阻塞生成。
             # 丢几个字符用户几乎无感，而阻塞会让整个生成卡住。
             try:
                 self._queue.put_nowait(payload)
             except asyncio.QueueFull:
-                _dropped.inc()
+                self.dropped += 1
         else:
-            # 结构类事件（agent_start/agent_end/tool_start/tool_end）必须保序入队，
-            # 哪怕阻塞。丢了 agent_end 前端的气泡树就永远转圈，
-            # 丢了 tool_end 那个工具卡片永远停在"执行中"。
-            await self._queue.put(payload)
+            # 结构类要保序入队，可以等 —— 但【不能无限等】，见下。
+            try:
+                await asyncio.wait_for(
+                    self._queue.put(payload),
+                    timeout=settings.agent.event_put_timeout,
+                )
+            except TimeoutError:
+                self.dropped += 1
 ```
 
-`_DELTA_EVENTS = {"thinking", "message"}`。只有这两个允许丢。
+注意 `ts` / `span_id` / `parent_span_id` / `depth` 都在 **`data` 内部**，不是 payload 顶层。
+
+`_DELTA_EVENTS = {Ev.THINKING, Ev.MESSAGE}`。只有这两个允许无条件丢 —— 丢了 `agent_end` 前端的气泡树永远转圈，丢了 `tool_end` 那个工具卡片永远停在"执行中"。
+
+`push` 只接 `Ev` 枚举，不接裸字符串。事件名散落成各处的字符串字面量时，很容易出现同名事件两个不同 schema（一处带 `call_id` 一处不带），而前端只能容忍差异。
+
+### detach：没人听的时候不能阻塞
+
+**这是一个真实死锁的修复。** 用户在 auto 模式下切走会话时：
+
+```
+1. 前端 abort fetch（只停本地读取，服务端 run 继续 —— 这是有意的，
+   用户切走的意图是"让它在后台跑完"）
+2. Starlette 取消 SSE 响应任务，消费端不再调 bus.get()
+3. 队列很快填满（512 槽位，auto 模式一条长回复的 delta 就够）
+4. 下一个结构类事件（tool_start / tool_end / approval_required）
+   执行 await queue.put() —— 永久阻塞
+5. produce() 的 finally 永不执行
+   → run_registry.unregister 不执行
+   → task 永远不 done
+   → active_run_of() 永远返回它
+```
+
+结果是那个会话被**永久锁死**：切回去看不到新输出（agent 卡在第 4 步，不再写库），发消息永远 409（而错误信息说的是"连接中断"），只有重启进程才能恢复。
+
+SSE 生成器退出时调 `bus.detach()`，此后 push 变 no-op，run 继续跑完、继续写库、finally 正常执行。
+
+**detach 必须同时清空队列。** 只置标志位不够 —— 已经卡在 `await put()` 上的协程不会因为标志位变化而醒来，它在等一个永远不会腾出的槽位。
+
+**为什么不是取消 run**：用户切走会话的意图是"让它在后台跑"，不是"停掉它"。取消的话 auto 模式下跑了一半的任务就废了 —— 而那正是他切走去干别的事的原因。
+
+切回来时前端调 `GET /api/sessions/{id}/active-run` 判断后台是否还在跑，然后锁输入框 + 轮询拉增量。见 [../03-api/endpoints-chat.md](../03-api/endpoints-chat.md)。
+
+### 入队超时是兜底
+
+`event_put_timeout` 默认 30 秒。detach 覆盖了"消费端正常退出"这条路径，这个超时兜的是其余情况：消费端还在但卡住了（网络极慢的客户端），或者 detach 因为某个异常路径没被调到。
+
+权衡很清楚：无限等的代价是整个 run 永久死锁 + 会话被锁死 + DB 连接泄漏（要重启进程）；丢一个事件的代价是前端某个工具卡片停在"执行中"（刷新一下就好）。
+
+> 记一个实现细节：丢弃时的日志字段**不能叫 `event`** —— structlog 的第一个位置参数就叫 event，传 `event=...` 会撞成 `got multiple values for argument 'event'`。而这个 TypeError 只在异常处理路径里发生，正常跑的时候永远不会暴露。
 
 ## span 三件套
 
@@ -171,3 +219,15 @@ def sse_encode(event: str, data: dict) -> str:
 4. 前端的 `default` 分支必须 `console.warn` 未知事件名，不能静默 `break`
 
 第 4 条是兜底：即使有人忘了改前端，开发时也能在控制台立即看到。
+
+还有一层真正的守卫：`backend/tests/test_events_contract.py` 扫描 `Ev` 枚举、
+`sse-events.md` 的事件总表、前端 `SseEventMap` 与 store 的 switch，
+四者不一致就测试失败。
+
+这个测试之前**不存在**（虽然本文件和 `events.py` 的 docstring 都声称它存在），
+于是四个事件悄悄漏出了文档表：`approval_resolved` / `compacting` /
+`memory_recalled` / `refs_expanded`。前端处理了、后端在发，只有那份
+"唯一真源"不知道。
+
+漏文档的后果不是文档难看 —— 是下一个改这块的人会照着过时的表去改前端 switch，
+然后某个事件静默丢失。

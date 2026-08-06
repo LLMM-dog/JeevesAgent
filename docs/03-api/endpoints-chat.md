@@ -42,13 +42,15 @@
 
 ### PATCH /api/sessions/{id}
 
-可改：`title` / `pinned` / `approval_mode` / `private_mode` / `amnesia_mode` / `vision_mode`
+可改字段：`title`、`pinned`、`approval_mode`、`vision_mode`、`private_mode`、`amnesia_mode`、`work_dir`、`model_pk`。
 
-```jsonc
-{ "approval_mode": "auto" }
-```
+用 `exclude_unset` 区分"没传"和"传了 null"—— 否则前端只想改标题时会把别的字段全清空。
 
-`vision_mode` 设为 true 时校验当前 chat/vision 位模型的 `supports_vision`。不是 `true` 则返回 400 `no_vision_model`。
+`vision_mode` 开在未核验的模型上返回 400 `vision_unverified`，附带"去设置页核验"的 hint。前端不重复判断（能力状态在设置页才拿得到）。
+
+设 `work_dir` 会**自动往白名单加一条可写条目**，清空时自动撤销。不自动加的话用户选完工作目录发现 agent 读不了，而他想不到还要去白名单里再加一遍。
+
+`private_mode` / `amnesia_mode` 是两件事：私密是"别记住我说的"（拦写入侧三个记忆工具），失忆是"别拿以前的事来烦我"（拦召回入口）。拆成两个开关是因为用途不同 —— 调试提示词时要失忆但不介意被记住，聊敏感话题时要私密但仍需要之前的上下文。
 
 ### DELETE /api/sessions/{id}
 
@@ -136,7 +138,9 @@
     {"type": "tool", "name": "run_python"},
     {"type": "macro", "name": "daily-standup"}
   ],
-  "attachment_ids": ["att_2kL9mN3pQ7xR"]
+  "attachment_ids": ["att_2kL9mN3pQ7xR"],
+  // 图片以 data URL 传，服务端校验魔数、大小、数量上限
+  "images": ["data:image/png;base64,..."]
 }
 ```
 
@@ -210,37 +214,31 @@
 
 `kind=text` 用 `answer`，`kind=single`/`multi` 用 `selected`。
 
-### GET /api/runs/{run_id}
+### GET /api/sessions/{id}/active-run
 
-run 详情。M6 后含 span 树。
+这个会话有没有正在后台跑的 run。
 
-```jsonc
-{
-  "id": "run_xxx",
-  "session_id": "ses_xxx",
-  "status": "done",
-  "stop_reason": "final",
-  "turns": 7,
-  "prompt_tokens": 45230,
-  "completion_tokens": 3120,
-  "started_at": 1785312000000,
-  "ended_at": 1785312048000,
-  "spans": [{
-    "id": "spn_xxx",
-    "parent_span_id": null,
-    "depth": 0,
-    "kind": "agent",
-    "name": "main",
-    "status": "ok",
-    "duration_ms": 48000,
-    "children": [ /* 递归 */ ]
-  }]
-}
+```json
+{ "run_id": "run_9xK2mQ7pR4Lp" }
 ```
 
-`spans` 是**已组装成树**的结构（后端做树形化），前端直接渲染。扁平数组让前端自己拼树是常见的多余工作。
+没有则返回 `null`。
 
-## Todo
+#### 为什么需要这个接口
+
+用户在 auto 模式下**切走会话时，服务端的 run 会继续跑完** —— 那是有意的，他要的就是"让它自己跑"。
+
+但切回来时前端只会 `listMessages`，看到的是切走那一刻的历史，之后再没有新内容。而后台其实一直在写库。用户以为卡死了，一发消息还会撞 409（`run_in_progress`）。
+
+有了这个接口，前端切回来能知道"还在跑"，于是锁上输入框、显示提示、轮询拉增量，跑完自动解锁。
+
+#### 为什么不返回进度
+
+进度在事件流里，而事件流已经随着上一个连接的 `detach()` 消失了 —— 那个队列被清空，那些事件永久丢失。这里能诚实给出的只有"在跑 / 不在跑"。
+
+多返回一个猜测的进度比不返回更糟。要真支持重连得让 EventBus 支持多消费者 + 事件重放缓冲，见 [../01-architecture/events.md](../01-architecture/events.md#detach没人听的时候不能阻塞)。
+
+> 单个 run 的执行树看 `GET /api/traces/{run_id}`，见 [endpoints-config.md](endpoints-config.md#追踪)。
 
 ### GET /api/sessions/{id}/todos
 
@@ -285,27 +283,8 @@ run 详情。M6 后含 span 树。
 
 ## 附件
 
-### POST /api/attachments
+### 图片上传
 
-`multipart/form-data`，字段名 `file`。
+见 [endpoints-config.md](endpoints-config.md#图片)：`POST /api/images/upload`。
 
-```jsonc
-// 201
-{
-  "id": "att_2kL9mN3pQ7xR",
-  "filename": "screenshot.png",
-  "orig_name": "屏幕截图 2026-08-02.png",
-  "mime": "image/png",
-  "size_bytes": 204800,
-  "is_image": true,
-  "created_at": 1785312000000
-}
-```
-
-`is_image` 用 magic bytes 判定，不信扩展名。
-
-### GET /api/attachments/{id}/raw
-
-返回原始文件流。图片预览用。
-
-`Content-Disposition: inline` 对图片，`attachment` 对其它类型——否则浏览器会尝试渲染 PDF 之外的二进制。
+它返回 data URL 而不是附件 id —— 图片以 base64 多模态注入，前端拿到就能直接回显缩略图，不需要再请求一次。所以 `POST /api/chat` 的 `images` 字段收的是 data URL。

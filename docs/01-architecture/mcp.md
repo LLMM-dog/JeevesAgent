@@ -6,8 +6,8 @@
 
 | 层 | 文件 | 职责 |
 | --- | --- | --- |
-| 协议层 | `infra/mcp/client.py` | 与 MCP 服务器通信，`list_tools` / `call_tool` |
-| 接线层 | `modules/agent/tools/mcp_tool.py` | 把 MCP 工具包装成本项目的 `Tool` |
+| 协议层 | `modules/mcp/manager.py` | 与 MCP 服务器通信，`list_tools` / `call_tool` |
+| 接线层 | `modules/mcp/tools.py` | 把 MCP 工具包装成本项目的 `Tool` |
 | 配置层 | `config/mcp_servers.yaml` | 用户声明有哪些服务器 |
 
 **分层的价值**：如果将来要改成"在 Web 设置页里加 MCP 服务器"（存表而非读文件），只需改配置层的来源，协议层和接线层不动。这样的演进路径是常见的。
@@ -130,6 +130,49 @@ MCP 工具在前端**统一用通用的 `ToolCallCard` 展示**，不为每个 M
 
 **MCP 工具定义是常驻上下文的**，这是它的隐性成本。一个 MCP 服务器提供 20 个工具，每个工具的 JSON Schema 约 100~300 token，合计几千 token 常驻。
 
-所以：不要一次性开一堆 MCP 服务器。`enabled: false` 关掉不用的。
+所以：不要一次性开一堆 MCP 服务器。`enabled: false` 关掉不用的（也可以在设置页点开关，见下）。
 
 设置页显示每个服务器的"工具数 + 估算 token 占用"，让用户知道代价。
+
+## 开关：改 yaml 而不是存表
+
+`PATCH /api/mcp/servers/{server_id}/enabled` 直接改 `config/mcp_servers.yaml` 的 `enabled` 字段，然后断开重连所有服务器并重注册工具。
+
+### 为什么继续以 yaml 为唯一真源
+
+manager 本来就在读 `cfg.enabled`。把开关状态存到数据库的话就有**两个真源** —— 用户手工编辑 yaml 和在界面点开关会互相打脸（改了文件界面不动，点了开关文件没变）。
+
+而 MCP 配置本身就是用户的文件，改它没有"污染第三方内容"的问题 —— 这和技能不一样，技能是 zip 装进来的，所以技能开关走表（见 [skills.md](skills.md#技能开关)）。
+
+### 写 yaml 用逐行文本编辑
+
+不用 `yaml.safe_load` + `dump`：那会丢掉全部注释、重排键顺序、把中文转成 `\uXXXX`。`mcp_servers.yaml` 是用户手写并且要继续手写的文件，点一次开关就把他的注释全删了是不能接受的。
+
+逐行编辑只碰 `enabled` 那一行，其余字节原样不动。比任何 round-trip 库都保守，而且不需要新增依赖（项目只有 pyyaml，它没有保留注释的能力）。
+
+看不懂的格式返回 `False`（表现为 404「配置里没有这个服务器」）而不是硬写 —— 那个文件里可能有 token。
+
+### 状态里的 enabled 来自配置，不是连接状态
+
+`GET /api/mcp/servers` 每项的 `enabled` 从 `load_configs()` 取，不从 manager 的连接状态推。
+
+关掉的服务器 manager 直接跳过，`states()` 里那一项的 `status` 是 `disconnected` —— 只看 status 的话"用户关掉的"和"连不上的"长得一样，而前者不该显示成错误。
+
+### 工具重注册是共享的
+
+单个开关和整体 reload 都走 `_reregister_mcp_tools()`：先摘掉所有 `mcp__` 前缀的旧工具再注册新的。
+
+不摘的话旧工具会残留，而它们指向已关闭的连接 —— 模型调用时才会发现连接没了，那个报错完全不指向"这个服务器已经被关掉了"。
+
+抽成函数是因为两处要做同样的事。复制一遍的话症状是"用开关关掉的服务器工具还在，用 reload 关掉的就没了"。
+
+## 启动命令确认
+
+`GET /api/mcp/pending-approval` 列出未确认启动命令的 stdio 服务器。
+
+stdio 服务器以与本应用相同的权限执行命令 —— 等同于任意代码执行。MCP 规范要求客户端在执行前必须让用户看到**完整命令**并确认，所以：
+
+- `command_approved` 必须显式设为 `true` 才会连接
+- 返回的 `command` 字段**完整不截断**（截断会让用户看不到真正危险的那一段）
+- 只返回 env 的**键名**不返回值（值里常有 token）
+- 扫描危险模式（`curl | sh` 之类）并附 `warnings`

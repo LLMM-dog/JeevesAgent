@@ -27,16 +27,29 @@ class ToolContext:
     workspace: Path              # 当前工作区根目录
     db: AsyncSession
     llm: LLMPort
-    sandbox: SandboxPort
-    pathguard: PathGuard
-    skill_loader: SkillLoader
-    approval_mode: str           # "manual" | "auto"
-    registry: ToolRegistry       # subagent 工具要用它给子会话建工具集
-    agent_name: str
-    depth: int                   # 子智能体嵌套深度，防无限递归
+    agent_name: str = ""
+    depth: int = 0               # 子智能体嵌套深度，防无限递归
+    registry: ToolRegistry | None = None   # subagent 要用它给子会话建工具集
+    current_call_id: str = ""    # 审批要靠它把前端的回复配对回来
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def approval_mode(self) -> ApprovalMode: ...   # 每次读都从 runtime_state 取
 ```
 
 新增工具需要新依赖时只改这一处。反面做法是给 `run()` 加参数——那要改所有工具签名。
+
+### 为什么 sandbox / pathguard 不在这里
+
+它们通过模块级的取值函数拿（`get_guard()`、沙箱在 `exec.py` 内部构造），不当字段传。原因是它们是**会话级**的：白名单按会话查库、审批模式可能在流式进行中被用户切换。放进 dataclass 就是在 ctx 构造那一刻快照，之后的变更读不到。
+
+`approval_mode` 是 property 而不是字段，同一个理由 —— 见 [agent-loop.md](agent-loop.md) 里关于 ContextVar 的说明。
+
+### extra 是给单个工具的逃生口
+
+`compact_context` 需要回调进 loop 请求压缩。给 ToolContext 加一个只有它用的字段，会让其它 19 个工具都带上这个无关依赖 —— 所以走 `extra`。
+
+只在主 agent 注入（`depth == 0`）：子 agent 的上下文独立且短暂，压缩它等于白花一次 LLM 调用。
 
 ## ToolResult
 
@@ -102,7 +115,7 @@ async def execute(self, ctx, name, args) -> ToolResult:
 
 ## 内置工具清单
 
-按模块归类。`审批` 列指 manual 模式下是否需人工确认。
+20 个（配了搜索后端是 21 个）。按模块归类，`审批` 列指 manual 模式下是否需人工确认。
 
 ### 文件（`tools/file.py`）
 
@@ -146,21 +159,44 @@ async def execute(self, ctx, name, args) -> ToolResult:
 
 | 工具 | 审批 | 说明 |
 | --- | --- | --- |
-| `memory_list` | 否 | 列长期记忆条目 |
-| `memory_read` | 否 | 读某条 |
-| `memory_write` | 否 | 新建/更新 |
-| `memory_delete` | 否 | 删除 |
+| `remember` | 否 | 写一条长期记忆，必须给 reason |
+| `recall` | 否 | 按关键词召回，零 LLM 调用 |
+| `update_memory` | 否 | 改已有条目，变更进 history |
+| `forget_memory` | 否 | 归档而非真删 |
 
-私密模式下 `memory_write` 直接返回"当前为私密模式，未写入"，不报错。
+**私密模式在三个写工具里分别拦**（`remember` / `update_memory` / `forget_memory`），返回 `display={"skipped": True, "reason": "private_mode"}` 而不报错。
 
-### 交互（`tools/interact.py`）
+只在召回侧拦是不够的 —— 这是实测抓到的 bug：模型看不到会话开关，照样调 `remember`，而那时它真写进去了。查不到会话时**默认按禁止写处理**。
+
+失忆模式拦在召回入口（`chat_service`），不在工具里 —— 那一层根本不会把记忆注进上下文。见 [memory 相关章节](context.md)。
+
+### 上下文（`tools/context.py`）
 
 | 工具 | 审批 | 说明 |
 | --- | --- | --- |
-| `ask_user` | 否 | 自由问答，阻塞等用户输入 |
-| `ask_choice` | 否 | 单选/多选，前端渲染选项按钮 |
+| `compact_context` | 否 | 主动压缩上下文，返回省了多少 token |
 
-实现方式与审批相同：发事件 → 阻塞等 → 前端回填。
+原来只有被动压缩（涨到窗口 75% 才触发）。那个时机不由模型决定 —— 它只看总量，不知道"调研阶段已经结束、几十条工具输出已经没用了"。
+
+不需要审批：不动文件、不执行命令，最坏结果是白花一次 LLM 调用。要审批的话每次弹窗，模型会因为怕打扰用户而不敢用。
+
+"现在没什么可压的"返回 `is_error=False` —— 标成错误会让模型以为工具坏了、开始重试。
+
+### 宏与技能管理（`tools/asset.py`）
+
+| 工具 | 审批 | 说明 |
+| --- | --- | --- |
+| `manage_asset` | **是** | 宏/技能的增删改查 + reload |
+
+一个工具带 `action`（list/read/create/update/delete/reload）和 `kind`（macro/skill），不是六个工具 —— 工具定义每轮都进上下文，拆开的话 schema 加起来 800+ token，而参数几乎完全一样。
+
+需要审批：它写的是**会进后续所有对话上下文**的文件。一个错误的技能描述能影响模型之后的全部行为，比改一个源码文件影响面更大。
+
+**技能是目录，不止一个文件。** 这个工具只负责 `SKILL.md`（要拼 frontmatter、要校验 description）；`references/`、脚本之类的附件用 `write_file` 直接写 —— `skills/` 和 `macros/` 都在可写白名单里。
+
+加完附件**必须 reload**：索引是进程内单例，不重扫的话新文件不在 `meta.files` 白名单里，`load_skill_file` 会拒绝读它。而那个错误完全不指向"你需要 reload"。
+
+`create` / `read` 返回**绝对路径**。这是实测踩的坑：模型用相对路径 `skills/xxx/references/detail.md` 写附件，而 `write_file` 的相对路径基准是**工作区** —— 文件落到 `workspace/skills/xxx/` 去了。那里本来就可写，所以**不报错**，模型回复"已完成"，而附件永远不会被索引。
 
 ### 子智能体（`tools/subagent.py`）
 
@@ -168,18 +204,24 @@ async def execute(self, ctx, name, args) -> ToolResult:
 | --- | --- | --- |
 | `subagent` | 否 | 建独立子会话执行子任务，返回结论 |
 
-`ctx.depth >= 3` 时该工具不注册，防无限递归。
+深度超限时该工具不注册，防无限递归。见 [agents.md](agents.md)。
 
-### Web（`tools/web.py`）
+### Web（`modules/web/tools.py`）
 
 | 工具 | 审批 | 说明 |
 | --- | --- | --- |
-| `web_search` | 否 | 走 `websearch` port |
-| `web_fetch` | 否 | 抓 URL 转 Markdown |
+| `web_search` | 否 | 走 websearch provider，**没配后端时不注册** |
+| `web_fetch` | 否 | 抓 URL 转 Markdown，只依赖 httpx 所以恒定注册 |
 
-### MCP（`tools/mcp_tool.py`）
+`web_search` 没配后端就不注册：注册了用不了的工具会让模型反复调它，而工具定义每轮都在烧 token。
 
-动态注册，工具名 `mcp__<别名>__<工具名>`。见 [mcp.md](mcp.md)。
+### MCP（`modules/mcp/tools.py`）
+
+动态注册，工具名 `mcp__<server_id>__<工具名>`，整体截断到 64 字符（OpenAI 函数名规范）。
+
+`requires_approval` **恒为真** —— 注解由服务器自述，据此跳过审批等于让被审查对象填审查结论。
+
+每个服务器有 `enabled` 开关（`config/mcp_servers.yaml`），关掉的不连接、工具定义不占上下文。见 [mcp.md](mcp.md)。
 
 ## 工具描述怎么写
 

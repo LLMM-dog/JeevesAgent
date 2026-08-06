@@ -1,427 +1,402 @@
-# 接口：配置与扩展
+# 配置类接口
 
-通用约定见 [conventions.md](conventions.md)。
+通用约定（错误格式、分页、时间戳）见 [conventions.md](conventions.md)。对话与会话相关的接口见 [endpoints-chat.md](endpoints-chat.md)。
+
+> 路径以代码里的路由注册为准。这份文档曾经写了六个不存在的端点（`GET /api/skills/{name}`、`DELETE /api/bindings/{id}`、`POST /api/attachments` 等），照着调只会得到 404。改动接口时请同步这里。
 
 ## 供应商与模型
 
 ### POST /api/providers/probe
 
-**用户点名的核心功能。** 探测模型列表，纯查询，不落库。
+填完 baseURL + Key 后拉模型列表，**不落库**。
 
-```jsonc
-// 请求
+```json
+{ "base_url": "https://api.deepseek.com/v1", "api_key": "sk-..." }
+```
+
+响应：
+
+```json
 {
-  "base_url": "https://api.deepseek.com",
-  "api_key": "sk-xxxxxxxx"
+  "ok": true,
+  "models": [{ "model_id": "deepseek-chat", "context_window": 65536 }],
+  "error": null
 }
 ```
 
-```jsonc
-// 200
-{
-  "normalized_base_url": "https://api.deepseek.com/v1",
-  "models": [
-    {
-      "model_id": "deepseek-chat",
-      "context_window": 65536,
-      "window_source": "matched",
-      "supports_vision": "unknown",
-      "supports_tools": "unknown"
-    },
-    {
-      "model_id": "deepseek-reasoner",
-      "context_window": 65536,
-      "window_source": "matched",
-      "supports_vision": "unknown",
-      "supports_tools": "unknown"
-    }
-  ]
-}
-```
-
-`normalized_base_url` 要回显——用户填的可能被规范化了（补了 `/v1`），让他看到实际会用哪个地址。
-
-失败返回 502 `provider_probe_failed`，`hint` 里给**具体原因**：
-
-```jsonc
-{
-  "detail": {
-    "code": "provider_probe_failed",
-    "message": "无法获取模型列表",
-    "hint": "端点返回 404。已尝试 https://api.example.com/v1/models 和 https://api.example.com/models。该服务可能不提供模型列表接口，可手动输入模型名。"
-  }
-}
-```
-
-各种失败情况对应的 hint 见 [../01-architecture/providers.md](../01-architecture/providers.md#探测失败的错误要具体)。
-
-**探测失败仍允许手动添加模型**——有些中转站故意不开放 `/models`。
+探测失败时 `ok=false` 且 `error` 给出人能看懂的原因（域名解析失败 / 401 / 超时），不是抛 500 —— 用户填错 Key 是常态，不是服务器故障。
 
 ### GET /api/providers
 
-不分页。
-
-```jsonc
-{
-  "items": [{
-    "id": "prv_8kL3mN9pQ2xR",
-    "name": "DeepSeek",
-    "base_url": "https://api.deepseek.com/v1",
-    "key_hint": "a3f9",
-    "enabled": true,
-    "model_count": 2,
-    "last_probe_at": 1785312000000,
-    "created_at": 1785309000000
-  }]
-}
-```
-
-**永远只返回 `key_hint`，无明文。**
+列出供应商。`api_key` 只回显尾 4 位，任何情况下不返回明文。
 
 ### POST /api/providers
 
-创建供应商 + 一批模型（用户在 probe 结果里勾选的）。
+新建供应商，可同时带 `models` 数组一次性建好。
 
-```jsonc
-{
-  "name": "DeepSeek",
-  "base_url": "https://api.deepseek.com",
-  "api_key": "sk-xxxxxxxx",
-  "models": [
-    {"model_id": "deepseek-chat", "context_window": 65536},
-    {"model_id": "deepseek-reasoner", "context_window": 65536}
-  ]
-}
-```
+### DELETE /api/providers/{provider_id}
 
-一个事务里建 provider + 所有 model。返回 201 + provider 对象（含 models 数组）。
+删供应商会级联删掉它的模型和绑定。
 
-### PATCH /api/providers/{id}
+### GET /api/providers/{provider_id}/available-models
 
-可改 `name` / `base_url` / `api_key` / `enabled`。
-
-**不传 `api_key` 字段则保持原值**；传了才重新加密写入。传 `null` 返回 400——不允许清空。
-
-这个区分靠 Pydantic 的 `model_fields_set` 判断，见 [conventions.md](conventions.md#patch-的语义)。
-
-### DELETE /api/providers/{id}
-
-级联删除其下所有 model，进而级联删除相关 model_binding。
-
-删除前检查：如果 chat 位的绑定会因此消失，返回 409 并提示"这是当前唯一的对话模型，请先绑定其它模型"。**不阻止用户删，但要让他知道后果**——直接删掉会导致所有对话失败且报错信息不明显。
+用已存的 Key 重新探测这个供应商，用于"供应商上了新模型"的场景。
 
 ### GET /api/models
 
-不分页。可按 `provider_id` 过滤。
+`?provider_id=` 可选。
 
 ### POST /api/models
 
-手动添加模型（probe 失败时的兜底路径）。
+手动加模型 —— 探测拿不到列表时（有些中转站不实现 `/models`）的兜底。
 
-```jsonc
-{
-  "provider_id": "prv_xxx",
-  "model_id": "some-custom-model",
-  "context_window": 32768
-}
-```
+### PATCH /api/models/{model_pk}
 
-`window_source` 自动设为 `manual`。
+改 `context_window`、`price_*` 之类。
 
-### PATCH /api/models/{id}
+> 路径参数是 `model_pk` 而非 `id`：`model_id` 是供应商那边的模型名（如 `deepseek-chat`），会重复；`model_pk` 是本地主键。混用这两个名字会导致绑定指向错的行。
 
-可改 `display_name` / `context_window` / `enabled`。
+### DELETE /api/models/{model_pk}
 
-改 `context_window` 时 `window_source` 自动变 `manual`。
+### POST /api/models/{model_pk}/verify-vision
 
-### POST /api/models/{id}/verify-vision
+发一张 1x1 图片实测这个模型能不能读图，结果落库。
 
-核验多模态能力。发一个带 1x1 像素图片的测试请求。
-
-```jsonc
-// 200
-{ "supports_vision": "true", "checked_at": 1785312000000 }
-```
-
-按需触发，不在 probe 时对所有模型跑。见 [../01-architecture/providers.md](../01-architecture/providers.md#vision多模态)。
+不能只信供应商文档：同一个模型名在不同中转站的多模态支持不一样。未核验的模型在前端不允许开视觉模式。
 
 ### GET /api/bindings
 
-```jsonc
-{
-  "items": [{
-    "id": "bnd_xxx",
-    "agent_name": "",
-    "purpose": "chat",
-    "model_pk": "mdl_xxx",
-    "model_id": "deepseek-chat",
-    "provider_name": "DeepSeek"
-  }]
-}
-```
-
-返回时 join 出 `model_id` 和 `provider_name`——前端需要显示"DeepSeek / deepseek-chat"，单独再查一次是多余的往返。
+功能位绑定：`chat` / `vision` / `title` / `compact` / `embedding`。
 
 ### PUT /api/bindings
 
-按 `(agent_name, purpose)` upsert。
-
-```jsonc
-{ "agent_name": "", "purpose": "compact", "model_pk": "mdl_xxx" }
+```json
+{ "purpose": "chat", "model_pk": "mdl_..." }
 ```
 
-用 PUT 而非 POST，因为语义是"设置这个位"而非"新建一条"。
+用 PUT 而非 POST：一个功能位只能绑一个模型，语义是覆盖而非新增。
 
-### DELETE /api/bindings/{id}
+## 上下文
 
-解绑。之后该功能位会回落到 chat 位。
+### GET /api/context-overhead
+
+固定开销，`?session_id=` 可选。
+
+```json
+{
+  "tools_tokens": 4298,
+  "system_tokens": 1722,
+  "tool_count": 20,
+  "window_tokens": 131072,
+  "is_estimate": true
+}
+```
+
+**不需要有 run 在跑。** 新会话里没有任何 `context_usage` 事件，而固定开销此时已经确定 —— 不显示的话占用条是空的，用户以为"还没开始用 token"。
+
+按技能开关过滤，所以关掉一个技能后这个数字会立刻变小。`is_estimate` 恒为 true：这是本地 tiktoken 数的，模型的分词器不一样。
+
+见 [../01-architecture/context.md](../01-architecture/context.md#context_usage-事件)。
 
 ## 技能
 
 ### GET /api/skills
 
-不分页。返回 L1 信息 + 文件清单。
-
-```jsonc
+```json
 {
-  "items": [{
-    "name": "pdf-report",
-    "description": "当用户需要把数据整理成 PDF 报告时使用...",
-    "version": "1.0",
-    "keywords": ["pdf", "报告"],
-    "files": ["references/layout-spec.md", "scripts/render.py"],
-    "body_chars": 4820,
-    "total_chars": 68300
-  }],
-  "l1_total_chars": 2156
-}
-```
-
-`l1_total_chars` 是所有技能 L1 的合计字符数——**这是常驻上下文成本**，让用户知道装技能的代价。
-
-技能用 `name` 作为标识（目录名），不用生成的 ID——它本质上是文件系统对象。
-
-### GET /api/skills/{name}
-
-含 `SKILL.md` 正文（L2）。
-
-### GET /api/skills/{name}/files/{path:path}
-
-读附属文件（L3）。
-
-`path` 必须在该技能的 `files` 清单里精确命中，否则 404。**绝不拼路径直接 open**，见 [../01-architecture/skills.md](../01-architecture/skills.md#path-参数只用于查表)。
-
-### POST /api/skills/upload
-
-`multipart/form-data`，字段 `file`（zip）+ `overwrite`（bool，默认 false）。
-
-```jsonc
-// 201
-{
-  "name": "pdf-report",
-  "file_count": 12,
-  "total_chars": 68300,
-  "skipped_files": [
-    {"path": "assets/demo.mp4", "reason": "扩展名不在白名单"}
+  "items": [
+    {
+      "name": "commit-message",
+      "description": "当用户要写 git 提交信息时使用……",
+      "version": "1.0",
+      "keywords": ["git", "提交信息"],
+      "files": ["references/examples.md"],
+      "enabled": true
+    }
+  ],
+  "diagnostics": [
+    { "level": "warning", "message": "缺 description，跳过", "path": "skills/x/SKILL.md" }
   ]
 }
 ```
 
-`skipped_files` 必须返回——静默跳过会让用户以为技能完整，实际缺文件。
+**诊断必须一并返回。** 用户需要知道"我上传的技能为什么没出现" —— 只写日志的话他在界面上看到的是技能凭空消失。
 
-校验失败返回 400 `skill_package_invalid`，`hint` 里说明具体问题（无 SKILL.md / 多个 SKILL.md / 超限额 / 路径穿越）。
+**这里不过滤被关掉的技能**，否则界面上看不到就没法再打开它。过滤只发生在进系统提示词那一步。
 
-同名已存在且 `overwrite=false` 返回 409 `skill_already_exists`。
+### PATCH /api/skills/{name}/enabled
+
+```json
+{ "enabled": false }
+```
+
+响应 `{"name": "...", "enabled": false}`。技能不存在返回 404 `skill_not_found`。
+
+关掉的技能不进系统提示词，但用户明确点名时 `load_skill` 仍读得到 —— 开关控制的是常驻上下文成本，不是访问权限。见 [../01-architecture/skills.md](../01-architecture/skills.md#技能开关)。
+
+### POST /api/skills/upload
+
+`multipart/form-data`，字段 `file`（zip）+ `overwrite`（bool）。
+
+响应 `{"name": ..., "files": 3, "skipped": ["a.exe"], "skill_count": 5}`。
+
+错误码：`skill_not_zip` / `skill_empty` / `skill_invalid`（400）、`skill_exists`（409）。
 
 ### DELETE /api/skills/{name}
 
-删除目录。
+响应 `{"deleted": true, "skill_count": 4}`。删除前校验目标目录必须在 `skills/` 下。
 
 ### POST /api/skills/reload
 
-重扫 `skills/` 目录，刷新内存索引。上传/删除后自动调用，也可手动触发（用户直接在文件系统里放了技能目录时）。
-
-```jsonc
-{ "skill_count": 7, "l1_total_chars": 2156 }
-```
+重扫目录，响应 `{"count": 5, "names": [...]}`。
 
 ## 宏
 
 ### GET /api/macros
 
-```jsonc
-{
-  "items": [{
-    "name": "daily-standup",
-    "description": "整理当天工作内容成日报格式",
-    "category": "工作流",
-    "keywords": ["日报", "站会"]
-  }]
-}
-```
-
-前端的 `!` 提词器数据源。
+给前端提词器用，返回 `{"items": [{name, description, keywords}], "diagnostics": [...]}`。
 
 ### GET /api/macros/{name}
 
-含正文。
+返回**渲染后**的正文（`${MACRO_DIR}` 已替换成真实路径），给模型用。
+
+### GET /api/macros/{name}/source
+
+返回**未渲染**的可编辑字段 `{name, description, body, keywords}`。
+
+编辑界面必须用这个而不是上面那个：把替换后的绝对路径写回去，宏就跟当前机器绑死了，换台机器不能用。
+
+### POST /api/macros
+
+新建或更新，201。
+
+```json
+{ "name": "部署流程", "description": "当用户说发版时使用。", "body": "# ...", "keywords": [], "overwrite": false }
+```
+
+`description` 必填（`min_length=1`）—— 缺它的话加载器会**静默跳过**这个宏，只留一条 warning 诊断，而用户填完保存以为建好了。
+
+撞名时返回 409 `already_exists`，不静默覆盖：模型起的名字撞车很常见，覆盖会悄悄冲掉用户手写的宏。要覆盖传 `overwrite: true`。
+
+### DELETE /api/macros/{name}
+
+响应 `{"ok": true}`。删整个目录（技能可能带附件，只删主文件会留下孤儿文件）。
 
 ### POST /api/macros/reload
+
+响应 `{"count": 2, "names": [...]}`。
 
 ## MCP
 
 ### GET /api/mcp/servers
 
-```jsonc
+```json
 {
-  "items": [{
-    "server_id": "filesystem",
-    "enabled": true,
-    "description": "本地文件系统扩展工具",
-    "transport": "stdio",
-    "status": "connected",
-    "tool_count": 11,
-    "estimated_tokens": 2340,
-    "error_message": null
-  }]
+  "items": [
+    {
+      "server_id": "filesystem",
+      "transport": "stdio",
+      "status": "ready",
+      "error": "",
+      "enabled": true,
+      "tool_count": 12,
+      "tools": [{ "name": "mcp__filesystem__read", "raw_name": "read", "description": "..." }],
+      "estimated_tokens": 3140,
+      "connected_at": 1730000000000
+    }
+  ],
+  "config_errors": []
 }
 ```
 
-`estimated_tokens` 是该服务器所有工具定义的估算 token 数——**这是常驻上下文成本**，让用户知道开一堆 MCP 的代价。见 [../01-architecture/mcp.md](../01-architecture/mcp.md#与技能的区别)。
+`enabled` 来自**配置文件**而非连接状态：关掉的服务器 manager 直接跳过，`status` 会是 `disconnected` —— 只看 status 的话"用户关掉的"和"连不上的"长得一样，而前者不该显示成错误。
 
-`status`：`connected` / `disconnected` / `error`
+`estimated_tokens` 是必须暴露的：MCP 工具定义是常驻上下文成本，每轮都重发。看不到这个数字的话用户会觉得"多开几个 MCP 没坏处"。
+
+### PATCH /api/mcp/servers/{server_id}/enabled
+
+```json
+{ "enabled": false }
+```
+
+**会改写 `config/mcp_servers.yaml`**，然后断开重连所有服务器并重注册工具。响应 `{"server_id": ..., "enabled": false, "tools": 8}`。
+
+配置里没有这个 id 返回 404 `server_not_found`。写 yaml 用逐行文本编辑以保留注释，见 [../01-architecture/mcp.md](../01-architecture/mcp.md#开关改-yaml-而不是存表)。
+
+### GET /api/mcp/pending-approval
+
+未确认启动命令的 stdio 服务器。`command` 字段**完整不截断**，`env` 只给键名不给值，另带危险模式扫描的 `warnings`。
+
+stdio 服务器等同于任意代码执行，规范要求执行前让用户看到完整命令并确认。
 
 ### POST /api/mcp/reload
 
-重读 `config/mcp_servers.yaml`，断开重连所有服务器。
+响应 `{"servers": 3, "ready": 2, "tools": 18, "config_errors": []}`。
 
-```jsonc
-{
-  "servers": [
-    {"server_id": "filesystem", "status": "connected", "tool_count": 11},
-    {"server_id": "my-remote", "status": "error", "error_message": "连接超时"}
-  ]
-}
-```
+先摘掉所有 `mcp__` 前缀的旧工具再注册新的 —— 不摘的话旧工具残留且指向已关闭的连接。
 
-**部分失败不算整体失败**，返回 200 并在结果里标注。
+## 记忆
+
+### GET /api/memories
+
+`?theme=` / `?archived=` 可选。
+
+### GET /api/memories-search
+
+`?q=` 召回探针，用同一套召回逻辑，让用户能验证"问某句话时会召回什么"。
+
+### POST /api/memories
+
+手动加一条。`source` 记为 `manual`。
+
+### PATCH /api/memories/{memory_id}
+
+改内容或 theme。**必须带 reason**，写进 `history` —— 记忆影响之后所有对话，"这条为什么变成现在这样"事后无从追溯。
+
+### DELETE /api/memories/{memory_id}
+
+归档而非真删（设 `archived_at`）。
+
+### POST /api/memories/{memory_id}/restore
+
+取消归档。
 
 ## 人设
 
-### GET /api/personas/{kind}
+### GET /api/personas
 
-`kind` ∈ `soul` / `user` / `agents`，对应 `SOUL.md` / `USER.md` / `AGENTS.md`。
+返回全部三份（`SOUL` / `USER` / `AGENTS`）的内容。
 
-```jsonc
-{ "kind": "soul", "content": "你是...", "updated_at": 1785312000000 }
+### PUT /api/personas/{key}
+
+写回。`key` 是 `soul` / `user` / `agents`。
+
+### POST /api/personas/{key}/reset
+
+恢复成 `.example.md` 的内容。
+
+## 路径白名单
+
+### GET /api/whitelist
+
+`?session_id=` 可选。返回会话级 + 全局条目。
+
+### POST /api/whitelist
+
+```json
+{ "path": "D:/proj", "can_write": true, "note": "参考代码", "session_id": null }
 ```
 
-### PUT /api/personas/{kind}
+`session_id` 为 null 表示全局。路径插入时就 `resolve()`。
 
-```jsonc
-{ "content": "..." }
+### PATCH /api/whitelist/{item_id}
+
+改 `can_write` 或 `note`。
+
+### DELETE /api/whitelist/{item_id}
+
+`builtin=1` 的四条内置项不允许删 —— 删了 agent 就不能读写文件了，而用户不容易想到是这个原因。
+
+### GET /api/browse
+
+`?path=` 目录浏览，给工作目录选择器用。返回 `entries` + 常用起点 `roots`（盘符 / 家目录 / 项目目录），让用户不用手打路径。
+
+## 联网搜索
+
+### GET /api/websearch
+
+当前配置和可用的 provider。
+
+### PUT /api/websearch
+
+开关和 provider 选择。**默认关闭** —— 开了之后用户的搜索词会发给第三方，这个决定必须由他自己做。
+
+改完立即生效，不需要重启。
+
+## 定时任务
+
+### GET /api/cron/tasks
+
+### POST /api/cron/tasks
+
+```json
+{ "name": "每日总结", "prompt": "...", "cron": "0 9 * * *", "timezone": "Asia/Shanghai", "on_missed": "skip" }
 ```
 
-写文件。下一轮对话立即生效（每次组装上下文时重读文件，不缓存）。
+### PATCH /api/cron/tasks/{task_id}
 
-**不缓存**是刻意的：用户改完希望立即看到效果，加缓存就要处理失效逻辑，而文件读取成本可忽略。
+### DELETE /api/cron/tasks/{task_id}
 
-## 设置
+### POST /api/cron/tasks/{task_id}/run
 
-### GET /api/settings/whitelist
+立即触发一次，用于验证 prompt 写得对不对，不用等到点。
 
-```jsonc
-{
-  "items": [{
-    "id": "pth_xxx",
-    "path": "D:/proj/jeeves/workspace",
-    "can_write": true,
-    "note": "默认工作区",
-    "builtin": true
-  }]
-}
-```
+### GET /api/cron/tasks/{task_id}/runs
 
-### POST /api/settings/whitelist
+执行历史。`scheduled_at` 与 `started_at` 的差值就是调度延迟。
 
-```jsonc
-{ "path": "D:/mycode", "can_write": true, "note": "个人项目" }
-```
+### POST /api/cron/validate
 
-插入前 `resolve()`。路径不存在返回 400。
+校验 cron 表达式并返回接下来几次触发时间 —— 让用户在保存前就确认"这个表达式是我想的意思"。
 
-### DELETE /api/settings/whitelist/{id}
+## 追踪
 
-`builtin=true` 的返回 409——删了 agent 就完全不能读写文件，且用户不容易想到是这个原因。
+### GET /api/traces
 
-### POST /api/settings/blocker
+`?session_id=` / 分页。
 
-在指定目录放拒止锚。
+### GET /api/traces-sessions
 
-```jsonc
-{ "path": "D:/重要文档" }
-```
+按会话聚合，追踪列表停在会话层而不是直接铺开所有 run。
 
-创建 `.jeeves_blocker` 文件。返回 201。
+### GET /api/traces/{run_id}
 
-### DELETE /api/settings/blocker
+单个 run 的执行树，含 `span_totals`、`duration_ms`、`cost_usd`、`rollup_*`。
 
-```jsonc
-{ "path": "D:/重要文档" }
-```
+### GET /api/traces-stats
 
-删除该目录的锚文件。用 body 传 path 而非路径参数——Windows 路径含 `:` 和 `\`，放 URL 里要多层编码，容易出错。
+总量统计。
 
-### GET /api/settings/blockers
+### POST /api/traces/cleanup
 
-扫描白名单范围内所有拒止锚的位置。
+按 TTL 清理。
 
-```jsonc
-{ "items": [{"dir": "D:/重要文档", "created_at": 1785312000000}] }
-```
+## 引用候选
 
-## 工作区
+### GET /api/ref-candidates
 
-### GET /api/workspaces
-### POST /api/workspaces
+`?kind=file|dir|skill|tool|macro` + `?q=`。给前端 `@` / `#` / `!` 提词器用。
 
-```jsonc
-{ "name": "个人项目", "root_path": "D:/mycode" }
-```
+跳过 `node_modules` / `.venv`，按文件名优先于路径打分。
 
-创建时**自动加进路径白名单**——否则建了工作区但 agent 读不了里面的文件，这个关联用户想不到。
+## 图片
 
-### PATCH /api/workspaces/{id}
-### DELETE /api/workspaces/{id}
+### POST /api/images/upload
 
-默认工作区（`is_default=true`）不可删。有会话归属时返回 409。
+`multipart/form-data`。响应 `{data_url, mime, bytes, filename}`。
+
+返回 data URL 而不是存储路径：图片以 base64 多模态注入，前端拿到就能直接回显缩略图。用 magic bytes 判类型，不信扩展名。
 
 ## 元信息
 
 ### GET /api/meta
 
-前端启动时拉一次，用于判断哪些功能可用。
-
-```jsonc
+```json
 {
   "version": "0.1.0",
+  "tool_count": 20,
+  "tool_names": ["read_file", "..."],
+  "skill_count": 1,
+  "macro_count": 1,
   "sandbox_backend": "local",
-  "sandbox_docker_available": false,
-  "websearch_backend": "none",
-  "has_chat_model": true,
-  "host_is_localhost": true,
-  "skill_count": 7,
-  "macro_count": 3,
-  "mcp_tool_count": 11
+  "sandbox_isolated": false,
+  "sandbox_fallback_reason": "",
+  "websearch_enabled": false
 }
 ```
 
-`has_chat_model=false` 时前端引导去设置页配置。`host_is_localhost=false` 时显示无鉴权警示条。
+`sandbox_fallback_reason` 非空表示配了 Docker 但检测不到，已降级到本地执行。前端据此持续提示 —— 配了 docker 就是想要隔离，静默回落等于骗人。
 
 ### GET /api/health
 
-```jsonc
-{ "status": "ok" }
-```
-
-存活探针，不查任何依赖。**不做 `/health/ready`**——没有 k8s 不需要外部依赖探测。
+存活探针。

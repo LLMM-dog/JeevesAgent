@@ -1,219 +1,130 @@
 # 组件清单
 
-单文件上限 300 行。超了拆。
+前端分层与 store 划分见 [architecture.md](architecture.md)，SSE 消费见 [sse.md](sse.md)。
 
-## chat/
+> 这份文档曾经列了约 40 个不存在的组件名（`ChatInput`、`MessageItem`、`ToolCallCard`、`TopBar`……），而实际的命名体系完全不同。当作导航用会一路找不到文件。现在按 `frontend/src/` 的真实内容重写。
 
-| 组件 | 职责 | 关键点 |
-| --- | --- | --- |
-| `MessageList` | 消息流容器 | `react-virtuoso` 虚拟滚动；自动滚到底但用户上滑后不强拉 |
-| `MessageItem` | 单条消息分发 | 按 `role` 分发到具体组件，自身不含渲染逻辑 |
-| `UserBubble` | 用户消息 | 显示引用条；右键菜单（引用此消息、从此处重发） |
-| `AssistantBubble` | 助手消息 | 组合 ThinkingBlock + Markdown + ToolCallCard |
-| `ThinkingBlock` | 思维链 | 默认折叠；流式时标题显示"思考中…" |
-| `MarkdownRenderer` | Markdown | `rehype-sanitize` 必须开；代码块流式期不高亮 |
-| `CodeBlock` | 代码块 | 复制按钮、语言标签、行号 |
-| `ToolCallCard` | 通用工具卡片 | MCP 工具和未知工具都用这个 |
-| `ToolCardFile` | 文件工具专属 | 显示路径 + 行数 + diff（edit_file） |
-| `ToolCardExec` | 执行工具专属 | 命令 + 退出码 + 输出（可展开全部） |
-| `ToolCardTodo` | Todo 工具专属 | 直接渲染成清单 |
-| `ArtifactCard` | 产物 | 折叠展示 + 下载按钮 + "这是最新版"标记 |
-| `SubAgentCard` | 子智能体 | 可展开看它的完整执行过程（拉它的记忆线） |
-| `CompactDivider` | 压缩分隔条 | "已压缩 N 条消息"，可点开看摘要 |
-| `ErrorBlock` | 错误 | 红色块 + hint + 重试按钮 |
-| `ChatInput` | 输入框 | 见下 |
-| `RefBar` | 引用条 | 输入框上方，显示已添加的引用，可删除 |
-| `Mentioner` | 提词器 | `@` `#` `!` 三种触发 |
-| `TopBar` | 顶栏 | 标题 + Todo进度 + 上下文占用 + 四个开关 |
-| `SessionList` | 会话列表 | 右键菜单（固定、重命名、删除） |
-| `ApprovalDialog` | 审批弹框 | 见下 |
-| `InteractDialog` | 交互弹框 | text / single / multi 三种形态 |
-| `WelcomeScreen` | 空状态 | 无 chat 模型时引导去设置页 |
-
-### MessageItem 只做分发
-
-```typescript
-// 不在这里写任何渲染逻辑。加一种消息类型时只在这里加一个 case，
-// 具体渲染在独立组件里 —— 否则这个文件会变成 2000 行的 if/else 山。
-switch (msg.role) {
-  case "user":      return <UserBubble message={msg} />;
-  case "assistant": return <AssistantBubble message={msg} />;
-  case "tool":      return null;   // tool 消息由 AssistantBubble 内联渲染
-  case "artifact":  return <ArtifactCard message={msg} />;
-  case "summary":   return <CompactDivider message={msg} />;
-  case "system":    return null;   // 不显示
-}
-```
-
-`role=tool` 返回 `null` 是刻意的：工具结果应该显示在触发它的 assistant 气泡**内部**，不是独立一条。`AssistantBubble` 按 `tool_calls` 的 `call_id` 去找对应的 tool 消息。
-
-### 自动滚动的正确行为
+## 全局结构
 
 ```
-用户在底部     → 新内容自动滚到底
-用户上滑了     → 不自动滚，显示"回到底部"浮标
-用户点浮标     → 滚到底，恢复自动
+src/
+  App.tsx              路由
+  main.tsx             入口
+  pages/               三个页面
+  components/          25 个组件，平铺不分子目录
+  store/chat.ts        唯一的 zustand store
+  lib/{api,sse,types}  接口层
+  hooks/               自定义 hook
 ```
 
-判定"在底部"要留容差（距底部 < 100px 算在底部）。严格判等会因为亚像素误差而失效。
+**components/ 故意平铺不分子目录。** 25 个文件在一层里靠名字就能找到；分成 `chat/` `settings/` `common/` 之后，"这个组件算 chat 还是 common"会变成每次新建文件都要纠结的问题，而纠错成本（改 import 路径）大于收益。
 
-这是聊天界面最容易做错的交互——强制滚动会让用户没法回看历史。
+## 页面
 
-### ChatInput
-
-要素：
-
-- 多行 textarea，`Enter` 发送 / `Shift+Enter` 换行
-- **上方可拖拽调高**（设计，看长文本时很有用）
-- 左侧：附件按钮、文件引用按钮、文件夹引用按钮
-- 右侧：私密开关、视觉开关、麦克风（M7）、发送/停止按钮
-- 粘贴 URL 自动转为 url 引用
-- 粘贴图片自动上传为附件
-- 流式期间 disabled，但**停止按钮可用**
-
-快捷键：
-
-| 键 | 动作 |
+| 文件 | 说明 |
 | --- | --- |
-| `Enter` | 发送 |
-| `Shift+Enter` | 换行 |
-| `Ctrl+K` | 切换私密模式 |
-| `Ctrl+Shift+K` | 切换失忆模式 |
-| `Esc` | 流式期间 = 停止；否则关闭提词器 |
-| `@` `#` `!` | 触发提词器 |
+| `pages/ChatPage.tsx` | 主界面：侧栏 + 消息流 + 输入框 |
+| `pages/SettingsPage.tsx` | 设置页，纵向排列各个 Panel |
+| `pages/CronPage.tsx` | 定时任务 |
 
-### Mentioner 提词器
+## 对话相关
 
-三种触发字符对应三类数据：
-
-| 触发 | 数据源 | 插入结果 |
-| --- | --- | --- |
-| `@` | `configStore.skills` | `refs` 加一条 `{type:"skill"}` |
-| `#` | `configStore.tools` | `refs` 加一条 `{type:"tool"}` |
-| `!` / `！` | `configStore.macros` | `refs` 加一条 `{type:"macro"}` |
-
-交互：上下键选择、Tab 或 Enter 确认、Esc 关闭。输入继续过滤。
-
-**全角 `！` 也要支持**——中文输入法下打感叹号默认是全角，这是必然会遇到的。
-
-插入后触发字符和已输入的名字从文本里**移除**，改为 `RefBar` 上的一个标签。这样输入框里留下的是干净的自然语言。
-
-### ApprovalDialog
-
-```
-┌────────────────────────────────────┐
-│ 需要确认：run_shell          [45s] │
-├────────────────────────────────────┤
-│ ⚠ 匹配到风险：删除根目录相关路径     │
-│                                    │
-│ rm -rf ./build                     │
-│                                    │
-│ 工作目录: D:/proj/workspace        │
-├────────────────────────────────────┤
-│              [拒绝]  [允许执行]     │
-└────────────────────────────────────┘
-```
-
-要点：
-
-- **风险标注放最上面**，用醒目颜色。这是用户唯一的判断依据
-- 命令用等宽字体、完整显示不截断
-- 倒计时可见（超时视为拒绝）
-- **默认焦点在"拒绝"上**——防止用户习惯性按 Enter 就放行
-- 不提供"本次会话内全部允许"的快捷选项。想要就去顶栏切 auto 模式，那是个显式的、可见的状态
-
-最后一点：一次性的"全部允许"会让用户忘记自己放开了限制。顶栏的 auto 标记一直在那里提醒。
-
-## todo/
-
-| 组件 | 职责 |
+| 组件 | 说明 |
 | --- | --- |
-| `TodoProgress` | 顶栏进度条 `[■■■□□] 3/5 · 工作中` |
-| `TodoBoard` | 展开的看板，可拖拽排序 |
-| `TodoItem` | 单条，可勾选/删除 |
-| `TodoArchiveButton` | 全部完成后出现的"验收关闭" |
+| `Sidebar` | 会话列表。固定置顶、搜索、新建、删除 |
+| `MessageList` | 消息流。按 role 分发渲染，处理 streaming 占位 |
+| `Markdown` | Markdown 渲染 + 代码高亮 |
+| `Composer` | 输入框及其上方的工具栏 |
+| `ContextBar` | 上下文占用条 |
+| `ToolCard` | 工具调用卡片，可折叠看完整输入输出 |
+| `SubAgentCards` | 子智能体的调用与 token 归集 |
+| `TodoPanel` | Todo 进度与看板 |
+| `ApprovalDialog` | 审批弹框，含倒计时、Esc 拒绝 |
+| `Banner` | 顶部提示条（错误 / 警告 / 信息） |
+| `RefPicker` | `@` `#` 引用提词器 |
+| `MacroPicker` | `!` 宏提词器 |
 
-进度条**全部完成后不自动消失**，等用户点关闭。见 [../01-architecture/todo.md](../01-architecture/todo.md#验收关闭)。
+### Composer 上的开关
 
-## settings/
+一排都在输入框上方，都是**会话级**的：
 
-| 组件 | 对应接口 |
+| 开关 | 作用 |
 | --- | --- |
-| `ProviderList` / `ProviderForm` | `/api/providers` |
-| `ProbeDialog` | `/api/providers/probe` —— **核心交互，见下** |
-| `ModelTable` | `/api/models` |
-| `BindingPanel` | `/api/bindings` |
-| `SkillList` / `SkillUpload` | `/api/skills` |
-| `MacroList` | `/api/macros` |
-| `McpServerList` | `/api/mcp/servers` |
-| `PersonaEditor` | `/api/personas/{kind}` |
-| `WhitelistPanel` | `/api/settings/whitelist` |
-| `BlockerPanel` | `/api/settings/blocker` |
-| `WorkspacePanel` | `/api/workspaces` |
+| 审批模式 | 逐个确认 / 自动执行 |
+| 视觉 | 开了才能粘图片。未核验的模型点了会拿到 400 |
+| 私密 | 这轮不写记忆（仍然读） |
+| 失忆 | 这轮不读记忆（仍然写） |
 
-### ProbeDialog 是用户体验的关键点
+私密和失忆分开是因为用途不同：调试提示词时要失忆但不介意被记住，聊敏感话题时要私密但仍需要之前的上下文。
 
-用户点名要"不用手动输入模型名"，这个弹框就是那个功能的落地：
+四个都走乐观更新 + 失败回滚并显示后端的原因。**静默弹回去是不行的** —— 私密开关关系到"我说的话会不会被记住"，失败必须让用户知道。
 
-```
-步骤 1：填 Base URL + API Key  →  [测试连接]
-步骤 2：显示拉取到的模型列表，多选勾选
-        ┌──────────────────────────────────┐
-        │ ☑ deepseek-chat        64K      │
-        │ ☑ deepseek-reasoner    64K      │
-        │ ☐ deepseek-coder       ?  ⚠     │
-        └──────────────────────────────────┘
-        ⚠ = 窗口大小未知，将按 32K 处理
-步骤 3：为 chat 位选一个  →  [保存]
-```
+### ContextBar 的取数
 
-要点：
+固定开销从 `GET /api/context-overhead` 单独拉，不等 `context_usage` 事件。
 
-- `normalized_base_url` 要回显，让用户看到实际会用的地址
-- 窗口未知的模型要标注（`window_source=default`）
-- 失败时错误信息必须具体（见 [../03-api/endpoints-config.md](../03-api/endpoints-config.md#post-apiprovidersprobe)）
-- **失败时提供"手动输入模型名"的入口**，不能是死路
-- 保存后如果还没有 chat 绑定，直接在这里让用户选，不要让他再跳一次
+新会话里没有任何事件，而固定开销此时已经确定 —— 不显示的话占用条是空的，用户以为"还没开始用 token"。
 
-### BindingPanel 的 compact 位提示
+窗口大小的取值顺序：`usage?.window_tokens || windowTokens || overhead?.window_tokens || 0`。事件里的最准（那是模型实际报的），会话详情次之，端点兜底。
 
-在 compact 位旁边放一句说明：
+三段的百分比分母都是窗口，不是互比 —— 理由见 [../01-architecture/context.md](../01-architecture/context.md#百分比按窗口算不是分项互比)。
 
-```
-压缩模型不宜过弱。压缩出错会影响整个会话往后的全部推理，
-且不会有任何报错 —— 表现为"模型突然忘了之前的约定"。
-建议与对话模型同档或最多低一档。
-```
+## 设置页的 Panel
 
-这是反直觉的点，必须在 UI 上说清，否则用户一定会在这里配最便宜的模型。
-
-## common/
-
-| 组件 | 职责 |
+| 组件 | 说明 |
 | --- | --- |
-| `Layout` | 整体布局 + 侧栏折叠 |
-| `WarningBanner` | 常驻警示条（沙箱降级、非 localhost 绑定） |
-| `EmptyState` | 空状态占位 |
-| `ConfirmDialog` | 通用确认框 |
-| `CopyButton` | 复制到剪贴板 |
-| `TokenBadge` | token 数显示，带千分位 |
-| `RelativeTime` | 相对时间（"3 分钟前"），60s 刷新一次 |
+| `ModelsPanel` | 供应商与模型，含探测、功能位绑定 |
+| `AddModelForm` | 手动加模型（探测拿不到列表时的兜底） |
+| `ModelSwitcher` | 会话级换模型，也出现在对话界面 |
+| `SkillsPanel` | 技能：上传 zip、删除、重扫、**逐项开关**、诊断展示 |
+| `MacroPanel` | 宏：新建、编辑、删除、重扫 |
+| `McpPanel` | MCP：服务器状态、工具清单与 token 成本、**逐项开关**、待确认命令 |
+| `MemoryPanel` | 记忆列表、在线编辑、变更历史、召回探针 |
+| `PersonaPanel` | 三份人设的在线编辑 |
+| `WhitelistPanel` | 路径白名单 |
+| `WorkDirPicker` | 工作目录选择，走 `GET /api/browse` |
+| `VisionPanel` | 视觉能力核验 |
+| `WebSearchPanel` | 联网搜索开关与 provider |
+| `TracePanel` | 执行树：耗时条、逐步 token 与成本 |
 
-### WarningBanner 是常驻的
+### 开关旁边必须显示成本
 
-两种情况显示，且**不可关闭**：
+`SkillsPanel` 和 `McpPanel` 的每一项都标着它占多少 token。
 
-1. `sandbox_fallback` 事件后：当前不是隔离环境
-2. `meta.host_is_localhost === false`：服务绑到了非本机地址且无鉴权
+不标的话开关就是个摆设 —— 用户不知道该关哪个。一个用不到的 MCP 服务器可能每轮烧几千 token，而这件事只有把数字放在开关旁边才看得出来。
 
-不可关闭是刻意的。这两件事的风险是持续存在的，用户点掉之后就会忘记。
+两个 Panel 的开关成功后都要 `invalidateQueries(["contextOverhead"])`：关掉之后占用条上的数字要立刻变小，否则用户以为开关没生效。
 
-## 无障碍
+### SkillsPanel 必须显示诊断
 
-不做完整 WCAG 验证（那需要辅助技术实测和专业评审），但做到基本几点：
+`GET /api/skills` 返回的 `diagnostics` 要渲染出来。
 
-- 所有图标按钮有 `aria-label`
-- 弹框有 `role="dialog"` + `aria-modal` + 焦点陷阱（shadcn/Radix 自带）
-- 键盘可完整操作主流程（发送、取消、审批、提词器选择）
-- 流式内容区加 `aria-live="polite"`，但**只在 `done` 后播报一次**——每个 chunk 都播报会让屏幕阅读器疯掉
-- 颜色不作为唯一信息载体（错误状态除了红色还有图标和文字）
+用户需要知道"我上传的技能为什么没出现"。缺 `description` 的技能会被静默跳过 —— 只写日志的话他在界面上看到的是技能凭空消失。
+
+### McpPanel 的待确认区放在最上面
+
+未确认启动命令的服务器排在列表前面，显示**完整命令**、cwd、env 键名和危险模式警告。
+
+stdio 服务器等同于任意代码执行。截断命令会让用户看不到真正危险的那一段。
+
+## store 与接口层
+
+| 文件 | 说明 |
+| --- | --- |
+| `store/chat.ts` | 唯一的 store。对话状态、SSE 事件处理、会话操作 |
+| `lib/api.ts` | HTTP 封装。所有请求走 `request()`，带 JSON body 时必须用 `json:` 参数 |
+| `lib/sse.ts` | SSE 消费（`fetch` + `ReadableStream`，不能用 `EventSource`） |
+| `lib/types.ts` | 全部类型。`SseEventMap` 是事件载荷的真源 |
+| `hooks/useSpeechInput.ts` | 语音输入，浏览器不支持时不渲染入口 |
+
+### api.ts 里不要用 body: JSON.stringify
+
+`request()` 只在传 `json:` 参数时才设 `Content-Type`。用 `body: JSON.stringify(...)` 的请求**没有这个头，会被后端 422 拒掉**。
+
+有测试盯着这件事（`test_ui_feedback_round2.py`）—— 这个坑踩过一次，而 422 的报错完全不指向"你少了个请求头"。
+
+### 所有跨会话的回调都要校验 sessionId
+
+`send` 的三个回调（`onEvent` / `onClose` / `onApiError`）、`done` 事件里的 `listMessages().then()`、`openSession` 自己的响应，全部要先确认 `get().sessionId === sessionId`。
+
+这些回调是闭包，捕获的是发消息那一刻的值。用户切走之后它们仍会触发，不校验的话会把上一个会话的状态写进当前界面 —— 表现是"切过去显示了别的会话的对话"。见 [sse.md](sse.md)。

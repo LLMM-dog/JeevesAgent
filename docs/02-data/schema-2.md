@@ -85,66 +85,91 @@ CREATE UNIQUE INDEX idx_binding_unique ON model_binding(agent_name, purpose);
 
 ```sql
 CREATE TABLE memory (
-    id          TEXT PRIMARY KEY,
-    category    TEXT NOT NULL DEFAULT 'general',
-    content     TEXT NOT NULL,
-    source_session_id TEXT,
-    hit_count   INTEGER NOT NULL DEFAULT 0,
-    last_hit_at INTEGER,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
+    id                TEXT PRIMARY KEY,
+    content           TEXT NOT NULL,
+    theme             TEXT NOT NULL,          -- 主题分类
+    hit               INTEGER NOT NULL,       -- 命中次数
+    last_hit_at       INTEGER,
+    confidence        REAL NOT NULL,          -- 默认 0.6
+    source            TEXT NOT NULL,          -- auto / manual / tool
+    origin_session_id TEXT,
+    history           TEXT NOT NULL,          -- JSON，每次变更的记录
+    archived_at       INTEGER,                -- 非 NULL = 已归档
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
 );
-CREATE INDEX idx_memory_category ON memory(category, updated_at DESC);
+CREATE INDEX ix_memory_recall  ON memory(archived_at, theme, hit);
+CREATE INDEX ix_memory_updated ON memory(archived_at, updated_at);
 ```
 
-跨会话的长期记忆。M5 阶段实现。
+跨会话的长期记忆。
 
-`hit_count` / `last_hit_at`：记忆条目会越积越多，需要淘汰依据。长期没被命中的条目可以提示用户清理。
+`history` 存**每次变更的理由**。改一条记忆时必须写 reason —— 记忆会影响之后所有对话，而"这条为什么变成现在这样"事后完全无从追溯。
 
-**不做向量检索。** 个人项目的记忆条目量级在几百条，全量注入或按 category 过滤后注入即可。真的多到装不下再上 `sqlite-vec`。
+`archived_at` 表示归档而非真删。删错一条记忆是不可逆的，而归档留了退路；召回时用它过滤，所以两个索引都以它开头。
 
-`source_session_id` 不做外键 —— 会话删除后记忆应该保留。
+`hit` / `last_hit_at`：记忆条目会越积越多，需要淘汰依据。长期没被命中的条目可以提示用户清理。
 
-## attachment
+`confidence` 默认 0.6 而不是 1.0 —— 模型自动提炼出来的东西不该一开始就被当成确定事实。
 
-```sql
-CREATE TABLE attachment (
-    id          TEXT PRIMARY KEY,
-    filename    TEXT NOT NULL,        -- 清洗后的安全文件名
-    orig_name   TEXT NOT NULL,        -- 原始名，仅用于显示
-    mime        TEXT NOT NULL,
-    size_bytes  INTEGER NOT NULL,
-    rel_path    TEXT NOT NULL,        -- 相对 data/uploads/ 的路径
-    is_image    INTEGER NOT NULL DEFAULT 0,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
-);
-```
+**召回零 LLM 调用**：SQL 粗筛（按 theme + hit）+ 关键词打分。用 LLM 判断相关性的话每轮对话都要多一次调用，而且成本随记忆总量线性增长。
 
-`rel_path` 存**相对路径**而非绝对路径。项目目录移动后绝对路径全部失效，相对路径不受影响。
+**不做向量检索。** 个人项目的记忆条目量级在几百条。真的多到装不下再上 `sqlite-vec`。
 
-`is_image` 用 magic bytes 判定，不信扩展名。
+`origin_session_id` 不做外键 —— 会话删除后记忆应该保留。
 
 ## path_whitelist
 
 ```sql
 CREATE TABLE path_whitelist (
     id          TEXT PRIMARY KEY,
+    session_id  TEXT,                 -- NULL = 全局条目
     path        TEXT NOT NULL,        -- 绝对路径，已 resolve
     can_write   INTEGER NOT NULL DEFAULT 1,
     note        TEXT NOT NULL DEFAULT '',
     builtin     INTEGER NOT NULL DEFAULT 0,   -- 内置项不可删
     created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
+    updated_at  INTEGER NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
 );
-CREATE UNIQUE INDEX idx_whitelist_path ON path_whitelist(path);
+CREATE INDEX ix_path_whitelist_session_id ON path_whitelist(session_id);
+CREATE UNIQUE INDEX uq_whitelist_session_path
+    ON path_whitelist(session_id, path);
 ```
 
 `path` 存 `resolve()` 后的绝对路径。插入时就 resolve，避免每次校验都做。
 
-`builtin=1` 的两条初始记录（`workspace/`、`skills/`）不允许删除 —— 删了 agent 就完全不能读写文件了，且用户不容易想到是这个原因。
+**唯一约束是 `(session_id, path)` 复合**，不是单独的 `path`。同一路径在不同会话可以有不同权限 —— "这个对话能读写哪些目录"本质上是会话级的决定：给 A 会话开了 `D:\proj` 的写权限，不该让 B 会话也能写。
+
+`session_id` 为 NULL 表示全局条目（内置项和用户加的全局项）。
+
+`builtin=1` 的四条初始记录不允许删除：`workspace/`（可写）、`data/uploads/`（只读）、`skills/`（可写）、`macros/`（可写）。删了 agent 就不能读写文件了，而用户不容易想到是这个原因。
+
+这四条是**逐条 upsert** 的，不是"表为空才插"。后者会让已经在用的用户永远拿不到新增的内置项 —— 症状是"文档说能写 `skills/`，我这儿报路径不在白名单内"。
 
 `can_write=0` 表示只读放行。用于"让 agent 读参考代码但不许改"的场景。
+
+## skill_state
+
+```sql
+CREATE TABLE skill_state (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,        -- SKILL.md frontmatter 里的 name
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE INDEX ix_skill_state_name ON skill_state(name);
+CREATE UNIQUE INDEX uq_skill_state_name ON skill_state(name);
+```
+
+技能的启用开关。关掉的技能不进系统提示词，见 [../01-architecture/skills.md](../01-architecture/skills.md#技能开关)。
+
+**为什么用表而不是写进 SKILL.md frontmatter**：启用与否是用户的偏好，不是技能作者的属性。写进文件的话升级技能包（upload 带 overwrite）会把开关冲掉，而且往 zip 装进来的第三方内容里写东西等于污染它。
+
+**表里只存被关掉的**。没有记录 = 启用 —— 默认关闭会让用户装完发现模型看不见它，而没有任何提示说明原因。
+
+按 `name` 而不是路径关联：技能可以被移动目录，而模型看到的一直是名字。也意味着删掉技能再装回来时开关状态还在，那符合直觉。
 
 ## run
 
@@ -152,21 +177,38 @@ CREATE UNIQUE INDEX idx_whitelist_path ON path_whitelist(path);
 CREATE TABLE run (
     id            TEXT PRIMARY KEY,
     session_id    TEXT NOT NULL,
+    parent_run_id TEXT,              -- 子智能体的 run 指向父 run
     agent_name    TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL,     -- running|done|cancelled|error
-    stop_reason   TEXT,              -- final|max_turns|cancelled|error
-    turns         INTEGER NOT NULL DEFAULT 0,
-    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-    completion_tokens INTEGER NOT NULL DEFAULT 0,
-    error_message TEXT,
+    stop_reason   TEXT NOT NULL DEFAULT '',
     started_at    INTEGER NOT NULL,
     ended_at      INTEGER,
+    duration_ms   INTEGER,
+    turns         INTEGER NOT NULL DEFAULT 0,
+    -- token 六维度拆分。只存 prompt/completion 两项的话
+    -- 算不出缓存命中省了多少，也看不出推理模型的思考开销。
+    input_tokens        INTEGER,
+    output_tokens       INTEGER,
+    cache_read_tokens   INTEGER,
+    cache_write_tokens  INTEGER,
+    reasoning_tokens    INTEGER,
+    total_tokens        INTEGER NOT NULL DEFAULT 0,
+    -- rollup = 含全部子 run 的累计值。子智能体的开销必须能归到父任务上，
+    -- 否则用户看到主 run 只花了几百 token 而账单上是几万。
+    rollup_total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd            REAL NOT NULL DEFAULT 0,
+    rollup_cost_usd     REAL NOT NULL DEFAULT 0,
+    error         TEXT NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL,
     FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
 );
-CREATE INDEX idx_run_session ON run(session_id, started_at DESC);
+CREATE INDEX ix_run_session_started ON run(session_id, started_at);
+CREATE INDEX ix_run_created ON run(created_at);
+CREATE INDEX ix_run_parent  ON run(parent_run_id);
 ```
+
+`cost_usd` 按**下单时刻的单价快照**算，不是查询时再乘当前价格。模型改价之后历史成本不该跟着变。
 
 ## span
 
@@ -197,6 +239,56 @@ CREATE INDEX idx_span_parent ON span(parent_span_id);
 M6 阶段实现。在此之前 span 只存在于内存（用于事件的 span 三件套），不落库。
 
 `*_preview` 字段截断到 2000 字符。完整内容已经在 `message` 表里了，span 只是执行树的骨架 —— 存全量会让这张表迅速变成数据库里最大的表。
+
+## cron_task
+
+```sql
+CREATE TABLE cron_task (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    prompt        TEXT NOT NULL,        -- 到点发给 agent 的内容
+    cron          TEXT NOT NULL,        -- 五段 cron 表达式
+    timezone      TEXT NOT NULL,        -- IANA 时区名
+    workspace_id  TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    on_missed     TEXT NOT NULL,        -- skip | run_once
+    last_fired_at INTEGER NOT NULL DEFAULT 0,
+    next_fire_at  INTEGER NOT NULL DEFAULT 0,
+    run_count     INTEGER NOT NULL DEFAULT 0,
+    fail_count    INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+CREATE INDEX ix_cron_task_enabled ON cron_task(enabled);
+```
+
+`timezone` 必须单独存，不能只靠服务器本地时区 —— "每天早上 9 点"在用户换时区或服务器时区变化后必须仍然是他的 9 点。
+
+`next_fire_at` 预计算并落库，不是每次扫描时现算。调度器只查 `next_fire_at <= now` 的行，不需要把所有任务的 cron 表达式都解一遍。
+
+`on_missed` 处理服务没运行时错过的窗口：`skip` 直接跳到下一次，`run_once` 补跑一次 —— 而不是把错过的 N 次全跑一遍（关机一周再开机会瞬间触发几十个 run）。
+
+## cron_run
+
+```sql
+CREATE TABLE cron_run (
+    id           TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL,
+    scheduled_at INTEGER NOT NULL,      -- 计划触发时刻
+    started_at   INTEGER NOT NULL DEFAULT 0,
+    finished_at  INTEGER NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL,          -- pending|running|done|error|skipped
+    detail       TEXT NOT NULL DEFAULT '',
+    session_id   TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+CREATE INDEX ix_cron_run_task_time ON cron_run(task_id, scheduled_at);
+```
+
+`scheduled_at` 与 `started_at` 分开存。两者的差值就是调度延迟 —— 只存一个的话看不出"任务晚了 10 分钟才跑"。
+
+`session_id` 记录这次触发开在哪个会话里，用户能点进去看 agent 实际做了什么。定时任务是无人值守的，没有这个入口就只能看一行状态。
 
 ## SQLite 特定配置
 

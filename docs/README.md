@@ -11,10 +11,11 @@
 | --- | --- |
 | [00-overview/](00-overview/) | 产品定位、术语表 |
 | [01-architecture/](01-architecture/) | 后端分层、agent loop、工具/事件/上下文/技能/沙箱/安全 |
-| [01-architecture/tools.md](01-architecture/tools.md) | 21 个内置工具能做什么 |
+| [01-architecture/tools.md](01-architecture/tools.md) | 20 个内置工具能做什么 |
 | [01-architecture/execution.md](01-architecture/execution.md) | 命令执行与审批。**安全边界写在开头，动手前先看** |
-| [01-architecture/skills.md](01-architecture/skills.md) | 技能与宏：三级渐进披露、上传校验 |
+| [01-architecture/skills.md](01-architecture/skills.md) | 技能与宏：三级渐进披露、上传校验、模型自己建技能 |
 | [01-architecture/cron.md](01-architecture/cron.md) | 定时任务：调度、错过窗口、时区、无头执行 |
+| [01-architecture/context.md](01-architecture/context.md) | 上下文：占用计算、压缩时机与预算 |
 | [01-architecture/voice.md](01-architecture/voice.md) | 语音输入 |
 | [02-data/](02-data/) | SQLite 表结构、运行时文件布局、迁移约定 |
 | [03-api/](03-api/) | HTTP 接口、SSE 事件协议 |
