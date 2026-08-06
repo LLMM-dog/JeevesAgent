@@ -65,7 +65,7 @@ github       http    已关闭   —                          [开关]
 ### 1. 拿代码
 
 ```bash
-git clone <你的仓库地址> jeeves
+git clone https://github.com/LLMM-dog/JeevesAgent.git jeeves
 cd jeeves
 ```
 
