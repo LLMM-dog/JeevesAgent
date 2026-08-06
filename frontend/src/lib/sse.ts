@@ -22,9 +22,16 @@ export interface SseHandlers {
   /** 收到任意事件。返回值忽略 */
   onEvent: <K extends SseEventName>(name: K, data: SseEventMap[K]) => void;
   /** 流正常结束或出错结束后调用一次，无论哪种情况 */
-  onClose?: (reason: "done" | "aborted" | "network") => void;
+  onClose?: (reason: "done" | "aborted" | "network" | "error") => void;
   /** 网络层错误（不是后端发的 error 事件） */
   onNetworkError?: (err: Error) => void;
+  /**
+   * 业务错误（HTTP 4xx/5xx，带 code 和 hint）。
+   *
+   * 和 onNetworkError 分开：409 "该会话已有正在进行的对话" 报成
+   * "连接中断" 会让用户完全找不到真因。
+   */
+  onApiError?: (err: ApiError) => void;
 }
 
 export interface StartChatOptions {
@@ -84,7 +91,7 @@ export function startChat(
   let aborted = false;
 
   void (async () => {
-    let closeReason: "done" | "aborted" | "network" = "network";
+    let closeReason: "done" | "aborted" | "network" | "error" = "network";
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
@@ -144,6 +151,16 @@ export function startChat(
     } catch (err) {
       if (aborted || (err instanceof DOMException && err.name === "AbortError")) {
         closeReason = "aborted";
+      } else if (err instanceof ApiError) {
+        // 【业务错误不能报成"连接中断"】。
+        //
+        // POST /api/chat 返回 409（该会话已有正在进行的对话）时，
+        // 原来走的是 network 分支，于是用户看到
+        // "连接中断：该会话已有正在进行的对话" —— 措辞和真因完全对不上，
+        // 而且 onClose("network") 还会触发一次 openSession 重新拉历史，
+        // 把用户刚发的那条乐观插入的消息抹掉（409 发生在落库之前）。
+        closeReason = "error";
+        handlers.onApiError?.(err);
       } else {
         closeReason = "network";
         handlers.onNetworkError?.(

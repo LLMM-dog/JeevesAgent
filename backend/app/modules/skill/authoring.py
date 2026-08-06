@@ -256,3 +256,46 @@ def _reload(kind: str) -> None:
 
 def macro_names() -> list[str]:
     return get_macro_index().names()
+
+def asset_dir(*, kind: str, name: str) -> Path:
+    """
+    条目所在目录的绝对路径。
+
+    ## 为什么要暴露这个
+
+    模型建完 SKILL.md 之后想加附件，用的是相对路径
+    "skills/xxx/references/detail.md"。而 write_file 的相对路径基准是
+    【工作区】—— 文件会写到 workspace/skills/xxx/ 去。
+
+    那里本来就可写，所以【不会报错】：写入成功、模型以为搞定了，
+    而 reload 之后附件不在 files 白名单里。用户看到的是
+    "技能建好了但读不到附件"。
+
+    给出绝对路径，模型才知道该往哪写。
+    """
+    return _target_dir(kind, validate_name(name))
+
+
+def list_extra_files(*, kind: str, name: str) -> list[str]:
+    """
+    除 SKILL.md / MACRO.md 之外的文件，POSIX 相对路径。
+
+    给模型看"这个技能现在有哪些附件"，它才知道该加什么、
+    以及有没有重名。
+    """
+    d = _target_dir(kind, validate_name(name))
+    if not d.is_dir():
+        return []
+    main = _file_name(kind)
+    out: list[str] = []
+    for f in sorted(d.rglob("*")):
+        if not f.is_file() or f.name == main:
+            continue
+        # 跳过垃圾目录 —— 技能目录里放了依赖时不该刷一屏
+        if any(
+            part in {"node_modules", ".git", "__pycache__", ".venv"}
+            for part in f.relative_to(d).parts
+        ):
+            continue
+        out.append(f.relative_to(d).as_posix())
+    return out[:50]

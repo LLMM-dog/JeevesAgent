@@ -252,30 +252,56 @@ async def init_runtime() -> None:
     async with get_sessionmaker()() as db:
         ws = await repo.ensure_default_workspace(db, str(settings.workspace_dir))
 
-        # 路径白名单的两条内置项。为空时插入 ——
-        # 白名单为空则 agent 完全不能读写文件，而用户想不到是这个原因。
-        existing = list((await db.execute(select(PathWhitelist))).scalars())
-        if not existing:
+        # 路径白名单的内置项。
+        #
+        # ## 为什么逐条 upsert 而不是"表为空才插"
+        #
+        # 原来是 `if not existing` 一次性插两条。那样新增内置项时，
+        # 【已经在用的用户永远拿不到】—— 他们表里有数据，整个分支被跳过。
+        # 而症状是"文档说能写 skills/，我这儿报路径不在白名单内"。
+        #
+        # ## 为什么 skills/ 和 macros/ 要可写
+        #
+        # 技能不是单个 md 文件，它是一个目录：SKILL.md + references/ +
+        # 可能还有脚本和模板。manage_asset 只能写 SKILL.md，
+        # 而一份像样的技能往往要带参考资料。
+        #
+        # 白名单打开之后模型能用 write_file / edit_file / list_dir /
+        # glob 在里面自由组织文件 —— 那是它已经熟练的工具，
+        # 不需要为"写技能附件"再造一套 API。
+        #
+        # 硬拒止清单（.env / *.pem / credentials 等）优先级高于白名单，
+        # 所以这不等于放开敏感文件。
+        wanted = [
+            (settings.workspace_dir.resolve(), 1, "默认工作区"),
+            ((settings.data_dir / "uploads").resolve(), 0, "上传目录（只读）"),
+            (
+                settings.skills_dir.resolve(),
+                1,
+                "技能目录（模型可增删改技能及其附件）",
+            ),
+            (settings.macros_dir.resolve(), 1, "宏目录（模型可增删改宏）"),
+        ]
+        existing_paths = {
+            r.path for r in (await db.execute(select(PathWhitelist))).scalars()
+        }
+        added = 0
+        for p, can_write, note in wanted:
+            if str(p) in existing_paths:
+                continue
             db.add(
                 PathWhitelist(
                     id=path_id(),
-                    path=str(settings.workspace_dir.resolve()),
-                    can_write=1,
-                    note="默认工作区",
+                    path=str(p),
+                    can_write=can_write,
+                    note=note,
                     builtin=1,
                 )
             )
-            db.add(
-                PathWhitelist(
-                    id=path_id(),
-                    path=str((settings.data_dir / "uploads").resolve()),
-                    can_write=0,
-                    note="上传目录（只读）",
-                    builtin=1,
-                )
-            )
+            added += 1
+        if added:
             await db.commit()
-            log.info("whitelist_initialized")
+            log.info("whitelist_builtins_added", count=added)
 
         rows = list((await db.execute(select(PathWhitelist))).scalars())
         allowed = [

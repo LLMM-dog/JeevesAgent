@@ -86,15 +86,67 @@ _DELTA_EVENTS = frozenset({Ev.THINKING, Ev.MESSAGE})
 
 
 class EventBus:
+    """
+    一个 run 一个总线，生产端 push、SSE 生成器 get。
+
+    ## detach：没人听的时候不能阻塞
+
+    【这是一个真实死锁的修复】。用户在 auto 模式下切走会话时：
+
+      1. 前端 abort fetch（只停本地读取，服务端 run 继续 —— 这是有意的，
+         用户要的就是"让它自己跑"）
+      2. Starlette 取消 SSE 响应任务，消费端不再调 get()
+      3. 队列很快填满（512 槽位，一条长回复的 delta 就够）
+      4. 下一个非增量事件（tool_start / tool_end / approval_required）
+         执行 `await queue.put()` —— **永久阻塞**
+      5. produce() 的 finally 永不执行 → run_registry.unregister 不执行
+         → task 永远不 done → active_run_of() 永远返回它
+
+    结果是那个会话被永久锁死：切回去看不到新输出（agent 卡在第 4 步，
+    不再写库），发消息永远 409，而错误信息说的是"连接中断"。
+    只有重启进程才能恢复。
+
+    detach() 之后 push 变成 no-op：run 继续跑完、继续写库、
+    finally 正常执行、注册表正常释放。用户切回来时从库里读到完整结果。
+
+    ## 为什么不是"取消 run"
+
+    用户切走会话的意图是"让它在后台跑"，不是"停掉它"。取消的话
+    auto 模式下跑了一半的任务就废了 —— 而那正是用户切走去干别的事
+    的原因。
+    """
+
     def __init__(self, maxsize: int | None = None) -> None:
         self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
             maxsize=maxsize or settings.agent.event_queue_size
         )
         self.dropped = 0
         self._closed = False
+        self._detached = False
+
+    def detach(self) -> None:
+        """
+        消费端走了。此后 push 全部丢弃，不阻塞生成。
+
+        幂等 —— SSE 生成器的 finally 和异常路径都可能调它。
+        """
+        self._detached = True
+        # 清空队列，让已经阻塞在 put 上的协程立刻得到槽位。
+        #
+        # 【只 detach 不清空是不够的】：已经卡在 await put() 上的那个
+        # 协程不会因为标志位变化而醒来，它在等一个永远不会腾出的槽位。
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    @property
+    def detached(self) -> bool:
+        return self._detached
 
     async def push(self, event: Ev, data: dict[str, Any]) -> None:
-        if self._closed:
+        if self._closed or self._detached:
             return
 
         span = current_span()
@@ -115,7 +167,31 @@ class EventBus:
             except asyncio.QueueFull:
                 self.dropped += 1
         else:
-            await self._queue.put(payload)
+            # 结构类事件要保序入队，可以等 —— 但【不能无限等】。
+            #
+            # detach() 覆盖了"消费端正常退出"这条路径。这个超时兜的是
+            # 其余情况：消费端还在但卡住了（网络极慢的客户端、
+            # 或者 detach 因为某个异常路径没被调到）。
+            #
+            # 无限等的代价是整个 run 永久死锁 + 会话被锁死 + DB 连接泄漏，
+            # 而丢一个事件的代价是前端某个工具卡片停在"执行中"。
+            # 后者用户刷新一下就好，前者要重启进程。
+            try:
+                await asyncio.wait_for(
+                    self._queue.put(payload),
+                    timeout=settings.agent.event_put_timeout,
+                )
+            except TimeoutError:
+                self.dropped += 1
+                # 【字段名不能叫 event】。structlog 的第一个位置参数就叫
+                # event，传 event=... 会撞成 "got multiple values for
+                # argument 'event'" —— 而这个 TypeError 发生在异常处理
+                # 路径里，正常跑的时候永远不会暴露。
+                log.warning(
+                    "event_dropped_queue_full",
+                    event_name=str(event),
+                    dropped=self.dropped,
+                )
 
     async def get(self) -> dict[str, Any] | None:
         """返回 None 表示流结束。"""

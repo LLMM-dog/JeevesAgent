@@ -753,6 +753,17 @@ export const api = {
 
   // ─────────────────────────── Todo ───────────────────────────
 
+  /**
+   * 这个会话有没有正在后台跑的 run。
+   *
+   * 切走会话时服务端的生成会继续跑完。切回来要靠这个知道"还在跑"——
+   * 否则界面显示的是切走那一刻的历史，而发消息会撞 409。
+   */
+  activeRun: (sessionId: string) =>
+    request<{ run_id: string } | null>(
+      `/sessions/${encodeURIComponent(sessionId)}/active-run`,
+    ),
+
   listTodos: (sessionId: string) =>
     request<{ items: TodoItem[]; stats: TodoStats }>(
       `/sessions/${sessionId}/todos`,

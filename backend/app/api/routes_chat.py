@@ -488,6 +488,33 @@ async def chat(
     )
 
 
+@router.get("/sessions/{session_id}/active-run", summary="这个会话有没有正在跑的 run")
+async def active_run(session_id: str) -> dict[str, object] | None:
+    """
+    返回 {"run_id": ...} 或 null。
+
+    ## 为什么需要这个接口
+
+    用户在 auto 模式下切走会话时，服务端的 run 会继续跑完（那是有意的 ——
+    他要的就是"让它自己跑"）。但切回来时前端只会 listMessages，
+    看到的是切走那一刻的历史，之后再没有新内容。
+
+    而后台其实一直在写库。用户以为卡死了，一发消息还会撞 409
+    （"该会话已有正在进行的对话"，且被前端误报成"连接中断"）。
+
+    有了这个接口，前端切回来能知道"还在跑"，于是锁上输入框、
+    显示提示、轮询拉增量。
+
+    ## 为什么不返回更多信息（进度、当前工具等）
+
+    那些都在事件流里，而事件流已经随着上一个连接的 detach 消失了。
+    这里能诚实给出的只有"在跑 / 不在跑"。多返回一个猜测的进度
+    比不返回更糟。
+    """
+    rid = run_registry.active_run_of(session_id)
+    return {"run_id": rid} if rid else None
+
+
 @router.post("/runs/{run_id}/cancel", response_model=CancelResponse, summary="取消生成")
 async def cancel_run(run_id: str) -> CancelResponse:
     """

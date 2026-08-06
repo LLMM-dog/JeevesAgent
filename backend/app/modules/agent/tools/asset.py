@@ -58,13 +58,23 @@ class ManageAssetTool:
 
     name = "manage_asset"
     description = (
-        "管理宏（macro）和技能（skill）：新建、修改、删除、查看。"
+        "管理宏（macro）和技能（skill）：新建、修改、删除、查看、重新扫描。"
         "\n\n宏是可复用的流程模板，用户用 ! 引用它。"
         "技能是按需加载的知识包，你用 load_skill 读它。"
         "\n\n什么时候用："
         "\n- 用户说「把这个流程存成宏」「记住这个步骤」"
         "\n- 用户说「学一下这个」并给了一段规范或文档"
         "\n- 用户要改或删已有的宏/技能"
+        "\n\n【技能是一个目录，不止一个文件】。"
+        "用这个工具建出 SKILL.md 之后，可以用 write_file 往那个目录里"
+        "加 references/xxx.md、脚本、模板之类的附件 —— "
+        "skills/ 和 macros/ 都在可写白名单里。"
+        "\n加附件时有两件事必须做对："
+        "\n1. 用 create/read 返回的【绝对路径】。相对路径的基准是工作区，"
+        "会把文件写到 workspace/ 下面去 —— 那里也可写，所以不会报错，"
+        "但那不是技能目录，附件永远不会被索引。"
+        "\n2. 加完调一次本工具的 reload，否则新文件不在白名单里，"
+        "load_skill_file 读不到它。"
         "\n\n注意 description 字段决定了它【什么时候会被想起来】——"
         "写「当用户要 X 时使用」这种触发条件，不要只写「关于 X 的说明」。"
         "写不好的话这个宏建了也没人用。"
@@ -78,8 +88,18 @@ class ManageAssetTool:
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "read", "create", "update", "delete"],
-                    "description": "要做什么",
+                    "enum": [
+                        "list",
+                        "read",
+                        "create",
+                        "update",
+                        "delete",
+                        "reload",
+                    ],
+                    "description": (
+                        "要做什么。用 write_file 往技能目录里加了附件之后"
+                        "必须 reload，否则新文件不会被索引"
+                    ),
                 },
                 "kind": {
                     "type": "string",
@@ -128,6 +148,9 @@ class ManageAssetTool:
             if action == "list":
                 return self._list(kind)
 
+            if action == "reload":
+                return self._reload(kind)
+
             if not name:
                 return ToolResult(
                     content=f"{action} 需要 name", is_error=True
@@ -135,12 +158,29 @@ class ManageAssetTool:
 
             if action == "read":
                 desc, body, kwds, _raw = authoring.read_source(kind=kind, name=name)
+                # 带上目录和现有附件 —— 模型可能想在已有技能上加文件，
+                # 而它猜不出真实路径（相对路径会落到工作区去）。
+                d = authoring.asset_dir(kind=kind, name=name)
+                extras = authoring.list_extra_files(kind=kind, name=name)
+                lines = [
+                    f"# {name}",
+                    "",
+                    f"description: {desc}",
+                    f"keywords: {', '.join(kwds) or '（无）'}",
+                    f"目录：{d}",
+                ]
+                if extras:
+                    lines.append(f"附件：{', '.join(extras)}")
+                lines += ["", "---", "", body]
                 return ToolResult(
-                    content=(
-                        f"# {name}\n\ndescription: {desc}\n"
-                        f"keywords: {', '.join(kwds) or '（无）'}\n\n---\n\n{body}"
-                    ),
-                    display={"kind": kind, "name": name, "description": desc},
+                    content="\n".join(lines),
+                    display={
+                        "kind": kind,
+                        "name": name,
+                        "description": desc,
+                        "dir": str(d),
+                        "files": extras,
+                    },
                 )
 
             if action == "delete":
@@ -179,10 +219,25 @@ class ManageAssetTool:
                     overwrite=(action == "update"),
                 )
                 verb = "已新建" if r.created else "已更新"
+                # 【必须给绝对路径】。
+                #
+                # 实测踩到的坑：模型建完 SKILL.md 之后想加 references/
+                # 附件，用的是相对路径 "skills/xxx/references/detail.md"。
+                # 而 write_file 的相对路径基准是【工作区】，于是文件写到
+                # workspace/skills/xxx/ 去了 —— 那里不是真的技能目录。
+                #
+                # 更糟的是它【没有报错】：workspace 本来就可写，写入成功、
+                # 模型以为搞定了，而 reload 之后附件根本不在 files 白名单里。
+                # 用户看到的是"技能建好了但读不到附件"。
+                #
+                # 给出绝对路径，模型就知道该往哪写。
+                d = r.path.parent
                 extra = (
-                    "\n\n它现在就能用了（已重新扫描索引，不用重启）。"
-                    if r.created
-                    else ""
+                    f"\n\n目录：{d}"
+                    "\n\n要加附件（references/*.md、脚本、模板）的话用 write_file "
+                    "往这个目录里写，【必须用上面这个绝对路径】—— "
+                    "相对路径会落到工作区里，而那不是技能目录。"
+                    "\n加完再调一次本工具的 reload，否则新文件不会被索引。"
                 )
                 return ToolResult(
                     content=f"{verb} {kind} {r.name}{extra}",
@@ -191,6 +246,7 @@ class ManageAssetTool:
                         "name": r.name,
                         "created": r.created,
                         "description": desc,
+                        "dir": str(d),
                     },
                 )
 
@@ -207,6 +263,48 @@ class ManageAssetTool:
         except OSError as e:
             log.warning("manage_asset_io_failed", err=str(e), kind=kind, name=name)
             return ToolResult(content=f"文件操作失败：{e}", is_error=True)
+
+    def _reload(self, kind: str) -> ToolResult:
+        """
+        重扫目录。
+
+        ## 为什么必须有这个动作
+
+        索引是进程内单例。用 write_file 往技能目录里加了 references/x.md
+        之后，那个文件【不在 meta.files 白名单里】—— load_skill_file
+        会拒绝读它，报"不在这个技能的文件列表里"。
+
+        而这个错误完全不指向"你需要 reload"：模型刚刚才写了那个文件，
+        它会以为是路径写错了，然后反复试不同的写法。
+        """
+        if kind == "macro":
+            from app.modules.skill.macros import reload as reload_macros
+
+            idx = reload_macros()
+            names = idx.names()
+            diags = idx.diagnostics
+        else:
+            idx2 = skill_registry.reload()
+            names = sorted(idx2.skills)
+            diags = idx2.diagnostics
+
+        lines = [f"已重新扫描，现有 {len(names)} 个 {kind}：{', '.join(names) or '（无）'}"]
+        if diags:
+            # 【诊断必须报出来】。缺 description 的条目会被静默跳过，
+            # 模型以为建好了而它根本没被加载。
+            lines.append("")
+            lines.append("有问题的条目：")
+            for d in diags[:5]:
+                lines.append(f"- [{d.level}] {d.message}（{d.path}）")
+        return ToolResult(
+            content="\n".join(lines),
+            display={
+                "kind": kind,
+                "count": len(names),
+                "names": names,
+                "diagnostics": len(diags),
+            },
+        )
 
     def _list(self, kind: str) -> ToolResult:
         if kind == "macro":

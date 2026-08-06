@@ -158,6 +158,8 @@ interface ChatState {
   /** 设置这次对话用哪个模型。传空串回到默认绑定 */
   setWorkModel: (pk: string) => Promise<void>;
   setVisionMode: (on: boolean) => Promise<void>;
+  /** 轮询后台正在跑的 run，直到它结束 */
+  watchBackgroundRun: (sessionId: string) => Promise<void>;
   setPrivateMode: (on: boolean) => Promise<void>;
   setAmnesiaMode: (on: boolean) => Promise<void>;
 }
@@ -312,6 +314,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         api.getSession(sessionId),
         api.listTodos(sessionId),
       ]);
+      // 【必须丢弃过期响应】。
+      //
+      // 快速连点侧栏（A→B→C）时三个 openSession 并发飞行，Promise.all
+      // 的完成顺序不保证与发起顺序一致。早发起的响应后到就会把它的
+      // messages/title/workDir 写进 store，而路由指向最后点的那个 ——
+      // 界面显示 A 的内容但 URL 是 C。
+      if (get().sessionId !== sessionId) return;
       set({
         messages: items,
         title: session.title,
@@ -339,8 +348,89 @@ export const useChatStore = create<ChatState>((set, get) => ({
         privateMode: session.private_mode ?? false,
         amnesiaMode: session.amnesia_mode ?? false,
       });
+
+      // 这个会话可能有后台正在跑的 run（用户之前切走了）。
+      //
+      // 不检测的话现象是：切回来看到的是切走那一刻的历史，之后
+      // 再没有任何新内容 —— 而后台其实一直在写库。用户以为卡死了。
+      void get().watchBackgroundRun(sessionId);
     } catch (err) {
+      // 过期的失败也不该弹 banner —— 用户已经在别的会话了，
+      // 弹一个"加载失败"只会让他困惑。
+      if (get().sessionId !== sessionId) return;
       set({ banner: toBanner(err) });
+    }
+  },
+
+  /**
+   * 轮询后台正在跑的 run，直到它结束。
+   *
+   * ## 为什么是轮询而不是重连 SSE
+   *
+   * 一个 run 的 EventBus 只有一个队列、一个消费者。原来的消费者
+   * （切走时那个 HTTP 连接）已经 detach 了，队列被清空 —— 那些事件
+   * 已经永久丢失，没有可重连的流。
+   *
+   * 要真正支持重连，得让 bus 支持多消费者 + 事件重放缓冲，
+   * 那是个大得多的改动。而 run 一直在往库里写消息，轮询 listMessages
+   * 就能拿到增量输出 —— 用户看到的是"每两秒多出一段"而不是
+   * 逐字流式，但至少内容在动，而且能知道什么时候结束。
+   *
+   * ## 为什么必须轮到结束
+   *
+   * 结束的那一刻要解锁输入框。不轮的话用户只能靠手动刷新去猜
+   * "它跑完了吗"—— 而发消息会撞 409。
+   */
+  async watchBackgroundRun(sessionId) {
+    let active: { run_id: string } | null = null;
+    try {
+      active = await api.activeRun(sessionId);
+    } catch {
+      // 查不到就当没有。这是个增强功能，失败不该影响打开会话。
+      return;
+    }
+    if (!active || get().sessionId !== sessionId) return;
+
+    set({
+      runId: active.run_id,
+      // 【必须置 pending】。后台在跑，输入框要锁上 ——
+      // 不锁的话用户能输入，一发就 409，而那个错误信息
+      // 说的是"连接中断"，完全不指向真因。
+      pending: true,
+      banner: {
+        kind: "info",
+        message: "这个对话正在后台继续",
+        hint: "你之前切走了。内容会每隔几秒刷新一次，也可以点停止按钮结束它",
+        retryable: false,
+      },
+    });
+
+    // 轮询到结束。间隔 2 秒：再密就是在刷后端，再疏用户会觉得卡住了。
+    while (get().sessionId === sessionId) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (get().sessionId !== sessionId) return;
+
+      let still: { run_id: string } | null = null;
+      try {
+        still = await api.activeRun(sessionId);
+      } catch {
+        break;
+      }
+      if (get().sessionId !== sessionId) return;
+
+      try {
+        const { items } = await api.listMessages(sessionId);
+        if (get().sessionId !== sessionId) return;
+        set({ messages: items });
+      } catch {
+        /* 拉取失败下一轮再试 */
+      }
+
+      if (!still) {
+        // 跑完了：解锁输入框并清掉那条提示
+        set({ pending: false, runId: null, banner: null });
+        return;
+      }
     }
   },
 
@@ -370,11 +460,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       recalledMemories: [],
     }));
 
+    // 【所有回调都必须先确认自己还属于当前会话】。
+    //
+    // 这些回调是闭包，捕获的 sessionId 是发消息那一刻的值。用户切到别的
+    // 会话后它们仍会触发（流还在读、或者刚断开），此时无条件 set() 会把
+    // 上一个会话的状态写进当前界面：
+    //
+    //   - onEvent：A 的输出流进 B 的气泡列表
+    //   - onClose：清掉 B 正在进行的 pending/streaming
+    //   - onClose(network) + openSession(A)：把 A 的历史灌进 store，
+    //     而路由还指向 B —— 之后在"B 的页面"上发消息实际发往 A
+    const isStillCurrent = () => get().sessionId === sessionId;
+
     const cancel = startChat(
       { session_id: sessionId, content, images: images ?? [], refs: refs ?? [] },
       {
-        onEvent: (name, data) => handleEvent(set, get, name, data),
+        onEvent: (name, data) => {
+          if (!isStillCurrent()) return;
+          handleEvent(set, get, name, data);
+        },
         onNetworkError: (err) => {
+          if (!isStillCurrent()) return;
           set({
             banner: {
               kind: "error",
@@ -384,7 +490,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
             },
           });
         },
+        onApiError: (err) => {
+          if (!isStillCurrent()) return;
+          // 把乐观插入的那条用户消息撤掉。
+          //
+          // 409 发生在后端落库【之前】（prepare 里先查 active run），
+          // 所以这条消息在库里不存在。留着它的话用户以为发出去了，
+          // 而刷新之后它会凭空消失。
+          set((s) => ({
+            messages: s.messages.filter((m) => m.id !== tempId),
+            banner: toBanner(err),
+          }));
+          // 撞 409 说明有 run 在后台跑 —— 开始轮询，跑完自动解锁。
+          if (err.code === "run_in_progress") {
+            void get().watchBackgroundRun(sessionId);
+          }
+        },
         onClose: (reason) => {
+          // 切走之后不要动当前会话的状态。
+          //
+          // 尤其是 pending/streaming：清掉的话用户在【新】会话里
+          // 正在进行的生成会显示成已结束，输入框提前解锁。
+          if (!isStillCurrent()) return;
           set({
             pending: false,
             cancelStream: null,
@@ -867,21 +994,29 @@ function handleEvent<K extends SseEventName>(
       });
       break;
 
-    case "done": {
-      // 落成正式消息，然后重新拉一次真实数据 ——
-      // 库里的消息有正确的 seq、id、token 统计，本地拼的没有。
-      const sessionId = get().sessionId;
-      set({ runId: null, ...flushStreaming(get()) });
-      if (sessionId) {
-        void api
-          .listMessages(sessionId)
-          .then(({ items }) => set({ messages: items, streaming: null }))
-          .catch(() => {
-            /* 拉取失败就保留本地拼的，不弹错误 */
-          });
+      case "done": {
+        // 落成正式消息，然后重新拉一次真实数据 ——
+        // 库里的消息有正确的 seq、id、token 统计，本地拼的没有。
+        const sessionId = get().sessionId;
+        set({ runId: null, ...flushStreaming(get()) });
+        if (sessionId) {
+          void api
+            .listMessages(sessionId)
+            .then(({ items }) => {
+              // 【必须再确认一次会话没变】。
+              //
+              // 这次 HTTP 往返有几十到几百毫秒，用户完全可能在这期间
+              // 切走。不校验的话旧会话的消息列表会覆盖新会话的 —— 表现
+              // 是"切过去显示了别的会话的对话"。
+              if (get().sessionId !== sessionId) return;
+              set({ messages: items, streaming: null });
+            })
+            .catch(() => {
+              /* 拉取失败就保留本地拼的，不弹错误 */
+            });
+        }
+        break;
       }
-      break;
-    }
 
     case "ping":
       // 心跳，只为保持连接。不做任何事。

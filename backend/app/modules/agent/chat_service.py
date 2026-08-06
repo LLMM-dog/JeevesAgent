@@ -347,6 +347,20 @@ class ChatService:
                     status = "error"
                 yield sse_pack(item["event"], item["data"])
         finally:
+            # 【必须 detach】。
+            #
+            # 这个 finally 在两种情况下执行：正常跑完，以及客户端断开
+            # （用户切走会话 → 前端 abort fetch → Starlette 取消这个
+            # 生成器 → GeneratorExit 走到这里）。
+            #
+            # 第二种情况下 produce() 还在跑（没人取消它，这是有意的：
+            # 用户切走的意图是"让它在后台跑完"）。但从此刻起没人再调
+            # bus.get()，队列会填满，然后下一个结构类事件在
+            # `await queue.put()` 上永久阻塞 —— produce 的 finally 永不
+            # 执行，run_registry 永不释放，那个会话被永久锁死。
+            #
+            # detach 之后 push 变成 no-op，run 继续跑完并正常写库。
+            bus.detach()
             # done 一定会发，无论成功、失败还是取消。
             # 前端的"恢复输入框"挂在这里，不能挂 agent_end（子智能体也会发）。
             yield sse_pack(str(Ev.DONE), {"run_id": run_id, "status": status})
