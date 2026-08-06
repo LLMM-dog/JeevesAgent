@@ -183,6 +183,58 @@ workspace/          agent 的工作目录
 
 ---
 
+## 更新
+
+```bash
+git pull
+uv sync                      # 有新依赖时
+cd frontend && npm install   # 同上
+```
+
+然后重新启动。**数据库迁移在启动时自动跑**，不需要手动执行任何命令。
+
+### 你的东西都会留下
+
+这些文件不被 git 跟踪，`git pull` 碰不到它们：
+
+| | |
+|---|---|
+| `data/jeeves.db` | 对话历史、记忆、定时任务、追踪 |
+| `.env` | 配置和加密后的 API Key |
+| `personas/*.md` | 性格设定、你的自述、行为规则 |
+| `workspace/` | agent 的工作目录 |
+| `config/mcp_servers.yaml` | MCP 服务器配置 |
+
+仓库里只有 `personas/*.example.md`。首次启动时复制成 `.md`，**已存在的绝不覆盖** —— 所以升级不会重置你改过的人格设定。
+
+### 数据库怎么保证不丢
+
+迁移只加不删：加表、加列、加索引。有测试盯着这件事 —— 任何一个迁移里出现 `drop_table('message')` 或往 `message` / `session` 表 `drop_column`，测试就会失败。
+
+往已有表加列时必须带 `server_default`，否则已有行满足不了 `NOT NULL`，SQLite 会在迁移中途失败。这一条也有测试。
+
+每个迁移都实现了 `downgrade()`。升级出问题时可以退回去：
+
+```bash
+uv run alembic downgrade -1    # 退一步
+uv run alembic current         # 看当前版本
+```
+
+### 升级前想更保险
+
+```bash
+# Windows
+Copy-Item data\jeeves.db data\jeeves.db.bak
+# macOS / Linux
+cp data/jeeves.db data/jeeves.db.bak
+```
+
+出问题就把 `.bak` 改回来。数据库是单个文件，没有别的状态。
+
+> **`.env` 里的 `ENCRYPTION_KEY` 要单独备份。** 它丢了的话已存的 API Key 全部无法解密（只能重填一遍）—— 而对话历史不受影响，那部分没有加密。
+
+---
+
 ## 卸载
 
 ```bash

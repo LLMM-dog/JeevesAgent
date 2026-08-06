@@ -176,6 +176,16 @@ export interface ContextUsageEvent extends EventCommon {
   compact_at: number;
   /** true 表示本地估算（上游没返回 usage），UI 要标注出来 */
   is_estimate: boolean;
+  /**
+   * 工具定义占的 token。每一轮都重发。
+   *
+   * 必须显示出来 —— 发一句"你好"看到 4551 token 时，用户唯一的解释
+   * 是"计数错了"。实际是 18 个工具的 schema 占了 4298。
+   */
+  tools_tokens?: number;
+  /** 系统提示词占的 token。同样每轮重发 */
+  system_tokens?: number;
+  tool_count?: number;
 }
 
 export interface TodoItem {

@@ -9,8 +9,12 @@ config/*.yaml
 # 判据：换一台机器 clone 下来能不能跑起来 + 会不会泄露隐私
 data/
 workspace/
+# 人格文件：用户会在设置页里改，跟踪它们会让 git pull 直接失败
+# （error: Your local changes would be overwritten by merge）。
+# 只跟踪 .example.md，首次启动时复制过来。
 personas/SOUL.md
 personas/USER.md
+personas/AGENTS.md
 
 # ─── Python ───
 __pycache__/

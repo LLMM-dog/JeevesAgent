@@ -45,7 +45,7 @@ from app.infra.llm.openai_compat import classify_error
 from app.infra.llm.port import LLMChunk, LLMPort, ResolvedModel, TokenUsage, ToolCallDelta
 from app.modules.agent import compaction
 from app.modules.agent.messages import Msg, ToolCall, find_missing_tool_calls, repair_tool_pairing
-from app.modules.agent.tokens import estimate_tokens
+from app.modules.agent.tokens import count_text, count_tools, estimate_tokens
 from app.modules.agent.tools.base import (
     ArtifactPayload,
     ToolContext,
@@ -761,6 +761,48 @@ class AgentLoop:
                 used = estimate_tokens(api_msgs, specs)
                 is_estimate = True
 
+            # 固定开销：工具定义 + 系统提示词。
+            #
+            # ## 为什么要单独报出来
+            #
+            # 用户发一句"你好"看到 4551 token，第一反应是"计数错了"——
+            # 因为那句话只有 2 个 token。实际是 18 个工具的 JSON schema
+            # 占了 4298，系统提示词再占 1311，而这两项每一轮都重发。
+            #
+            # 不拆开的话用户唯一的解释就是"这个数字是错的"。拆开之后
+            # 他能看到真正该动的地方（关掉用不到的 MCP、精简 AGENTS.md），
+            # 而不是怀疑计数。
+            local_tools = count_tools(specs) if specs else 0
+            local_system = count_text(
+                next(
+                    (
+                        str(m.get("content") or "")
+                        for m in api_msgs
+                        if m.get("role") == "system"
+                    ),
+                    "",
+                )
+            )
+            # 【必须按比例分摊，不能直接相减】。
+            #
+            # 本地用 tiktoken(cl100k_base) 数，而模型用自己的分词器。
+            # 实测本地数出 tools 4298 + system 1845 = 6143，
+            # 而模型报的整个 prompt 才 4547 —— 本地高 35%。
+            #
+            # 直接拿真实总数减本地分项的话，"对话内容"会变成 -1596。
+            # 用户看到一个负数只会更确信"这个计数是坏的"，
+            # 而我本来是想解释清楚它不是坏的。
+            #
+            # 所以：本地的数只用来算【占比】，再乘到真实总数上。
+            # 分项因此是近似值，前端要标出来。
+            local_total = local_tools + local_system
+            if local_total > 0 and used > 0:
+                scale = min(1.0, used / local_total)
+                tools_tok = int(local_tools * scale)
+                system_tok = int(local_system * scale)
+            else:
+                tools_tok = 0
+                system_tok = 0
             await emit(
                 Ev.CONTEXT_USAGE,
                 used_tokens=used,
@@ -770,6 +812,10 @@ class AgentLoop:
                     self.model.context_window * settings.agent.compact_trigger_ratio
                 ),
                 is_estimate=is_estimate,
+                # 每轮都重发的部分。对话内容 = used - 这两项
+                tools_tokens=tools_tok,
+                system_tokens=system_tok,
+                tool_count=len(specs) if specs else 0,
             )
         return accum
 

@@ -212,8 +212,18 @@ function restoreUsage(
         window_tokens: win,
         ratio: Math.round((m.prompt_tokens / Math.max(1, win)) * 10000) / 10000,
         compact_at: Math.round(win * 0.8),
-        // 这是历史值，不是本轮实测 —— 标成估算，UI 会加"（估算）"
-        is_estimate: true,
+        // 【不是估算】。
+        //
+        // message.prompt_tokens 存的是模型返回的真实 usage
+        // —— 流式请求已经开了 stream_options.include_usage。
+        //
+        // 上一轮我在这里写了 true，界面于是在一个真实值旁边显示
+        // "（估算）"。用户看到"4551（估算）"会以为这个数字不可信，
+        // 而它恰恰是最可信的那个 —— 是模型自己报的。
+        //
+        // 只有上游不返回 usage、走本地 tiktoken 兜底时才是估算，
+        // 那种情况由 loop.py 发的事件自己标。
+        is_estimate: false,
       };
     }
   }

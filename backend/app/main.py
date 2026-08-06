@@ -215,8 +215,20 @@ async def init_runtime() -> None:
     ):
         d.mkdir(parents=True, exist_ok=True)
 
-    # 人设文件从 example 复制（不覆盖已有的）
-    for name in ("SOUL", "USER"):
+    # 人设文件从 example 复制（不覆盖已有的）。
+    #
+    # 【必须包含 AGENTS】。它原来是被 git 跟踪的，而设置页允许用户编辑
+    # 它 —— 结果是用户改完之后 git pull 直接失败：
+    #
+    #   error: Your local changes to the following files would be
+    #   overwritten by merge: personas/AGENTS.md
+    #   Aborting
+    #
+    # 用户要么丢掉自己的修改，要么学会 git stash。两个都不该要求。
+    #
+    # not target.exists() 是关键：已有文件绝不覆盖，否则每次升级
+    # 都把用户的人格设定重置回默认，而他不会想到是升级干的。
+    for name in ("SOUL", "USER", "AGENTS"):
         target = settings.personas_dir / f"{name}.md"
         example = settings.personas_dir / f"{name}.example.md"
         if not target.exists() and example.exists():

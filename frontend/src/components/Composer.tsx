@@ -304,12 +304,44 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
                 }}
               />
             </div>
-            <span>
+            <span
+              title={
+                usage.tools_tokens
+                  ? `工具定义 ${usage.tools_tokens.toLocaleString()}` +
+                    (usage.tool_count ? `（${usage.tool_count} 个）` : "") +
+                    ` + 系统提示词 ${(usage.system_tokens ?? 0).toLocaleString()}` +
+                    ` + 对话内容 ${Math.max(
+                      0,
+                      usage.used_tokens -
+                        usage.tools_tokens -
+                        (usage.system_tokens ?? 0),
+                    ).toLocaleString()}` +
+                    "\n\n（分项是按比例估的：本地分词器和模型的不一样，" +
+                    "只有总数是模型给的准确值）" +
+                    "\n\n前两项每一轮都会重发。数字偏大通常是工具太多，" +
+                    "去设置页关掉用不到的 MCP 服务器。"
+                  : undefined
+              }
+            >
               {usage.used_tokens.toLocaleString()} /{" "}
-              {usage.window_tokens.toLocaleString()}
-              {/* 估算值必须标出来 —— 用户看到"上下文 80%"时
-                  应该知道这是精确值还是估算 */}
+              {usage.window_tokens.toLocaleString()} token
+              {/* 估算值必须标出来 —— 用户看到"上下文 80%"时应该知道
+                  这是精确值还是估算。
+                  反过来同样要紧：真实值【不能】标成估算，
+                  否则用户会以为最可信的那个数字不可信。 */}
               {usage.is_estimate && "（估算）"}
+              {/* 固定开销占大头时直接摆出来，不藏在 hover 里 ——
+                  用户看到"你好 = 4551 token"的第一反应是关掉界面，
+                  不是去 hover 一个数字。 */}
+              {usage.tools_tokens != null &&
+                usage.tools_tokens > 0 &&
+                usage.used_tokens > 0 &&
+                usage.tools_tokens / usage.used_tokens > 0.5 && (
+                  <span style={{ color: "var(--color-muted)" }}>
+                    {" "}
+                    · 其中工具定义 {usage.tools_tokens.toLocaleString()}
+                  </span>
+                )}
             </span>
           </div>
         )}
