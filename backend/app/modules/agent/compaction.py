@@ -27,7 +27,7 @@ from app.core.exceptions import ProviderError
 from app.infra.llm.port import LLMPort, ResolvedModel
 from app.modules.agent import prompts
 from app.modules.agent.messages import Msg
-from app.modules.agent.tokens import estimate_tokens
+from app.modules.agent.tokens import count_text, estimate_tokens
 
 log = structlog.get_logger(__name__)
 
@@ -349,9 +349,32 @@ async def compact(
     # 换掉了）、日志一切正常，只有摘要内容是垃圾。会话越往后模型越糊涂，
     # 而没有任何报错。下面的空摘要和长度检查就是为了兜住这类问题。
     rendered_input = build_summary_input(plan.victims)
+
+    # 摘要目标长度按【当前模型的窗口】算，不是写死一个字数。
+    #
+    # ## 为什么要动态
+    #
+    # 8K 窗口的模型和 128K 的模型能容纳的摘要差 16 倍。写死"压到 2000 字"
+    # 的话：小窗口模型压完仍然超限（压了等于没压），大窗口模型则白丢信息
+    # （明明还有 100K 空间，却把细节砍光了）。
+    #
+    # ## 为什么只算对话部分
+    #
+    # 系统提示词和工具定义是固定开销（本项目 18 个工具就 4300 token）。
+    # 把它们算进额度的话，8K 窗口下摘要只剩几百 token 可用 ——
+    # 而那点长度装不下"用户的约束 + 决定的理由 + 失败原因"。
+    budget_tokens = max(200, int(model.context_window * settings.agent.compact_target_ratio))
+    # 中文大约 1.4 token/字（tiktoken 对中文偏贵）。给模型一个字符数
+    # 参照 —— 它数不准 token，但对字数有感觉。
+    budget_chars = int(budget_tokens / 1.4)
+
     text = prompts.render(
         prompts.load_builtin("compact"),
         history=rendered_input,
+        budget_tokens=str(budget_tokens),
+        budget_chars=str(budget_chars),
+        window_tokens=str(model.context_window),
+        budget_percent=str(int(settings.agent.compact_target_ratio * 100)),
     )
     if "{{" in text:
         # 模板里还有没被替换的占位符 —— 说明变量名对不上
@@ -392,6 +415,32 @@ async def compact(
             summary_head=summary_text[:120],
         )
         return None
+
+    # 超预算只记日志，不拒绝。
+    #
+    # ## 为什么不截断
+    #
+    # 摘要是结构化的（小标题分段），从中间切断会切掉最后一个小节 ——
+    # 而提示词里"篇幅不够时先砍改动细节"的取舍顺序意味着重要内容在前，
+    # 但"失败原因"那一节完全可能排在末尾。切掉它比超预算糟得多。
+    #
+    # ## 为什么不重试
+    #
+    # 重试要再花一次 LLM 调用，而模型第二次通常也压不到目标 ——
+    # 它对 token 数没有精确控制力。超一点点不影响可用性
+    # （阈值本身留了 75% 的余量），超很多则说明历史确实太长，
+    # 下一轮会再压一次。
+    #
+    # 记日志是为了能发现"某个模型系统性压不动"这件事。
+    actual_tokens = count_text(summary_text)
+    if actual_tokens > budget_tokens * 1.5:
+        log.warning(
+            "compaction_over_budget",
+            actual_tokens=actual_tokens,
+            budget_tokens=budget_tokens,
+            window=model.context_window,
+            model=model.model_id,
+        )
 
     summary = Msg(
         role="summary",

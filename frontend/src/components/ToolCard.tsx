@@ -1,16 +1,17 @@
-import { useState } from "react";
 import {
+  Archive,
+  Check,
   ChevronRight,
+  CircleAlert,
   FileText,
   FolderTree,
+  ListChecks,
+  Loader2,
   Pencil,
   Search,
   Terminal,
-  ListChecks,
-  CircleAlert,
-  Loader2,
-  Check,
 } from "lucide-react";
+import { useState } from "react";
 import clsx from "clsx";
 import type { ToolCard as ToolCardData } from "@/store/chat";
 
@@ -25,6 +26,7 @@ const ICONS: Record<string, typeof FileText> = {
   run_python: Terminal,
   todo_write: ListChecks,
   todo_read: ListChecks,
+  compact_context: Archive,
 };
 
 /** 每个工具的一句话摘要。摘要比原始 JSON 好读得多 */
@@ -47,6 +49,18 @@ function summarize(t: ToolCardData): string {
     case "todo_write": {
       const st = d.stats as Record<string, number> | undefined;
       return st ? `${st.completed}/${st.total} 完成` : "已更新清单";
+    }
+    case "compact_context": {
+      // 压缩是模型主动做的，用户没点任何按钮 —— 摘要里必须说清
+      // 省了多少，否则他只看到上下文条突然变短，不知道发生了什么。
+      if (!d.compacted) return String(d.why ?? "没有可压缩的内容");
+      const before = Number(d.before_tokens ?? 0);
+      const after = Number(d.after_tokens ?? 0);
+      const saved = Math.max(0, before - after);
+      return (
+        `${d.victim_count ?? 0} 条历史 → 摘要，省 ${saved.toLocaleString()} token` +
+        (d.reason ? `（${d.reason}）` : "")
+      );
     }
     default: {
       const first = Object.values(a)[0];

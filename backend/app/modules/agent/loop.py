@@ -362,6 +362,28 @@ class AgentLoop:
                     final_text = ai_msg.content
 
                 if not ai_msg.tool_calls:
+                    # 【收尾时再发一次占用】。
+                    #
+                    # ## 为什么不能停在最后一次 LLM 调用的 prompt_tokens
+                    #
+                    # 那个数字是"这一轮发出去了多少"，不含模型刚写的回复。
+                    # 而用户看这个条是想知道"下一轮会发多少"——两者差一整条
+                    # 回复（长回复能差几千 token）。
+                    #
+                    # 停在旧值的话现象是：模型写了一大段，条却几乎没动，
+                    # 用户以为回复不占上下文。
+                    #
+                    # ## 为什么这不是估算
+                    #
+                    # prompt_tokens 已含系统提示词、工具定义和全部历史；
+                    # completion_tokens 是这条回复的真实长度。两者都是模型
+                    # 返回的值，相加正好是下一轮的 prompt —— 不需要本地估。
+                    if accum.usage and accum.usage.prompt_tokens:
+                        await self._emit_context_usage(
+                            accum.usage.prompt_tokens + accum.usage.completion_tokens,
+                            is_estimate=False,
+                            specs=self.registry.to_specs() or None,
+                        )
                     return LoopResult(
                         stop_reason="final",
                         turns=turn + 1,
@@ -475,6 +497,78 @@ class AgentLoop:
 
                 # 其余错误 adapter 已经重试过了，到这里说明是永久错误
                 raise
+
+    async def _compact_on_request(self, reason: str) -> dict[str, object]:
+        """
+        compact_context 工具的执行入口。
+
+        ## 为什么不复用 _maybe_compact
+
+        那个先看阈值（涨到 75% 才动手），而主动压缩的整个意义就是
+        "不等阈值"。模型判断"调研阶段结束了"时上下文可能只用了 40%，
+        走 _maybe_compact 会直接返回、什么都不做，而工具会报告"已压缩"——
+        一个静默的谎。
+
+        ## 为什么 urgent=True
+
+        urgent 在这里的含义是"别因为候选集小就拒绝"。模型明确要求压缩时
+        应该照做 —— 它比阈值更清楚哪些内容已经没用。真的压不动会返回
+        compacted=False，工具那边如实告诉模型。
+        """
+        specs = self.registry.to_specs() or None
+        before = estimate_tokens([m.to_api() for m in self.messages], specs)
+
+        model = await self._resolve_compact_model()
+        out = await compaction.compact(
+            messages=self.messages,
+            llm=self.llm,
+            model=model,
+            agent_name=self.agent_name,
+            tool_specs=specs,
+            tail_token_budget=self._tail_budget(),
+            urgent=True,
+        )
+        if out is None:
+            log.info("compact_on_request_skipped", reason=reason)
+            return {
+                "compacted": False,
+                "reason": "没有足够的历史可压缩（最近几轮和当前成果不参与压缩）",
+            }
+
+        new_messages, summary = out
+        victim_count = max(1, len(self.messages) - len(new_messages) + 1)
+        self.messages = new_messages
+        await repo.append_message(
+            self.db, self.session_id, summary, run_id=self.run_id
+        )
+        self.journal.append(summary)
+        # 压缩后上一轮的 usage 不再代表当前上下文大小，清掉。
+        # 不清的话下一轮会立刻再触发一次被动压缩。
+        self._last_prompt_tokens = 0
+
+        after = estimate_tokens([m.to_api() for m in self.messages], specs)
+
+        # 【必须重新发一次 context_usage】。
+        #
+        # 不发的话界面上的占用条还停在压缩前的数字，而用户刚刚看到
+        # "已压缩"的提示 —— 两者矛盾，他会以为压缩没生效。
+        #
+        # 这是估算值（本地 tiktoken），下一轮真实 usage 回来会覆盖它。
+        await self._emit_context_usage(after, is_estimate=True, specs=specs)
+
+        log.info(
+            "compact_on_request",
+            reason=reason,
+            before=before,
+            after=after,
+            victims=victim_count,
+        )
+        return {
+            "compacted": True,
+            "victim_count": victim_count,
+            "before_tokens": before,
+            "after_tokens": after,
+        }
 
     async def _force_compact(self) -> bool:
         """
@@ -761,63 +855,83 @@ class AgentLoop:
                 used = estimate_tokens(api_msgs, specs)
                 is_estimate = True
 
-            # 固定开销：工具定义 + 系统提示词。
-            #
-            # ## 为什么要单独报出来
-            #
-            # 用户发一句"你好"看到 4551 token，第一反应是"计数错了"——
-            # 因为那句话只有 2 个 token。实际是 18 个工具的 JSON schema
-            # 占了 4298，系统提示词再占 1311，而这两项每一轮都重发。
-            #
-            # 不拆开的话用户唯一的解释就是"这个数字是错的"。拆开之后
-            # 他能看到真正该动的地方（关掉用不到的 MCP、精简 AGENTS.md），
-            # 而不是怀疑计数。
-            local_tools = count_tools(specs) if specs else 0
-            local_system = count_text(
-                next(
-                    (
-                        str(m.get("content") or "")
-                        for m in api_msgs
-                        if m.get("role") == "system"
-                    ),
-                    "",
-                )
-            )
-            # 【必须按比例分摊，不能直接相减】。
-            #
-            # 本地用 tiktoken(cl100k_base) 数，而模型用自己的分词器。
-            # 实测本地数出 tools 4298 + system 1845 = 6143，
-            # 而模型报的整个 prompt 才 4547 —— 本地高 35%。
-            #
-            # 直接拿真实总数减本地分项的话，"对话内容"会变成 -1596。
-            # 用户看到一个负数只会更确信"这个计数是坏的"，
-            # 而我本来是想解释清楚它不是坏的。
-            #
-            # 所以：本地的数只用来算【占比】，再乘到真实总数上。
-            # 分项因此是近似值，前端要标出来。
-            local_total = local_tools + local_system
-            if local_total > 0 and used > 0:
-                scale = min(1.0, used / local_total)
-                tools_tok = int(local_tools * scale)
-                system_tok = int(local_system * scale)
-            else:
-                tools_tok = 0
-                system_tok = 0
-            await emit(
-                Ev.CONTEXT_USAGE,
-                used_tokens=used,
-                window_tokens=self.model.context_window,
-                ratio=round(used / max(1, self.model.context_window), 4),
-                compact_at=int(
-                    self.model.context_window * settings.agent.compact_trigger_ratio
-                ),
-                is_estimate=is_estimate,
-                # 每轮都重发的部分。对话内容 = used - 这两项
-                tools_tokens=tools_tok,
-                system_tokens=system_tok,
-                tool_count=len(specs) if specs else 0,
+            await self._emit_context_usage(
+                used, is_estimate=is_estimate, api_msgs=api_msgs, specs=specs
             )
         return accum
+
+    async def _emit_context_usage(
+        self,
+        used: int,
+        *,
+        is_estimate: bool,
+        api_msgs: list[dict[str, Any]] | None = None,
+        specs: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """
+        发上下文占用事件。
+
+        ## 为什么抽成方法
+
+        主动压缩之后也要发一次 —— 不发的话界面上的占用条还停在压缩前的
+        数字，而用户刚看到"已压缩"的提示，两者矛盾，他会以为压缩没生效。
+
+        ## 固定开销为什么要单独报
+
+        用户发一句"你好"看到 4551 token，第一反应是"计数错了"——
+        因为那句话只有 2 个 token。实际是 18 个工具的 JSON schema 占了
+        4298，系统提示词再占 1311，而这两项每一轮都重发。
+
+        不拆开的话用户唯一的解释就是"这个数字是错的"。拆开之后他能看到
+        真正该动的地方（关掉用不到的 MCP、精简 AGENTS.md）。
+        """
+        if api_msgs is None:
+            api_msgs = self.build_api_messages()
+        if specs is None:
+            specs = self.registry.to_specs() or None
+
+        local_tools = count_tools(specs) if specs else 0
+        local_system = count_text(
+            next(
+                (
+                    str(m.get("content") or "")
+                    for m in api_msgs
+                    if m.get("role") == "system"
+                ),
+                "",
+            )
+        )
+        # 【必须按比例分摊，不能直接相减】。
+        #
+        # 本地用 tiktoken(cl100k_base) 数，而模型用自己的分词器。
+        # 实测本地数出 tools 4298 + system 1845 = 6143，
+        # 而模型报的整个 prompt 才 4547 —— 本地高 35%。
+        #
+        # 直接拿真实总数减本地分项的话，"对话内容"会变成 -1596。
+        # 用户看到一个负数只会更确信"这个计数是坏的"。
+        local_total = local_tools + local_system
+        if local_total > 0 and used > 0:
+            scale = min(1.0, used / local_total)
+            tools_tok = int(local_tools * scale)
+            system_tok = int(local_system * scale)
+        else:
+            tools_tok = 0
+            system_tok = 0
+
+        await emit(
+            Ev.CONTEXT_USAGE,
+            used_tokens=used,
+            window_tokens=self.model.context_window,
+            ratio=round(used / max(1, self.model.context_window), 4),
+            compact_at=int(
+                self.model.context_window * settings.agent.compact_trigger_ratio
+            ),
+            is_estimate=is_estimate,
+            # 每轮都重发的部分。对话内容 = used - 这两项
+            tools_tokens=tools_tok,
+            system_tokens=system_tok,
+            tool_count=len(specs) if specs else 0,
+        )
 
     async def _act(self, ai_msg: Msg, *, truncated: bool = False) -> None:
         """
@@ -849,6 +963,19 @@ class AgentLoop:
             agent_name=self.agent_name,
             depth=self.depth,
             registry=self.registry,
+            # compact_context 工具靠这个回调请求压缩。
+            #
+            # 放 extra 而不是给 ToolContext 加字段：那是所有工具共用的
+            # dataclass，加一个只有一个工具用的字段会让其它 20 个工具
+            # 都带上这个无关依赖。
+            #
+            # 【只在主 agent 注入】。子 agent 的上下文独立且短暂，
+            # 压缩没有意义 —— 工具那边会如实说明不支持。
+            extra=(
+                {"compact_now": self._compact_on_request}
+                if self.depth == 0
+                else {}
+            ),
         )
 
         for tc in ai_msg.tool_calls:

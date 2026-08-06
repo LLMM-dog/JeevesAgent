@@ -38,6 +38,7 @@ from app.modules.agent import run_registry
 from app.modules.agent.chat_service import ChatService
 from app.modules.agent.pathguard import AllowedPath, set_allowed
 from app.modules.agent.tools.base import ToolRegistry
+from app.modules.agent.tools.context import CompactContextTool
 from app.modules.agent.tools.exec import RunPythonTool, RunShellTool
 from app.modules.agent.tools.file import (
     EditFileTool,
@@ -118,6 +119,10 @@ def build_registry() -> ToolRegistry:
         ForgetMemoryTool(),
         TodoWriteTool(),
         TodoReadTool(),
+        # 主动压缩。原来只有被动压缩（涨到窗口 75% 才触发）——
+        # 那个时机不由模型决定，它只看总量，不知道"调研阶段已经结束、
+        # 几十条工具输出已经没用了"。
+        CompactContextTool(),
     ):
         reg.register(tool)
 

@@ -263,13 +263,60 @@ class TestPromptPlaceholder:
         tpl = prompts.load_builtin("compact")
         assert "{{history}}" in tpl, "模板占位符变了，compaction.py 要同步改"
 
-    def test_render_fills_the_placeholder(self) -> None:
+    def test_render_fills_all_placeholders(self) -> None:
+        """
+        【所有】占位符都要传。
+
+        模板后来加了长度预算（budget_tokens 等四个），只传 history 的话
+        剩下四个会以字面 "{{budget_tokens}}" 留在提示词里 —— 模型收到
+        "压到 {{budget_tokens}} token 以内"这种指令，行为不可预测。
+
+        compaction.py 里有 "{{" 检测兜底，但那是最后一道 ——
+        这条测试要在改模板时就发现。
+        """
         from app.modules.agent import prompts
 
         tpl = prompts.load_builtin("compact")
-        out = prompts.render(tpl, history="一些对话内容")
+        out = prompts.render(
+            tpl,
+            history="一些对话内容",
+            budget_tokens="2000",
+            budget_chars="1400",
+            window_tokens="10000",
+            budget_percent="20",
+        )
         assert "一些对话内容" in out
         assert "{{" not in out, "还有没被替换的占位符"
+
+    def test_all_template_vars_are_passed_by_caller(self) -> None:
+        """
+        模板里的占位符集合必须和 compaction.py 传的一致。
+
+        任何一边加了变量而另一边没跟上，结果都是提示词里留着字面的
+        "{{xxx}}"—— 而那【不会报错】。
+        """
+        import re
+        from pathlib import Path
+
+        from app.modules.agent import prompts
+
+        tpl = prompts.load_builtin("compact")
+        in_template = set(re.findall(r"\{\{(\w+)\}\}", tpl))
+
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "app"
+            / "modules"
+            / "agent"
+            / "compaction.py"
+        ).read_text(encoding="utf-8")
+        # 取 prompts.render(...) 那一段里的关键字参数
+        m = re.search(r'prompts\.load_builtin\("compact"\),([\s\S]*?)\n    \)', src)
+        assert m, "找不到 render 调用"
+        passed = set(re.findall(r"(\w+)=", m.group(1)))
+
+        missing = in_template - passed
+        assert not missing, f"模板里有但没传：{missing}"
 
     def test_wrong_name_leaves_placeholder(self) -> None:
         """
