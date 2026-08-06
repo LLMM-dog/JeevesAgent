@@ -231,6 +231,36 @@ cp data/jeeves.db data/jeeves.db.bak
 
 出问题就把 `.bak` 改回来。数据库是单个文件，没有别的状态。
 
+### 如果 pull 报 AGENTS.md 冲突
+
+只会发生一次，在从 2026-08-05 之前的版本升级时：
+
+```
+error: Your local changes to the following files would be overwritten by merge:
+        personas/AGENTS.md
+```
+
+原因是那个版本里 `personas/AGENTS.md` 还被 git 跟踪，而新版本把它改成了「只跟踪 `.example.md`」——git 不肯删掉一个你改过的文件。
+
+你的行为规则不会丢，先挪出来再拉：
+
+```bash
+# Windows
+Move-Item personas\AGENTS.md personas\AGENTS.md.mine
+git pull
+# 想恢复自己的版本：
+Move-Item -Force personas\AGENTS.md.mine personas\AGENTS.md
+```
+
+```bash
+# macOS / Linux
+mv personas/AGENTS.md personas/AGENTS.md.mine
+git pull
+mv personas/AGENTS.md.mine personas/AGENTS.md
+```
+
+拉完之后这个文件就不再被跟踪了，以后改它不会再冲突。不挪也可以直接 `git checkout -- personas/AGENTS.md` 丢掉本地修改，但那会把你写的规则一起丢掉。
+
 > **`.env` 里的 `ENCRYPTION_KEY` 要单独备份。** 它丢了的话已存的 API Key 全部无法解密（只能重填一遍）—— 而对话历史不受影响，那部分没有加密。
 
 ---
