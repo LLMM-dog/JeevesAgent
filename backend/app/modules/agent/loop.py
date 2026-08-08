@@ -56,6 +56,14 @@ from app.modules.provider import service as provider_service
 from app.modules.session import repo
 from app.modules.trace.recorder import record_span
 
+from app.modules.agent.hooks import (
+    AfterLlmContext,
+    HookRegistry,
+    OnCompactContext,
+    OnMessageContext,
+    ShouldStopContext,
+)
+
 log = structlog.get_logger(__name__)
 
 
@@ -209,6 +217,17 @@ class AgentLoop:
         self.agent_name = agent_name
         self.system_prompt = system_prompt
         self.depth = depth
+        # hook 注册中心 —— 和 ToolRegistry.hooks 是分开的实例
+        self.hooks = HookRegistry()
+        # 执行提醒 — 会话长了以后注入到 user 消息末尾，防止注意力衰减。
+        # 不持久化、不进 journal，避免记忆污染。
+        self._system_reminder = (
+            "[执行规则 — 本轮强制]"
+            " 一次只做一个步骤，完成并验证后再继续。"
+            " 如果这一步产生了可验证的结果，立即验证。"
+            " 出错时停下来分析，不要跳到下一步。"
+        )
+        self._reminder_delay = 3  # 前 3 轮不注入（system prompt 还紧挨着）
         # 外部持有的普通 list。节点每产生一条消息就 append 进去。
         # 普通 list 的 append 立即生效，不受任何状态提交时机影响。
         # 落库读这个，不读内部工作副本。
@@ -344,6 +363,24 @@ class AgentLoop:
 
                 accum = await self._reason_with_retry()
 
+                # ── AFTER_LLM 钩子 ──
+                if self.hooks.has_hooks:
+                    rejection = self.hooks.fire_after_llm(
+                        AfterLlmContext(
+                            accum=accum,
+                            turn=turn,
+                            session_id=self.session_id,
+                            agent_name=self.agent_name,
+                        )
+                    )
+                    if rejection is not None:
+                        # 钩子返回 str → 注入为 user 消息继续循环
+                        self._append(
+                            Msg(role="user", content=rejection, agent_name=self.agent_name),
+                            persist=True,
+                        )
+                        continue
+
                 if accum.usage:
                     total_prompt = accum.usage.prompt_tokens or total_prompt
                     total_completion += accum.usage.completion_tokens
@@ -362,6 +399,23 @@ class AgentLoop:
                     final_text = ai_msg.content
 
                 if not ai_msg.tool_calls:
+                    # ── SHOULD_STOP 钩子 ──
+                    if self.hooks.has_hooks:
+                        rejection = self.hooks.fire_should_stop(
+                            ShouldStopContext(
+                                session_id=self.session_id,
+                                agent_name=self.agent_name,
+                                turn=turn,
+                                final_text=final_text,
+                            )
+                        )
+                        if rejection is not None:
+                            self._append(
+                                Msg(role="user", content=rejection, agent_name=self.agent_name),
+                                persist=True,
+                            )
+                            continue
+
                     # 【收尾时再发一次占用】。
                     #
                     # ## 为什么不能停在最后一次 LLM 调用的 prompt_tokens
@@ -614,6 +668,18 @@ class AgentLoop:
             self.db, self.session_id, summary, run_id=self.run_id
         )
         self.journal.append(summary)
+
+        # ── ON_COMPACT 钩子 ──
+        if self.hooks.has_hooks:
+            self.hooks.fire_on_compact(
+                OnCompactContext(
+                    session_id=self.session_id,
+                    agent_name=self.agent_name,
+                    before_tokens=before,
+                    after_tokens=after,
+                )
+            )
+
         return True
 
     async def _save_artifact(self, payload: "ArtifactPayload") -> None:
@@ -814,6 +880,16 @@ class AgentLoop:
             run_id=self.run_id,
         ) as sink:
             api_msgs = self.build_api_messages()
+            # ── 执行提醒：会话长了以后，每次调 LLM 前追加独立消息 ──
+            # 不放在 build_api_messages 里，因为内部 loop 以 tool 结尾，
+            # 不存在 user 消息可追加。这里追加独立消息，无论结尾角色。
+            # api_msgs 是局部变量，不持久化，不会污染记忆。
+            if self._system_reminder and len(self.messages) > self._reminder_delay:
+                api_msgs = list(api_msgs)
+                api_msgs.append({
+                    "role": "user",
+                    "content": self._system_reminder,
+                })
             specs = self.registry.to_specs()
             sink.model_id = self.model.model_id
             sink.provider_name = getattr(self.model, "provider_name", "") or ""
@@ -1146,6 +1222,17 @@ class AgentLoop:
         )
         self.messages.append(msg)
         self.journal.append(msg)
+
+        # ── ON_MESSAGE 钩子 ──
+        if self.hooks.has_hooks:
+            self.hooks.fire_on_message(
+                OnMessageContext(
+                    msg=msg,
+                    session_id=self.session_id,
+                    agent_name=self.agent_name,
+                    turn=getattr(self, '_current_turn', -1),
+                )
+            )
 
 
 def json_preview(v: Any, limit: int = 200) -> str:

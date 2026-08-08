@@ -152,12 +152,14 @@ class TestHtmlNotCached:
     和设置页标签都上线了但看不到，要 Ctrl+Shift+R 才出来。
     """
 
+    @needs_dist
     async def test_index_has_no_store(self, client: Any) -> None:
         r = await client.get("/")
         assert r.status_code == 200
         cc = r.headers.get("cache-control", "")
         assert "no-store" in cc, f"index.html 可被缓存：cache-control={cc!r}"
 
+    @needs_dist
     async def test_index_has_no_validators(self, client: Any) -> None:
         """
         etag / last-modified 必须去掉。
@@ -169,6 +171,7 @@ class TestHtmlNotCached:
         assert "etag" not in {k.lower() for k in r.headers}
         assert "last-modified" not in {k.lower() for k in r.headers}
 
+    @needs_dist
     @pytest.mark.parametrize("route", ["/chat", "/settings", "/cron"])
     async def test_spa_routes_also_no_store(self, client: Any, route: str) -> None:
         """
@@ -179,6 +182,7 @@ class TestHtmlNotCached:
         assert r.status_code == 200
         assert "no-store" in r.headers.get("cache-control", "")
 
+    @needs_dist
     async def test_hashed_assets_still_cacheable(self, client: Any) -> None:
         """
         带 hash 的资源【必须】仍可缓存。

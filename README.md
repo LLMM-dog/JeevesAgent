@@ -2,7 +2,7 @@
 
 跑在自己电脑上的 AI 助手。不是又一个聊天窗口 —— 它能读写你的文件、执行命令、跨会话记住你的偏好、连 MCP 工具、按 cron 定时干活。
 
-Python 后端（FastAPI + LangGraph）+ React 前端，单机运行，数据全留在本地。
+Python 后端（FastAPI，基于 LangGraph 组件）+ React 前端，单机运行，数据全留在本地。
 
 > **v0.1 测试版。** 核心功能都能跑（1251 个后端测试 + 30 个前端测试，关键路径还用真实模型验证过），但界面和交互还在调整，遇到问题欢迎提 issue。
 
@@ -75,7 +75,7 @@ cd jeeves
 uv run python scripts/setup.py
 ```
 
-Windows 也可以直接双击 `setup.bat`。
+双击 `start.bat`（首次运行会自动初始化项目，不需要单独跑 setup）。
 
 | 步骤 | 内容 | 需要你操作吗 |
 | --- | --- | --- |
@@ -113,16 +113,16 @@ start.bat -Dev          # Windows
 
 这时候访问 **http://127.0.0.1:5173**（vite 的地址，不是 9000）。
 
-也可以直接用 PowerShell 脚本，它默认就是开发模式：
+也可以手动控制运行模式：
 
-```powershell
-.\start.ps1                  # 开发
-.\start.ps1 -Prod            # 生产
-.\start.ps1 -BackendOnly     # 只起后端
-.\start.ps1 -Port 9500       # 换端口
+```bash
+start.bat -Dev          # Windows 开发模式（改代码即时生效）
+start.bat -BackendOnly  # Windows 只起后端
+./start.sh              # macOS / Linux 开发模式
+./start.sh --backend-only
 ```
 
-`start.ps1` 需要执行策略允许运行脚本。被拦了就先跑一次 `Set-ExecutionPolicy Bypass -Scope Process -Force`,或者干脆用 `start.bat`（它内部已经带了 `-ExecutionPolicy Bypass`）。
+`start.bat` 内部已带 `-ExecutionPolicy Bypass`，不需要自己配 PowerShell 策略。
 
 </details>
 
@@ -171,11 +171,11 @@ API Key：   sk-你的密钥
 | 现象 | 原因 |
 | --- | --- |
 | 双击 `start.bat` 窗口一闪就没了 | 不会发生 —— 它有 `pause`。如果真闪掉了，用 cmd 手动跑一次看报错 |
-| `无法加载文件 start.ps1` | 你直接跑了 `.ps1`。用 `start.bat`,或先 `Set-ExecutionPolicy Bypass -Scope Process -Force` |
+| `无法加载文件 start.ps1` | 你直接跑了 `.ps1`。用 `start.bat` |
 | `Permission denied: ./start.sh` | 忘了 `chmod +x start.sh` |
 | `端口被占用` | 上次的进程没退干净。脚本会问你要不要清理，选 y |
 | 打开 9000 是白屏 | 前端没构建。`cd frontend && npm install && npm run build` |
-| `ENCRYPTION_KEY 缺失` | `.env` 没生成。重跑 `setup.bat` |
+| `ENCRYPTION_KEY 缺失` | `.env` 没生成。重跑 `start.bat`（会自动重新初始化） |
 | 对话报"未配置模型" | 去设置页添加供应商，并确认「功能位绑定」里对话模型选了 |
 
 ---
@@ -202,7 +202,7 @@ API Key：   sk-你的密钥
 
 **追踪** —— 每轮对话的耗时、token、工具调用都能展开看。按会话分层，不用在一堆 run 里找。
 
-20 个内置工具（配了搜索后端是 21 个）,完整清单见 [docs/01-architecture/tools.md](docs/01-architecture/tools.md)。
+20 个内置工具（配了搜索后端是 21 个）,完整清单见 [docs/architecture/tools.md](docs/architecture/tools.md)。
 
 ---
 
@@ -327,7 +327,7 @@ uv run python scripts/uninstall.py
 
 **默认只绑 `127.0.0.1`,没有鉴权。** 绑到 `0.0.0.0` 之前必须先加鉴权，否则同网段任何人都能用你的模型和文件。启动时如果检测到绑了非本地地址会持续警告。
 
-**`run_shell` 能做的事没有上界。** 路径白名单管不到它 —— 一条命令可以 `curl | sh`。默认需要人工确认每条命令。要真隔离就配 Docker 沙箱（`--network none` + 资源限制 + 只挂工作区）,见 [docs/01-architecture/sandbox.md](docs/01-architecture/sandbox.md)。
+**`run_shell` 能做的事没有上界。** 路径白名单管不到它 —— 一条命令可以 `curl | sh`。默认需要人工确认每条命令。要真隔离就配 Docker 沙箱（`--network none` + 资源限制 + 只挂工作区）,见 [docs/architecture/sandbox.md](docs/architecture/sandbox.md)。
 
 **`skills/` 和 `macros/` 对模型可写。** 这是为了让它能自己建技能。硬拒止清单（`.env`、`*.pem`、`credentials` 等）优先级高于白名单，所以这不等于放开敏感文件。
 
@@ -335,7 +335,7 @@ uv run python scripts/uninstall.py
 
 **`.env` 里的 API Key 是加密存的，但密钥就在同一个文件里。** 这挡的是"截图/日志泄露",不挡"拿到文件系统访问权"。
 
-细节见 [docs/01-architecture/security.md](docs/01-architecture/security.md)。
+细节见 [docs/architecture/security.md](docs/architecture/security.md)。
 
 ---
 
@@ -359,23 +359,23 @@ cd frontend && npm test   # 30 个前端测试
 
 **想用起来**
 
-- [docs/01-architecture/tools.md](docs/01-architecture/tools.md) —— 20 个内置工具都能干什么
-- [docs/01-architecture/skills.md](docs/01-architecture/skills.md) —— 怎么写技能扩展它
-- [docs/01-architecture/context.md](docs/01-architecture/context.md) —— 上下文怎么算、怎么压缩
-- [docs/01-architecture/security.md](docs/01-architecture/security.md) —— 安全边界和审批机制
+- [docs/architecture/tools.md](docs/architecture/tools.md) —— 20 个内置工具都能干什么
+- [docs/architecture/skills.md](docs/architecture/skills.md) —— 怎么写技能扩展它
+- [docs/architecture/context.md](docs/architecture/context.md) —— 上下文怎么算、怎么压缩
+- [docs/architecture/security.md](docs/architecture/security.md) —— 安全边界和审批机制
 
 **想改代码**
 
-- [docs/01-architecture/agent-loop.md](docs/01-architecture/agent-loop.md) —— agent 主循环怎么转
-- [docs/03-api/conventions.md](docs/03-api/conventions.md) —— API 约定
-- [docs/05-dev/setup.md](docs/05-dev/setup.md) —— 开发环境
-- [docs/05-dev/testing.md](docs/05-dev/testing.md) —— 测试怎么写
+- [docs/architecture/agent-loop.md](docs/architecture/agent-loop.md) —— agent 主循环怎么转
+- [docs/api/conventions.md](docs/api/conventions.md) —— API 约定
+- [docs/development/setup.md](docs/development/setup.md) —— 开发环境
+- [docs/development/testing.md](docs/development/testing.md) —— 测试怎么写
 
 ---
 
 ## 技术栈
 
-后端 FastAPI + LangGraph + SQLAlchemy 2.0 + SQLite,前端 React 19 + TypeScript + Tailwind 4 + Zustand + TanStack Query。
+后端 FastAPI + SQLAlchemy 2.0 + SQLite（LangGraph 组件保留，agent loop 已切换为纯 while 循环），前端 React 19 + TypeScript + Tailwind 4 + Zustand + TanStack Query。
 
 94 个后端源文件、38 个前端源文件，1251 个后端测试 + 30 个前端测试。
 

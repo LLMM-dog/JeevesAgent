@@ -56,7 +56,7 @@ jobs:
         # CI 里用一个固定的假值 —— 它只用于加解密测试数据，
         # 不接触任何真实凭据。
         env:
-          JEEVES_SECURITY__ENCRYPTION_KEY: ci-only-not-a-real-key-0123456789
+          JEEVES_SECURITY__ENCRYPTION_KEY: xr9i7PEx3aHu2bTacB0tEG1VnCmkvlHJu2fZ-7XQDWs=
         run: uv run pytest backend/tests -q
 
   frontend:

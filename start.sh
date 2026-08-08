@@ -128,8 +128,32 @@ if [ "$PROD" = "1" ] || [ "$BACKEND_ONLY" = "1" ]; then
   info "启动后端 http://127.0.0.1:$PORT"
   [ "$PROD" = "1" ] && echo "（前端已构建，直接访问上面这个地址）"
   cd "$ROOT"
-  # exec 替换当前进程 —— Ctrl-C 直接作用在 uvicorn 上，不留中间层
-  exec uv "${BACKEND_ARGS[@]}"
+
+  # 放后台启动，等就绪后自动打开浏览器
+  uv "${BACKEND_ARGS[@]}" &
+  BACKEND_PID=$!
+
+  for _ in $(seq 1 40); do
+    sleep 0.5
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+      fail "后端启动失败"
+    fi
+    if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+      break
+    fi
+  done
+
+  # 自动打开浏览器
+  if [ "$PROD" = "1" ]; then
+    if command -v open >/dev/null 2>&1; then
+      open "http://127.0.0.1:$PORT"
+    elif command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "http://127.0.0.1:$PORT"
+    fi
+  fi
+
+  wait "$BACKEND_PID"
+  exit $?
 fi
 
 # ── 开发模式：两个都起 ──

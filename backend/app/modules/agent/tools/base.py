@@ -18,6 +18,11 @@ from app.core.config import settings
 from app.core.events import Ev, emit
 from app.core.exceptions import PathDeniedError
 from app.core.runtime_state import ApprovalMode, register_approval, resolve_approval
+from app.modules.agent.hooks import (
+    AfterToolContext,
+    BeforeToolContext,
+    HookRegistry,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -124,6 +129,7 @@ class Tool(Protocol):
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self.hooks = HookRegistry()
 
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
@@ -274,30 +280,59 @@ class ToolRegistry:
             if verdict is not None:
                 return verdict
 
-        try:
-            return await tool.run(ctx, **args)
-        except PathDeniedError as e:
-            # 路径被拒也是给模型的信息，不是程序错误。
-            #
-            # 【hint 必须一起给】。只给 message 的话模型不知道哪些路径是
-            # 允许的，只能靠猜 —— 真实模型实测：一次任务里 11 个工具调用有
-            # 8 个是在猜路径（换 glob、换 run_shell 的 cwd、换相对路径前缀），
-            # 全部被拒。hint 里有白名单清单，它看一眼就知道该去哪。
-            #
-            # 这个坑很典型：异常对象带了有用信息，而转成给模型的文本时丢了。
-            parts = [f"路径访问被拒绝：{e.message}"]
-            hint = getattr(e, "hint", "")
-            if hint:
-                parts.append(str(hint))
-            return ToolResult(content="\n".join(parts), is_error=True)
-        except TypeError as e:
-            # 参数名不匹配（模型给了工具不认识的参数）。单独处理是因为
-            # 这个错误的修复方式很明确，可以直接告诉模型正确的参数名。
-            log.warning("tool_bad_args", tool=name, args=args, err=str(e))
-            return ToolResult(
-                content=f"调用 {name} 的参数不正确：{e}。正确的参数定义：{tool.parameters()}",
-                is_error=True,
+        # ── before_tool 钩子 ──
+        if self.hooks.has_hooks:
+            rejection = self.hooks.fire_before_tool(
+                BeforeToolContext(
+                    tool_name=name,
+                    args=args,
+                    ctx=ctx,
+                    session_id=ctx.session_id,
+                    agent_name=ctx.agent_name,
+                )
             )
+            if rejection is not None:
+                return ToolResult(content=rejection, is_error=True)
+
+        started = time.monotonic()
+        try:
+            result = await tool.run(ctx, **args)
+        except PathDeniedError as e:
+            result = self._handle_path_denied(e)
+        except TypeError as e:
+            result = self._handle_bad_args(name, tool, e)
         except Exception as e:
             log.exception("tool_failed", tool=name)
-            return ToolResult(content=f"工具执行失败：{type(e).__name__}: {e}", is_error=True)
+            result = ToolResult(content=f"工具执行失败：{type(e).__name__}: {e}", is_error=True)
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+
+        # ── after_tool 钩子 ──
+        if self.hooks.has_hooks:
+            self.hooks.fire_after_tool(
+                AfterToolContext(
+                    tool_name=name,
+                    args=args,
+                    result=result,
+                    ctx=ctx,
+                    session_id=ctx.session_id,
+                    agent_name=ctx.agent_name,
+                    elapsed_ms=elapsed_ms,
+                )
+            )
+
+        return result
+
+    def _handle_path_denied(self, e: PathDeniedError) -> ToolResult:
+        parts = [f"路径访问被拒绝：{e.message}"]
+        hint = getattr(e, "hint", "")
+        if hint:
+            parts.append(str(hint))
+        return ToolResult(content="\n".join(parts), is_error=True)
+
+    def _handle_bad_args(self, name: str, tool: Tool, e: TypeError) -> ToolResult:
+        log.warning("tool_bad_args", tool=name, err=str(e))
+        return ToolResult(
+            content=f"调用 {name} 的参数不正确：{e}。正确的参数定义：{tool.parameters()}",
+            is_error=True,
+        )

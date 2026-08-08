@@ -167,7 +167,7 @@ class TestReadme:
         for name in ("scripts/setup.py", "scripts/uninstall.py"):
             assert name in r
             assert (ROOT / name).is_file(), f"README 提到了不存在的 {name}"
-        for name in ("start.ps1", "start.sh", "setup.bat"):
+        for name in ("start.sh", "start.bat"):
             assert name in r
             assert (ROOT / name).is_file()
 
@@ -482,7 +482,8 @@ class TestDoubleClickLauncher:
         src = (ROOT / "start.bat").read_text(encoding="utf-8", errors="replace")
         assert "where uv" in src
         assert ".env" in src
-        assert "setup.bat" in src
+        # 首次运行 .env 缺失时自动调 setup
+        assert "setup" in src.lower()
 
     def test_dev_escape_hatch(self) -> None:
         """要能切回开发模式 —— 否则改代码的人没法用这个入口。"""
@@ -505,7 +506,7 @@ class TestBuildSkip:
     """
 
     def test_ps1_skips_when_fresh(self) -> None:
-        src = (ROOT / "start.ps1").read_text(encoding="utf-8")
+        src = (ROOT / "scripts" / "start.ps1").read_text(encoding="utf-8")
         assert "跳过构建" in src
         # 必须比对 index.html 而不是目录 —— 目录 mtime 不随内容更新
         assert "dist\\index.html" in src or "dist/index.html" in src
@@ -521,7 +522,7 @@ class TestBuildSkip:
         只看 src/ 不够 —— 改了 vite.config 却不重新构建的话，
         "改了没生效"是最难排查的一类问题。
         """
-        for name in ("start.ps1", "start.sh"):
+        for name in ("scripts/start.ps1", "start.sh"):
             src = (ROOT / name).read_text(encoding="utf-8")
             assert "vite.config.ts" in src, f"{name} 没监视 vite.config.ts"
             assert "package.json" in src, f"{name} 没监视 package.json"
@@ -532,7 +533,7 @@ class TestSetupNonInteractive:
 
     ## 为什么
 
-    双击 setup.bat 的人以为是"装依赖"，结果卡在一个要填 Base URL 和
+    双击 start.bat 的人以为是"装依赖"，结果卡在一个要填 Base URL 和
     API Key 的提示上 —— 而它前面已经跑了几分钟的依赖安装，
     用户可能已经走开了。
 
