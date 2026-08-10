@@ -1,6 +1,6 @@
 # 组件清单
 
-前端分层与 store 划分见 [architecture.md](architecture.md)，SSE 消费见 [sse.md](sse.md)。
+前端分层与 store 划分见 [frontend.md](frontend.md)，SSE 消费见 [frontend-sse.md](frontend-sse.md)。
 
 > 这份文档曾经列了约 40 个不存在的组件名（`ChatInput`、`MessageItem`、`ToolCallCard`、`TopBar`……），而实际的命名体系完全不同。当作导航用会一路找不到文件。现在按 `frontend/src/` 的真实内容重写。
 
@@ -127,4 +127,4 @@ stdio 服务器等同于任意代码执行。截断命令会让用户看不到�
 
 `send` 的三个回调（`onEvent` / `onClose` / `onApiError`）、`done` 事件里的 `listMessages().then()`、`openSession` 自己的响应，全部要先确认 `get().sessionId === sessionId`。
 
-这些回调是闭包，捕获的是发消息那一刻的值。用户切走之后它们仍会触发，不校验的话会把上一个会话的状态写进当前界面 —— 表现是"切过去显示了别的会话的对话"。见 [sse.md](sse.md)。
+这些回调是闭包，捕获的是发消息那一刻的值。用户切走之后它们仍会触发，不校验的话会把上一个会话的状态写进当前界面 —— 表现是"切过去显示了别的会话的对话"。见 [frontend-sse.md](frontend-sse.md)。

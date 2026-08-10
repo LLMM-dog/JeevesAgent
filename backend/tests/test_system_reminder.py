@@ -2,10 +2,7 @@
 系统提醒测试 — 验证 _system_reminder 在正确时机注入且不持久化。
 """
 
-import asyncio
 
-import pytest
-from app.infra.llm.port import TokenUsage
 from app.modules.agent.loop import AgentLoop
 from app.modules.agent.messages import Msg
 from app.modules.agent.tools.base import ToolRegistry

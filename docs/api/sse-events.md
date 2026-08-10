@@ -12,7 +12,7 @@ Accept: text/event-stream
 
 **必须用 POST。** 请求体里有消息内容、引用列表、模式开关。
 
-**前端不能用 `EventSource`** —— 它只能发 GET。必须 `fetch` + `response.body.getReader()`。见 [../architecture/sse.md](../architecture/sse.md)。
+**前端不能用 `EventSource`** —— 它只能发 GET。必须 `fetch` + `response.body.getReader()`。见 [../architecture/events.md](../architecture/events.md)。
 
 ### 线格式
 

@@ -1,5 +1,7 @@
 # 多智能体系统 — 实施步骤
 
+> 状态：阶段 1-2 已完成。阶段 3-5 见 [multi-agent-roadmap.md](multi-agent-roadmap.md)。
+
 > 每步可独立提交。标注了改动量和影响范围。
 
 ---

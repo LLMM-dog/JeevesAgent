@@ -241,7 +241,7 @@ async def load_session_allowed(db: "AsyncSession", session_id: str) -> list[Allo
     """
     from sqlalchemy import or_, select
 
-    from app.modules.provider.models import PathWhitelist
+    from app.modules.endpoint.models import PathWhitelist
 
     rows = list(
         (

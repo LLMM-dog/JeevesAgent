@@ -1,5 +1,5 @@
 """
-供应商、模型、绑定。
+端点、模型、绑定。
 
 没有明文列 —— 任何 API 响应都只返回 key_hint。
 """
@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 
-class Provider(Base, TimestampMixin):
+class Endpoint(Base, TimestampMixin):
     __tablename__ = "provider"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -35,10 +35,10 @@ class Model(Base, TimestampMixin):
     __tablename__ = "model"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    provider_id: Mapped[str] = mapped_column(
-        String(32), ForeignKey("provider.id", ondelete="CASCADE"), nullable=False
+    endpoint_id: Mapped[str] = mapped_column(
+        "provider_id", String(32), ForeignKey("provider.id", ondelete="CASCADE"), nullable=False
     )
-    # 供应商侧的模型标识，如 "deepseek-chat"
+    # 端点的模型标识，如 "deepseek-chat"
     model_id: Mapped[str] = mapped_column(String(200), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     context_window: Mapped[int] = mapped_column(Integer, default=32768, nullable=False)
@@ -76,7 +76,7 @@ class ModelBinding(Base, TimestampMixin):
     # chat | vision | title | compact | embedding
     purpose: Mapped[str] = mapped_column(String(32), nullable=False)
     # 字段名用 model_pk 而非 model_id —— 因为 model.model_id 已经表示
-    # "供应商侧的模型标识"，两个 model_id 会混。这是命名冲突的必要妥协。
+    # "端点的模型标识"，两个 model_id 会混。这是命名冲突的必要妥协。
     model_pk: Mapped[str] = mapped_column(
         String(32), ForeignKey("model.id", ondelete="CASCADE"), nullable=False
     )

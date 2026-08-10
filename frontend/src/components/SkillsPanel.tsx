@@ -10,9 +10,11 @@ import {
   Upload,
 } from "lucide-react";
 import { useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { api } from "@/lib/api";
 import { ApiError } from "@/lib/sse";
+import type { AgentItem } from "@/lib/types";
 
 /**
  * 技能管理面板。
@@ -92,6 +94,93 @@ export default function SkillsPanel() {
   });
 
   const [overwrite, setOverwrite] = useState(false);
+
+  const navigate = useNavigate();
+
+  /** 查看某个技能被哪些智能体预设使用 */
+  function AgentUsers({ skillName }: { skillName: string }) {
+    const { data: agents, isLoading: loadingAgents } = useQuery({
+      queryKey: ["agents", "using_skill", skillName],
+      queryFn: () => api.agents.list({ using_skill: skillName }),
+      enabled: !!skillName,
+      staleTime: 30_000,
+    });
+
+    const removeAgent = useMutation({
+      mutationFn: (agent: AgentItem) =>
+        api.agents.update(agent.id, {
+          skill_names: agent.skill_names.filter((n) => n !== skillName),
+        }),
+      onSuccess: () => {
+        void qc.invalidateQueries({ queryKey: ["agents", "using_skill", skillName] });
+        void qc.invalidateQueries({ queryKey: ["agents"] });
+      },
+    });
+
+    if (loadingAgents) {
+      return (
+        <div className="mt-2 text-[11px] text-[var(--color-muted)]">
+          加载引用信息…
+        </div>
+      );
+    }
+
+    if (!agents || agents.length === 0) {
+      return (
+        <div className="mt-2 text-[11px] text-[var(--color-muted)]">
+          未被任何智能体预设使用
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-2 border-t border-[var(--color-border)] pt-2">
+        <div className="mb-1 text-[11px] font-medium text-[var(--color-muted)]">
+          被 {agents.length} 个智能体预设使用：
+        </div>
+        <ul className="space-y-1">
+          {agents.map((agent) => (
+            <li
+              key={agent.id}
+              className="flex items-center gap-1.5 text-[11px]"
+            >
+              <span className="shrink-0">
+                {agent.avatar ?? "🤖"}
+              </span>
+              <span className="min-w-0 flex-1 truncate font-medium">
+                {agent.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => navigate("/settings?tab=agents")}
+                className="shrink-0 rounded px-1 py-0.5 text-[10px] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 hover:underline"
+                title="跳转到智能体设置页"
+              >
+                跳转
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (
+                    confirm(
+                      `从智能体「${agent.name}」中移除技能「${skillName}」？`,
+                    )
+                  ) {
+                    removeAgent.mutate(agent);
+                  }
+                }}
+                disabled={removeAgent.isPending}
+                className="shrink-0 rounded px-1 py-0.5 text-[10px] text-[var(--color-err)] hover:bg-[var(--color-err)]/10 hover:underline disabled:opacity-50"
+                title="从此智能体的预设中移除此技能"
+              >
+                {removeAgent.isPending ? "移除中…" : "移除"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
 
   return (
     <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
@@ -237,7 +326,7 @@ export default function SkillsPanel() {
                   <p className="mt-0.5 text-xs text-[var(--color-muted)]">
                     {s.description}
                   </p>
-                  {s.files.length > 0 && (
+                  {s.files.length > 0 ? (
                     <button
                       type="button"
                       onClick={() =>
@@ -247,18 +336,31 @@ export default function SkillsPanel() {
                     >
                       {expanded === s.name ? "收起" : `${s.files.length} 个附件`}
                     </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpanded(expanded === s.name ? null : s.name)
+                      }
+                      className="mt-1 text-[11px] text-[var(--color-accent)] hover:underline"
+                    >
+                      {expanded === s.name ? "收起" : "展开详情"}
+                    </button>
                   )}
                   {expanded === s.name && (
-                    <ul className="mt-1 space-y-0.5">
-                      {s.files.map((f) => (
-                        <li
-                          key={f}
-                          className="font-mono text-[10px] text-[var(--color-muted)]"
-                        >
-                          {f}
-                        </li>
-                      ))}
-                    </ul>
+                    <>
+                      <ul className="mt-1 space-y-0.5">
+                        {s.files.map((f) => (
+                          <li
+                            key={f}
+                            className="font-mono text-[10px] text-[var(--color-muted)]"
+                          >
+                            {f}
+                          </li>
+                        ))}
+                      </ul>
+                      <AgentUsers skillName={s.name} />
+                    </>
                   )}
                 </div>
                 <button

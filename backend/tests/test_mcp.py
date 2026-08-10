@@ -629,7 +629,7 @@ class TestCallSafety:
 class TestToolWrapper:
     def test_schema_normalized(self) -> None:
         """
-        坏 schema 不能直接透传 —— 某些供应商会因 tools 字段格式不对
+        坏 schema 不能直接透传 —— 某些服务商会因 tools 字段格式不对
         整个请求 400，而错误信息不指向具体哪个工具。
         """
         from app.modules.mcp.tools import McpTool

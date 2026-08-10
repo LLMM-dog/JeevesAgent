@@ -33,8 +33,8 @@ from app.infra.db.session import get_db
 from app.infra.sandbox.factory import get_sandbox
 from app.modules.agent import run_registry
 from app.modules.agent.chat_service import ChatService
-from app.modules.provider import service as provider_service
-from app.modules.provider.models import Model, PathWhitelist
+from app.modules.endpoint import service as provider_service
+from app.modules.endpoint.models import Model, PathWhitelist
 from app.modules.session import repo
 from app.modules.session.models import Message, Session
 from fastapi import APIRouter, Depends, Query, Response
@@ -97,6 +97,7 @@ def _detail(s: Session) -> SessionDetail:
         vision_mode=bool(s.vision_mode),
         work_dir=s.work_dir or "",
         model_pk=s.model_pk or "",
+        agent_id=s.agent_id or "",
     )
 
 
@@ -205,7 +206,7 @@ async def export_session(
     # 而这个应用的核心是 SSE 流式对话：某人导出大会话时，所有正在
     # 进行的对话会一起卡住不吐字。
     #
-    # 用户看到的是"模型突然卡死了"，而排查方向会跑到模型供应商、
+    # 用户看到的是"模型突然卡死了"，而排查方向会跑到 API 端点、
     # 网络上去，完全不指向导出。
     #
     # 实测：3000 条消息（正文合计 71MB）的会话，json.dumps 阻塞
@@ -376,6 +377,8 @@ async def patch_session(
     for flag in ("private_mode", "amnesia_mode", "vision_mode"):
         if flag in data and data[flag] is not None:
             setattr(s, flag, 1 if data[flag] else 0)
+    if "agent_id" in data and data["agent_id"] is not None:
+        s.agent_id = data["agent_id"]
 
     await db.commit()
     return await _detail_with_window(db, s)
@@ -474,6 +477,7 @@ async def chat(
         content=body.content,
         refs=body.refs,
         images=body.images,
+        agent_id=body.agent_id,
     )
     return StreamingResponse(
         service.stream(prep),

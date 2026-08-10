@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { AgentSwitcher } from "@/components/AgentSwitcher";
+import { ModelSwitcher } from "@/components/ModelSwitcher";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import Banner from "@/components/Banner";
 import Composer from "@/components/Composer";
@@ -15,6 +17,8 @@ export default function ChatPage() {
   const nav = useNavigate();
   const openSession = useChatStore((s) => s.openSession);
   const title = useChatStore((s) => s.title);
+  const agentId = useChatStore((s) => s.agentId);
+  const modelPk = useChatStore((s) => s.modelPk);
 
   const { data: meta } = useQuery({ queryKey: ["meta"], queryFn: api.meta });
 
@@ -51,6 +55,8 @@ export default function ChatPage() {
           <h1 className="truncate text-sm font-medium">
             {title || "新对话"}
           </h1>
+          <AgentSwitcher sessionId={sessionId} agentId={agentId} />
+          <ModelSwitcher sessionId={sessionId} modelPk={modelPk} />
         </header>
 
         {noModel && (
@@ -60,7 +66,7 @@ export default function ChatPage() {
           >
             还没有配置模型。
             <Link to="/settings" className="ml-1 underline">
-              去设置页添加供应商
+              去设置页添加端点
             </Link>
             —— 填 base_url 和 API Key 即可自动拉取可用模型列表。
           </div>

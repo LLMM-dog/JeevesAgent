@@ -22,7 +22,7 @@ from pathlib import Path
 from app.core.events import Ev
 
 ROOT = Path(__file__).resolve().parents[2]
-DOC = ROOT / "docs" / "03-api" / "sse-events.md"
+DOC = ROOT / "docs" / "api" / "sse-events.md"
 STORE = ROOT / "frontend" / "src" / "store" / "chat.ts"
 TYPES = ROOT / "frontend" / "src" / "lib" / "types.ts"
 

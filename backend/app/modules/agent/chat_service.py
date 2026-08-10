@@ -34,8 +34,8 @@ from app.modules.agent.loop import AgentLoop
 from app.modules.agent.messages import Msg
 from app.modules.agent.pathguard import load_session_allowed, scoped_guard
 from app.modules.agent.tools.base import ToolRegistry
+from app.modules.endpoint import service as provider_service
 from app.modules.memory import service as memory_service
-from app.modules.provider import service as provider_service
 from app.modules.session import repo
 from app.modules.skill import registry as skill_registry
 from app.modules.skill import state as skill_state
@@ -63,6 +63,28 @@ class PreparedChat:
     # 本轮引用清单。展开在 _expand_refs 里做 ——
     # 必须真的展开，不能像 那样把 JSON 原样丢给模型
     refs: list[dict[str, Any]] = field(default_factory=list)
+    agent_id: str = ""  # 选择的智能体，空串=默认
+
+
+# ── 权限过滤 ──
+
+_TOOL_PERMISSION_MAP: dict[str, str] = {
+    "read_file": "read", "grep": "read", "glob": "read", "list_dir": "read",
+    "write_file": "write", "edit_file": "write",
+    "run_shell": "shell", "run_python": "shell",
+    "web_search": "network", "web_fetch": "network",
+    "delegate_task": "subagent",
+}
+
+
+def _filter_tools_by_permissions(registry: "ToolRegistry", permissions: dict[str, bool]) -> None:
+    """根据智能体权限，从 registry 中移除未授权的工具。"""
+    for tool_name in list(registry.names()):
+        category = _TOOL_PERMISSION_MAP.get(tool_name)
+        if category is None:
+            continue  # 不在映射表中的工具（如 todo_write、skill_manage）不受限制
+        if not permissions.get(category, True):
+            registry.unregister(tool_name)
 
 
 _COMMON_FIELDS = ("ts", "span_id", "parent_span_id", "depth")
@@ -123,6 +145,7 @@ class ChatService:
         content: str,
         refs: list[dict[str, Any]] | None = None,
         images: list[str] | None = None,
+        agent_id: str = "",
     ) -> PreparedChat:
         """
         校验 + 落用户消息。【必须是普通 async 方法，不能是生成器】。
@@ -194,6 +217,7 @@ class ChatService:
             run_id=new_run_id(),
             workspace_path=work_root,
             model_pk=session.model_pk or "",
+            agent_id=agent_id,
             user_message_id=user_mid,
             title_empty=not session.title,
             images=checked,
@@ -222,7 +246,7 @@ class ChatService:
             )
             return []
 
-        from app.modules.provider import vision
+        from app.modules.endpoint import vision
 
         out: list[str] = []
         for url in images[: vision.MAX_IMAGES_PER_TURN]:
@@ -285,6 +309,7 @@ class ChatService:
                                 images=prep.images,
                                 refs=prep.refs,
                                 model_pk=prep.model_pk,
+                                agent_id=prep.agent_id,
                             )
             except asyncio.CancelledError:
                 await emit(Ev.CANCELLED, run_id=run_id, partial_saved=True)
@@ -379,34 +404,45 @@ class ChatService:
         images: list[str] | None = None,
         refs: list[dict[str, Any]] | None = None,
         model_pk: str = "",
+        agent_id: str = "",
     ) -> None:
-        # 【必须把 model_pk 传进来】。
-        #
-        # 上面 prepare() 里也有一次 resolve，但那只是【预检】——
-        # 提前发现"没配模型"好在 400 里报出来，而不是等流开始后
-        # 才失败。真正跑的是这里。
-        #
-        # 只改预检不改这里的话：切换模型在界面上成功了、会话字段也存了，
-        # 但实际调用的还是默认模型 —— 而追踪里记的是真实用的那个，
-        # 所以现象是"切了但追踪显示没切"，很容易以为是追踪的 bug。
+        # 解析智能体定义
+        agent_system_prompt = ""
+        agent_permissions: dict[str, bool] = {}
+        agent_model: str | None = None
+        if agent_id:
+            from app.modules.agent.agent_service import get as get_agent
+
+            agent_def = await get_agent(db, agent_id)
+            if agent_def is not None:
+                agent_system_prompt = agent_def.system_prompt
+                agent_model = agent_def.model_id
+                agent_permissions = {
+                    "read": bool(agent_def.permission_read),
+                    "write": bool(agent_def.permission_write),
+                    "shell": bool(agent_def.permission_shell),
+                    "network": bool(agent_def.permission_network),
+                    "subagent": bool(agent_def.permission_subagent),
+                }
+
+        # 模型：智能体绑定 > 会话选择 > 默认
         model = await provider_service.resolve(
-            db, purpose="chat", override_pk=model_pk
+            db, purpose="chat", override_pk=agent_model or model_pk
         )
         registry = self._base_registry.forked()
 
-        # 技能清单每轮都从 registry 现取，不缓存在 service 上 ——
-        # 用户上传技能后应该立即可用，不需要重启也不需要新建会话。
-        #
-        # 【过滤点在这里】。技能的三级披露里只有 L1（名字+描述）常驻上下文，
-        # 所以"关掉一个技能"的含义就是别把它的 L1 发出去。
-        #
-        # 不在 load_index 里过滤：那个索引同时供设置页列表用，
-        # 在那里滤掉的话用户界面上也看不到被关掉的技能，就没法再打开了。
+        # 按智能体权限过滤工具
+        if agent_permissions:
+            _filter_tools_by_permissions(registry, agent_permissions)
+
         system_prompt = prompts.build_system_prompt(
             workspace=workspace_path,
             tool_names=registry.names(),
             skills=await skill_state.filter_l1(db, skill_registry.get_index().l1()),
         )
+        # 智能体的 system_prompt 追加在系统提示词后面
+        if agent_system_prompt:
+            system_prompt = system_prompt + "\n\n" + agent_system_prompt
 
         run_started = now_ms()
         # run 行先写"running"，跑完再更新。
@@ -455,7 +491,7 @@ class ChatService:
                         break
 
             await self._expand_refs(loop, refs, workspace_path)
-            await self._inject_memories(loop, db, session_id)
+            await self._inject_memories(loop, db, session_id, agent_id)
             result = await loop.run()
 
             await emit(
@@ -580,7 +616,7 @@ class ChatService:
         )
 
     async def _inject_memories(
-        self, loop: AgentLoop, db: AsyncSession, session_id: str
+        self, loop: AgentLoop, db: AsyncSession, session_id: str, agent_id: str = ""
     ) -> None:
         """
         召回相关记忆，注入本轮上下文。
@@ -632,7 +668,7 @@ class ChatService:
             return
 
         try:
-            hits = await memory_service.recall(db, query)
+            hits = await memory_service.recall(db, query, agent_id=agent_id)
         except Exception as e:  # noqa: BLE001
             # 召回失败不该让对话失败。记忆是增强，不是必需品。
             log.warning("memory_recall_failed", err=str(e))

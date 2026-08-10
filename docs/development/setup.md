@@ -173,7 +173,7 @@ config loaded from: D:\proj\jeeves\.env
 database: D:\proj\jeeves\data\jeeves.db
 ```
 
-如果路径不对，说明 `config.py` 里的 `parents[N]` 数字与实际目录层级不匹配。见 [../architecture/files.md](../architecture/files.md#env-路径必须绝对)。
+如果路径不对，说明 `config.py` 里的 `parents[N]` 数字与实际目录层级不匹配。见 [../architecture/data-files.md](../architecture/data-files.md#env-路径必须绝对)。
 
 **这是本项目最隐蔽的一类问题**，所以两个路径必须在启动日志里打出来。
 
@@ -204,7 +204,7 @@ SQLite 写锁冲突。检查：
 
 ### 中文流式输出偶发乱码
 
-`TextDecoder.decode()` 没传 `{ stream: true }`。见 [../architecture/sse.md](../architecture/sse.md#三个必须注意的细节)。
+`TextDecoder.decode()` 没传 `{ stream: true }`。见 [../architecture/frontend-sse.md](../architecture/frontend-sse.md#三个必须注意的细节)。
 
 ### Docker 沙箱不生效
 
@@ -220,7 +220,6 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.115.6",
     "uvicorn[standard]==0.34.0",
-    "sse-starlette==2.2.1",
     "python-multipart==0.0.20",
     "pydantic==2.10.5",
     "pydantic-settings==2.7.1",
@@ -233,14 +232,15 @@ dependencies = [
     "cryptography==44.0.0",
     "structlog==24.4.0",
     "pyyaml==6.0.2",
-    "mcp==1.2.0",
 ]
 
 [project.optional-dependencies]
 docker = ["docker==7.1.0"]
-search = ["tavily-python==0.5.0"]
-web = ["markdownify==0.14.1", "beautifulsoup4==4.12.3"]
-dev = ["pytest==8.3.4", "pytest-asyncio==0.25.2", "ruff==0.9.2", "mypy==1.14.1"]
+mcp = ["mcp==1.9.4"]
+search = ["tavily-python==0.5.0", "ddgs==9.14.4"]
+cron = ["croniter==6.2.4", "tzdata==2026.2; sys_platform == 'win32'"]
+web = ["markdownify==0.14.1", "beautifulsoup4==4.12.3", "readability-lxml==0.8.4.1"]
+dev = ["pytest==8.3.4", "pytest-asyncio==0.25.2", "ruff==0.9.2", "mypy==1.14.1", "types-PyYAML==6.0.12.20250822"]
 ```
 
 ### 为什么钉精确版本
@@ -268,9 +268,9 @@ except ImportError:
 
 ```bash
 uv run ruff check backend           # lint
-uv run ruff format backend          # format
-uv run mypy backend/app             # 类型检查
-uv run pytest                       # 测试
+uv run ruff check --fix backend     # lint 自动修复
+uv run mypy backend                 # 类型检查
+uv run pytest backend/tests -q      # 测试
 
 cd frontend
 npm run lint

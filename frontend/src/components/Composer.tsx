@@ -23,7 +23,6 @@ import clsx from "clsx";
 import { MacroPicker } from "@/components/MacroPicker";
 import { RefPicker, type RefCandidate, type RefKind } from "@/components/RefPicker";
 import { ContextBar } from "@/components/ContextBar";
-import { ModelSwitcher } from "@/components/ModelSwitcher";
 import { WorkDirPicker } from "@/components/WorkDirPicker";
 import { useChatStore } from "@/store/chat";
 import { speechUploadsAudio, useSpeechInput } from "@/hooks/useSpeechInput";
@@ -132,7 +131,6 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const stop = useChatStore((s) => s.stop);
   const sessionId = useChatStore((s) => s.sessionId);
   const workDir = useChatStore((s) => s.workDir);
-  const modelPk = useChatStore((s) => s.modelPk);
   // 没有 usage 时也要能显示窗口大小，所以单独存一份
   const contextWindow = useChatStore((s) => s.contextWindow);
   const approvalMode = useChatStore((s) => s.approvalMode);
@@ -553,9 +551,6 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
               而且用户在发第一句之前就该看到它 */}
           {sessionId && (
             <WorkDirPicker sessionId={sessionId} workDir={workDir} />
-          )}
-          {sessionId && (
-            <ModelSwitcher sessionId={sessionId} modelPk={modelPk} />
           )}
           <button
             type="button"

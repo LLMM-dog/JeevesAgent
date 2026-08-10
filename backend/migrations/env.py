@@ -31,7 +31,7 @@ from app.infra.db.base import Base  # noqa: E402
 # 必须全部导入 —— 少一个模块，autogenerate 就会认为那些表该被删掉
 from app.modules.cron import models as cron_models  # noqa: E402,F401
 from app.modules.memory import models as memory_models  # noqa: E402,F401
-from app.modules.provider import models as provider_models  # noqa: E402,F401
+from app.modules.endpoint import models as provider_models  # noqa: E402,F401
 from app.modules.session import models as session_models  # noqa: E402,F401
 from app.modules.skill import models as skill_models  # noqa: E402,F401
 from app.modules.todo import models as todo_models  # noqa: E402,F401

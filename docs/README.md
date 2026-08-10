@@ -1,6 +1,6 @@
 # Jeeves 文档
 
-跑在本机的 AI 助手。Python 后端（FastAPI，基于 LangGraph 组件）+ React 前端。
+跑在本机的 AI 助手。Python 后端（FastAPI，纯 while 循环 agent loop）+ React 前端。
 
 ## 怎么读
 
@@ -11,12 +11,13 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| [architecture/](architecture/) | 系统设计：后端分层、agent loop、工具/事件/上下文/技能/沙箱/安全、数据层、前端架构 |
+| [architecture/](architecture/) | 系统设计：后端分层、agent loop、工具/事件/上下文/技能/沙箱/安全、数据层、前端架构、多智能体 |
 | [architecture/tools.md](architecture/tools.md) | 20 个内置工具能做什么 |
 | [architecture/execution.md](architecture/execution.md) | 命令执行与审批。**安全边界写在开头，动手前先看** |
 | [architecture/skills.md](architecture/skills.md) | 技能与宏：三级渐进披露、上传校验、模型自己建技能 |
 | [architecture/cron.md](architecture/cron.md) | 定时任务：调度、错过窗口、时区、无头执行 |
 | [architecture/context.md](architecture/context.md) | 上下文：占用计算、压缩时机与预算 |
+| [architecture/multi-agent-roadmap.md](architecture/multi-agent-roadmap.md) | 多智能体路线图：验证增强、编排、技能进化 |
 | [api/](api/) | HTTP 接口、SSE 事件协议 |
 | [guides/](guides/) | 产品定位、术语表 |
 | [development/](development/) | 环境搭建、代码规范、测试策略 |
@@ -41,25 +42,24 @@
 
 ### Agent 内核
 
-7. **`messages` 不加 reducer**，节点返回完整列表覆盖写入。
-8. **`journal` 是 append-only 普通 list**，落库读 journal 而非 state。原因：LangGraph 节点被取消时该批状态追加全部作废。见 [architecture/agent-loop.md](architecture/agent-loop.md#journal-sink)。
-8b. **从 DB 组装上下文时必须做一致性校验**：孤立的 `tool_calls`（无对应 tool 结果）要补占位，孤立的 `tool` 消息要丢弃。否则下一轮直接 400。取消、崩溃、断电都会产生这种不一致。
-8c. **运行中可能被修改的状态不能用 ContextVar**（如 `approval_mode`）。ContextVar 在 task 创建时快照，外部 `set()` 对已运行的 task 不可见。用模块级 dict + session_id。
-9. **压缩切点绝不拆开 `tool_calls` 与其 `tool` 结果**，否则 LLM 直接返回 400。
-10. **摘要以 `user` 角色注入，不用 `system`。** artifact 不参与压缩，单独钉在上下文末尾。
-11. **工具执行异常转成错误文本返回给模型，不向上抛。** 未知工具同理。
-12. **技能正文以工具返回值形态进上下文**，不进 system 位——用户上传的内容是数据不是指令。
+7. **`messages` 是会被压缩重写的工作副本**，`journal` 是 append-only 全量流水。落库读 journal，发给 LLM 的是压缩后的 messages。见 [architecture/agent-loop.md](architecture/agent-loop.md#messages-与-journal-的分离)。
+8. **从 DB 组装上下文时必须做一致性校验**：孤立的 `tool_calls`（无对应 tool 结果）要补占位，孤立的 `tool` 消息要丢弃。否则下一轮直接 400。取消、崩溃、断电都会产生这种不一致。详见 [architecture/context.md](architecture/context.md#组装前的一致性校验)。
+9. **运行中可能被修改的状态不能用 ContextVar**（如 `approval_mode`）。ContextVar 在 task 创建时快照，外部 `set()` 对已运行的 task 不可见。用模块级 dict + session_id。
+10. **压缩切点绝不拆开 `tool_calls` 与其 `tool` 结果**，否则 LLM 直接返回 400。
+11. **摘要以 `user` 角色注入，不用 `system`。** artifact 不参与压缩，单独钉在上下文末尾。
+12. **工具执行异常转成错误文本返回给模型，不向上抛。** 未知工具同理。
+13. **技能正文以工具返回值形态进上下文**，不进 system 位——用户上传的内容是数据不是指令。
 
 ### 安全
 
-13. **所有文件工具的路径必须过白名单校验**，`resolve()` 后判 `is_relative_to`。模型输出的 `path` 只用于查表/校验，绝不直接 `open()` 拼接。
-13b. **默认在宿主机直接执行命令**（`sandbox__backend=local`）。这种模式下 `run_shell` 能做的事没有上界，路径白名单管不到它，边界只有人工确认。要真隔离就配 `sandbox__backend=docker`——`--network none` + 资源限制 + `cap-drop ALL`，只挂工作区。检测不到 Docker 时会降级到本地执行并**在界面上持续提示**（配了 docker 就是想要隔离，静默回落等于骗人）。见 [architecture/sandbox.md](architecture/sandbox.md)。
-14. **API 默认只绑 `127.0.0.1` 且无鉴权。** 这是单机个人项目的显式取舍，绑到 `0.0.0.0` 前必须先加鉴权。见 [architecture/security.md](architecture/security.md)。
-15. **API Key 加密存储**（Fernet，密文带 `v1:` 前缀），只回显尾 4 位。任何接口不返回明文。
+14. **所有文件工具的路径必须过白名单校验**，`resolve()` 后判 `is_relative_to`。模型输出的 `path` 只用于查表/校验，绝不直接 `open()` 拼接。
+15. **默认在宿主机直接执行命令**（`sandbox__backend=local`）。这种模式下 `run_shell` 能做的事没有上界，路径白名单管不到它，边界只有人工确认。要真隔离就配 `sandbox__backend=docker`——`--network none` + 资源限制 + `cap-drop ALL`，只挂工作区。检测不到 Docker 时会降级到本地执行并**在界面上持续提示**（配了 docker 就是想要隔离，静默回落等于骗人）。见 [architecture/sandbox.md](architecture/sandbox.md)。
+16. **API 默认只绑 `127.0.0.1` 且无鉴权。** 这是单机个人项目的显式取舍，绑到 `0.0.0.0` 前必须先加鉴权。见 [architecture/security.md](architecture/security.md)。
+17. **API Key 加密存储**（Fernet，密文带 `v1:` 前缀），只回显尾 4 位。任何接口不返回明文。
 
 ### 配置
 
-16. **`.env` 路径用绝对路径解析**（基于 `__file__`），不用相对路径——相对路径按进程 cwd 解析，换个目录启动就静默读不到配置。
+18. **`.env` 路径用绝对路径解析**（基于 `__file__`），不用相对路径——相对路径按进程 cwd 解析，换个目录启动就静默读不到配置。
 
 ## 文档规范
 

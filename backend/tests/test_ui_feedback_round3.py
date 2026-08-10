@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest_asyncio
 from app.core.crypto import encrypt
-from app.core.ids import binding_id, model_id, provider_id
-from app.modules.provider.models import Model, ModelBinding, Provider
+from app.core.ids import binding_id, endpoint_id, model_id
+from app.modules.endpoint.models import Endpoint, Model, ModelBinding
 from app.modules.trace.models import Run, Span
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -41,8 +41,8 @@ async def client(db: AsyncSession, workspace_id: str) -> Any:
 @pytest_asyncio.fixture
 async def bound_model(db: AsyncSession) -> Model:
     """一个被 chat 位绑定的模型。"""
-    p = Provider(
-        id=provider_id(),
+    p = Endpoint(
+        id=endpoint_id(),
         name="绑定测试",
         base_url="https://example.com/v1",
         api_key_cipher=encrypt("sk-test-1234567890"),
@@ -51,7 +51,7 @@ async def bound_model(db: AsyncSession) -> Model:
     await db.flush()
     m = Model(
         id=model_id(),
-        provider_id=p.id,
+        endpoint_id=p.id,
         model_id="bound-chat",
         context_window=32768,
         enabled=1,
@@ -99,7 +99,7 @@ class TestCannotDisableBoundModel:
         """没被绑定的照常可以禁用。"""
         free = Model(
             id=model_id(),
-            provider_id=bound_model.provider_id,
+            endpoint_id=bound_model.endpoint_id,
             model_id="free-one",
             context_window=8192,
             enabled=1,
@@ -309,7 +309,7 @@ class TestTokenCountFollowsSession:
         """会话选了别的模型时，窗口要跟着那个模型。"""
         big = Model(
             id=model_id(),
-            provider_id=bound_model.provider_id,
+            endpoint_id=bound_model.endpoint_id,
             model_id="big-window",
             context_window=131072,
             enabled=1,

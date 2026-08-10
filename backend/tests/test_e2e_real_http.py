@@ -33,9 +33,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest_asyncio
-from app.core.ids import binding_id, model_id, path_id, provider_id
+from app.core.ids import binding_id, endpoint_id, model_id, path_id
 from app.infra.db.base import Base
-from app.modules.provider.models import Model, ModelBinding, PathWhitelist, Provider
+from app.modules.endpoint.models import Endpoint, Model, ModelBinding, PathWhitelist
 from app.modules.session import repo
 from app.modules.todo.models import Todo  # noqa: F401
 from httpx import ASGITransport, AsyncClient
@@ -266,8 +266,8 @@ async def app_client(tmp_path, monkeypatch, upstream):  # type: ignore[no-untype
             )
         )
         await db.flush()
-        p = Provider(
-            id=provider_id(),
+        p = Endpoint(
+            id=endpoint_id(),
             name="fake-upstream",
             base_url=f"{upstream}/v1",
             api_key_cipher=encrypt("sk-test"),
@@ -277,7 +277,7 @@ async def app_client(tmp_path, monkeypatch, upstream):  # type: ignore[no-untype
         await db.flush()
         m = Model(
             id=model_id(),
-            provider_id=p.id,
+            endpoint_id=p.id,
             model_id="gpt-4o",
             context_window=128_000,
             window_source="matched",
@@ -353,7 +353,7 @@ class TestRealNetwork:
         self, app_client: AsyncClient, upstream: str
     ) -> None:
         r = await app_client.post(
-            "/api/providers/probe", json={"base_url": upstream, "api_key": "sk-x"}
+            "/api/endpoints/probe", json={"base_url": upstream, "api_key": "sk-x"}
         )
         assert r.status_code == 200, r.text
         body = r.json()

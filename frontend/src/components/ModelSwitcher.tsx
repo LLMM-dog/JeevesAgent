@@ -100,7 +100,7 @@ export function ModelSwitcher({
 
       {open && (
         <div
-          className="absolute bottom-full left-0 z-50 mb-1 max-h-80 w-72 overflow-y-auto rounded-lg border shadow-lg"
+          className="absolute left-0 z-50 mt-1 max-h-80 w-72 overflow-y-auto rounded-lg border shadow-lg"
           style={{
             borderColor: "var(--color-border)",
             background: "var(--color-surface)",

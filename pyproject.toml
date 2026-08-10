@@ -84,6 +84,7 @@ ignore = ["E501"]
 # B008 禁止在参数默认值里调用函数，但 FastAPI 的 Depends() 就是这个模式。
 # 这是框架惯例而非缺陷，只在路由层豁免。
 "backend/app/api/*" = ["B008"]
+"backend/app/modules/agent/agent_router.py" = ["B008"]
 # 测试里访问被测模块的私有函数是正常的
 "backend/tests/*" = ["SLF001"]
 

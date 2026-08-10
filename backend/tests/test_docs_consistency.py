@@ -6,9 +6,9 @@
 文档过时不会有任何报错，而**下一个改这块的人（包括我自己）会照着过时的
 文档去改代码**。实际发生过的：
 
-  - `docs/02-data/schema.md` 自称"数据结构的唯一真源"，而 3 张表缺失、
+  - `docs/architecture/data-schema.md` 自称"数据结构的唯一真源"，而 3 张表缺失、
     2 张表列名几乎全错、还有 1 张表代码里根本不存在
-  - `docs/01-architecture/tools.md` 列了 4 个不存在的记忆工具
+  - `docs/architecture/tools.md` 列了 4 个不存在的记忆工具
     （memory_list / memory_read / memory_write / memory_delete），
     真实的是 remember / recall / update_memory / forget_memory
   - `docs/01-architecture/context.md` 说"引用内容放在用户文字前面"，
@@ -31,8 +31,8 @@ APP = ROOT / "backend" / "app"
 def _all_tables() -> set[str]:
     """从 metadata 拿真实表名。"""
     import app.modules.cron.models  # noqa: F401
+    import app.modules.endpoint.models  # noqa: F401
     import app.modules.memory.models  # noqa: F401
-    import app.modules.provider.models  # noqa: F401
     import app.modules.session.models  # noqa: F401
     import app.modules.skill.models  # noqa: F401
     import app.modules.todo.models  # noqa: F401
@@ -43,8 +43,8 @@ def _all_tables() -> set[str]:
 
 
 def _schema_docs() -> str:
-    a = (DOCS / "02-data" / "schema.md").read_text(encoding="utf-8")
-    b = (DOCS / "02-data" / "schema-2.md").read_text(encoding="utf-8")
+    a = (DOCS / "architecture" / "data-schema.md").read_text(encoding="utf-8")
+    b = (DOCS / "architecture" / "data-schema-2.md").read_text(encoding="utf-8")
     return a + "\n" + b
 
 
@@ -85,7 +85,7 @@ class TestToolDocsMatchRegistry:
         }
 
     def test_every_tool_documented(self) -> None:
-        doc = (DOCS / "01-architecture" / "tools.md").read_text(encoding="utf-8")
+        doc = (DOCS / "architecture" / "tools.md").read_text(encoding="utf-8")
         missing = [t for t in sorted(self._registered()) if f"`{t}`" not in doc]
         assert not missing, f"这些工具没写进 tools.md：{missing}"
 
@@ -98,7 +98,7 @@ class TestToolDocsMatchRegistry:
         remember / recall / update_memory / forget_memory。
         照着文档去调的人会得到"工具不存在"。
         """
-        doc = (DOCS / "01-architecture" / "tools.md").read_text(encoding="utf-8")
+        doc = (DOCS / "architecture" / "tools.md").read_text(encoding="utf-8")
         real = self._registered()
         # web_search 只在配了后端时注册，文档里写了但这里可能拿不到
         allow = real | {"web_search"}
@@ -155,7 +155,7 @@ class TestDocLinksResolve:
         broken: list[str] = []
         for f in [ROOT / "README.md", *DOCS.rglob("*.md")]:
             text = f.read_text(encoding="utf-8")
-            for m in re.finditer(r"\[[^\]]+\]\(([^)#\s]+\.md)(?:#[^)]*)?\)", text):
+            for m in re.finditer(r"\[[^\]]+\]\((?!(?:https?:|#))([^)#\s]+\.md)(?:#[^)]*)?\)", text):
                 target = (f.parent / m.group(1)).resolve()
                 if not target.is_file():
                     broken.append(

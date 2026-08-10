@@ -67,7 +67,7 @@ export default function VisionPanel() {
         </div>
       ) : !models || models.items.length === 0 ? (
         <div className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-5 text-center text-xs text-[var(--color-muted)]">
-          还没有模型。先在上面添加供应商。
+          还没有模型。先在上面添加端点。
         </div>
       ) : (
         <ul className="space-y-1">

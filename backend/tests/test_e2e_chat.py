@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from app.core.ids import binding_id, model_id, provider_id
+from app.core.ids import binding_id, endpoint_id, model_id
 from app.infra.db.base import Base
 from app.modules.agent.chat_service import ChatService
 from app.modules.agent.tools.base import ToolRegistry
-from app.modules.provider.models import Model, ModelBinding, Provider
+from app.modules.endpoint.models import Endpoint, Model, ModelBinding
 from app.modules.session import repo
 from app.modules.todo.models import Todo  # noqa: F401
 from httpx import ASGITransport, AsyncClient
@@ -137,13 +137,13 @@ async def app_and_maker(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
 
 
 async def _seed_model(maker: async_sessionmaker[AsyncSession]) -> None:
-    """建一个供应商 + 模型 + chat 绑定。"""
+    """建一个端点 + 模型 + chat 绑定。"""
     from app.core.crypto import encrypt
 
     async with maker() as db:
         await repo.ensure_default_workspace(db, "/tmp/e2e-ws")
-        p = Provider(
-            id=provider_id(),
+        p = Endpoint(
+            id=endpoint_id(),
             name="fake",
             base_url="http://fake/v1",
             api_key_cipher=encrypt("sk-fake"),
@@ -156,7 +156,7 @@ async def _seed_model(maker: async_sessionmaker[AsyncSession]) -> None:
 
         m = Model(
             id=model_id(),
-            provider_id=p.id,
+            endpoint_id=p.id,
             model_id="fake-model",
             context_window=32768,
             window_source="matched",

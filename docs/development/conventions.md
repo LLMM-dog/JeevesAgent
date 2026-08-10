@@ -16,7 +16,9 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "ASYNC"]
 ignore = ["E501"]     # 行长交给 formatter，lint 不重复报
 
 [tool.ruff.lint.per-file-ignores]
-"migrations/*" = ["E", "F", "N"]     # 迁移文件是生成的，不强求
+"backend/migrations/*" = ["E", "F", "N", "I", "W"]     # 迁移文件是生成的，不强求
+"backend/app/api/*" = ["B008"]     # B008: FastAPI Depends() 是框架惯例
+"backend/tests/*" = ["SLF001"]     # 测试访问私有函数是正常的
 ```
 
 `line-length = 120` 而非 88：SQLAlchemy 的列定义和 FastAPI 的依赖注入天然长，88 会把它们折成难读的多行。
@@ -156,7 +158,7 @@ trust_env=False
 
 ### snake_case 的边界
 
-见 [../architecture/architecture.md](../architecture/architecture.md#为什么不用-camelcase)。规则复述：
+见 [../architecture/backend.md](../architecture/backend.md#为什么不用-camelcase)。规则复述：
 
 - **来自后端的数据结构：snake_case**（`types/api.ts`、`types/events.ts`）
 - **纯前端的东西：camelCase**（组件 props、hook 返回、局部变量）
@@ -239,7 +241,7 @@ feat: 模型探测支持中转站前缀剥离
 
 ### 不提交的东西
 
-见 [../architecture/files.md](../architecture/files.md#什么进-git什么不进)。
+见 [../architecture/data-files.md](../architecture/data-files.md#什么进-git什么不进)。
 
 特别注意：`.env`、`config/mcp_servers.yaml`、`personas/SOUL.md`、`personas/USER.md`、`data/`、`workspace/`。
 
@@ -251,7 +253,7 @@ feat: 模型探测支持中转站前缀剥离
 
 | 改了什么 | 必须同步 |
 | --- | --- |
-| 数据库表结构 | [../architecture/schema.md](../architecture/schema.md) 或 schema-2.md |
+| 数据库表结构 | [../architecture/data-schema.md](../architecture/data-schema.md) 或 schema-2.md |
 | SSE 事件名或字段 | [../api/sse-events.md](../api/sse-events.md) **+ 前端 switch** |
 | 接口路径、请求/响应结构 | [../api/](../api/) 对应文件 |
 

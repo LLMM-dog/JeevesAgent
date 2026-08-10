@@ -89,7 +89,7 @@
 }
 ```
 
-字段与 [message 表](../architecture/schema.md#message)一一对应。`tool_calls` / `tool_display` / `refs` / `attachments` 在库里是 JSON 文本，接口返回时已解析为对象/数组。
+字段与 [message 表](../architecture/data-schema.md#message)一一对应。`tool_calls` / `tool_display` / `refs` / `attachments` 在库里是 JSON 文本，接口返回时已解析为对象/数组。
 
 ### DELETE /api/sessions/{id}/messages/{message_id}
 

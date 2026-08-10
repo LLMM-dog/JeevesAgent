@@ -120,7 +120,7 @@ class Msg:
             # 不是所有 OpenAI 兼容端点都接受数组形式。有些中转站只实现了
             # 字符串分支，收到数组直接 400 或静默丢内容。既然没图片时两种
             # 写法等价，就用兼容性更好的那个 —— 所以这个分支只在有图时进。
-            from app.modules.provider.vision import ImagePart, decode_data_url
+            from app.modules.endpoint.vision import ImagePart, decode_data_url
 
             parts: list[dict[str, Any]] = []
             if self.content:

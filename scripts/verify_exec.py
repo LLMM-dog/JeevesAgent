@@ -135,7 +135,7 @@ async def main() -> int:
             print("后端没起来")
             return 2
 
-        print("1. 登记供应商")
+        print("1. 登记端点")
         pr = await c.post(
             f"{BASE}/api/providers",
             json={
@@ -338,7 +338,7 @@ async def main() -> int:
             return 0
         finally:
             await c.delete(f"{BASE}/api/providers/{pid}")
-            print("（已清理测试供应商）")
+            print("（已清理测试端点）")
 
 
 if __name__ == "__main__":

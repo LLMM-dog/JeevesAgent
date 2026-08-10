@@ -294,7 +294,7 @@ category: 工作流
 
 ### 状态存表，不写进 SKILL.md
 
-新表 `skill_state`（`name` + `enabled`），见 [../architecture/schema.md](../architecture/schema.md)。
+新表 `skill_state`（`name` + `enabled`），见 [../architecture/data-schema.md](../architecture/data-schema.md)。
 
 启用与否是**用户的偏好**，不是技能作者的属性。写进 frontmatter 的话：
 

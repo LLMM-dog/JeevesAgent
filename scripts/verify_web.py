@@ -452,7 +452,7 @@ async def main() -> int:
         finally:
             for pid in created:
                 await c.delete(f"{BASE}/api/providers/{pid}")
-            print(f"\n（已清理 {len(created)} 个供应商）")
+            print(f"\n（已清理 {len(created)} 个端点）")
 
     return _finish(fails)
 

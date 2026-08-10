@@ -1,38 +1,79 @@
-# 内置验证智能体设计 v2
+# 内置验证智能体设计 v3
 
-> v2 变更：从全局配置 → 每智能体独立属性。支持自我进化。
+> v2→v3 变更：验证智能体通过 skills（非 memory 表）实现自我进化。Skills 可跨智能体共享。
 
 ---
 
-## 核心变更
+## 核心设计
 
-| v1（旧） | v2（新） |
-|----------|----------|
-| 全局配置，一个开关影响所有智能体 | 每个智能体独立开关 `verification_enabled` |
-| 验证提示词全局共享 | 验证智能体有自己的 system_prompt + skills |
-| 不会进化 | 通过 skill_manage 沉淀经验，逐步变强 |
-| 无记忆 | 独立 memory，记住该智能体常犯的错误 |
+验证智能体是**独立的 AgentLoop 实例**，系统内置。每完成一个 todo 步骤后自动唤醒。
+
+### 自我进化机制
+
+验证智能体不是往数据库写记忆来进化，而是调用 `skill_manage` 创建**验证 skill**。这些 skill 是文件，可跨会话、跨智能体共享：
+
+```
+skills/verification/
+├── check-file-not-empty.md      ← 验证规则：确认文件真的被写入
+├── require-test-evidence.md     ← 验证规则：代码修改后必须跑测试
+├── detect-empty-results.md      ← 验证规则：检测空结果模式
+└── SKILL.md                     ← 验证智能体的基础行为
+```
+
+### 进化触发条件
+
+```
+同一模式出现 3 次 → 创建验证 skill
+
+例：
+  第 1 次: Agent 声称 write_file 完成，文件为空 → 标记为 fail
+  第 2 次: 同样模式 → 标记为 fail，记录
+  第 3 次: 同样模式 → 触发进化 →
+    skill_manage(action="create", name="check-file-not-empty",
+      category="verification",
+      content="验证规则：当步骤涉及 write_file 时...")
+
+  第 4 次及以后: 自动加载此 skill → 检查更严格
+```
+
+### 验证智能体的 System Prompt
+
+```markdown
+你是成果检查员。检查智能体完成的每一步是否真的完成。
+
+## 你的验证规则
+
+你会自动加载 `skills/verification/` 下的所有验证 skill。
+每个 skill 定义了特定场景下的验证标准。严格遵循它们。
+
+## 验证模式
+
+当检测到同一种错误模式反复出现时，使用 skill_manage 创建新的验证规则。
+新规则应该：
+1. 描述具体的问题模式
+2. 定义自动检测该模式的方法
+3. 说明判定 pass/fail 的标准
+
+## 输出格式
+
+{ "verdict": "pass"|"suggest"|"fail", "reason": "...", "feedback": "..." }
+只输出 JSON。
+```
 
 ---
 
 ## 触发时机
 
 ```
-智能体 A（verification_enabled=true）
+智能体 (verification_enabled=true)
   │
   ├── todo_write → 标记步骤 N 为 completed
   │
   ├── 验证智能体被唤醒
-  │     ┌─────────────────────────────────────────┐
-  │     │ 输入:                                    │
-  │     │  - 步骤描述 (todo step)                  │
-  │     │  - 执行记录 (本轮 tool calls + results)   │
-  │     │  - 当前 todo 完整状态                     │
-  │     │  - 该智能体历史 memory（常见错误模式）     │
-  │     │  - 该智能体的 verification skills         │
-  │     │                                          │
-  │     │ 输出: { verdict, reason, feedback }      │
-  │     └─────────────────────────────────────────┘
+  │     system_prompt: 验证模板
+  │     model: 智能体绑定的模型或辅助模型
+  │     skills: skills/verification/ 下所有 skill
+  │     输入: 步骤描述 + 执行记录 + 当前 todo 状态
   │
   ├── pass → 继续步骤 N+1
   ├── suggest → 注入反馈（不阻止）
@@ -41,63 +82,9 @@
 
 ---
 
-## 验证智能体的 System Prompt
-
-```markdown
-你是成果检查员。你的任务是验证智能体「{agent_name}」完成的每一步是否真的完成。
-
-## 你的记忆
-
-你会收到该智能体历史上的常见错误模式。重点关注它是否重复犯同样的错误。
-
-## 判断标准
-
-- ✅ pass：步骤产出物已生成、有证据支持、不依赖缺失信息
-- ⚠️ suggest：基本完成但有明显改进空间
-- ❌ fail：声称完成但没有证据、关键操作失败被忽略、产出物实际不存在
-
-## 输出格式
-
-{ "verdict": "pass", "reason": "...", "feedback": null }
-
-只输出 JSON。
-```
-
----
-
-## 自我进化流程
-
-```
-第 3 次验证时:
-  验证智能体发现 Agent 又犯了"声称 write_file 但文件为空"
-  → 检查自己的 memory: 这个模式已出现 3 次
-  → 达到阈值 → 调 skill_manage 创建规则:
-
-  skill_manage(
-    action="create",
-    name="check-file-not-empty",
-    category="verification",
-    content="""
-    验证规则：当步骤涉及 write_file 时：
-    1. 检查 write_file 的返回值确认操作成功
-    2. 用 read_file 读取该文件的前 5 行确认非空
-    3. 如果文件为空或写入失败，判定为 fail
-    """
-  )
-  → 写入 skills/<agent_name>/verification/check-file-not-empty/SKILL.md
-
-第 4 次及以后验证时:
-  → 验证智能体自动加载此 skill
-  → 检查更严格，不再漏过空文件
-```
-
----
-
 ## 与 AgentLoop 的集成
 
 ```python
-# chat_service.py
-
 async def run_with_verification(loop, agent_def):
     verifier = None
     if agent_def.verification_enabled:
@@ -105,33 +92,17 @@ async def run_with_verification(loop, agent_def):
             agent_def=agent_def,
             model=resolve_model(agent_def.model_id),
         )
+        # 加载验证 skills
+        verifier.load_skills("skills/verification/")
 
     while True:
         result = await loop.run_one_turn()
-
-        # 检查是否完成了 todo 步骤
         completed_step = _detect_completed_todo_step(result)
         if completed_step and verifier:
-            verdict = await verifier.verify(
-                step=completed_step,
-                execution_log=_get_turn_log(loop),
-                todo_state=_get_todo_state(loop),
-            )
-
+            verdict = await verifier.verify(step=completed_step, ...)
             if verdict.verdict == "fail" and agent_def.strict_mode:
-                loop._append(Msg(
-                    role="user",
-                    content=f"[验证] 步骤未通过：{verdict.feedback}",
-                    ephemeral=True,
-                ))
-                continue  # 重新执行当前步骤
-            elif verdict.verdict in ("fail", "suggest"):
-                loop._append(Msg(
-                    role="user",
-                    content=f"[验证] {verdict.feedback}",
-                    ephemeral=True,
-                ))
-                # suggest 不阻止，继续
+                loop._append(Msg(role="user", content=f"[验证] {verdict.feedback}", ephemeral=True))
+                continue
 
         if not result.has_tool_calls:
             break
@@ -141,7 +112,8 @@ async def run_with_verification(loop, agent_def):
 
 ## 成本模型
 
-- 验证智能体每完成一个 todo 步骤调用一次 LLM（不是每轮）
-- 使用智能体绑定的模型（或辅助模型，通常更便宜）
+- 每完成一个 todo 步骤调用一次 LLM
+- 使用智能体绑定的模型（或辅助模型）
 - 5 步任务 = 额外 5 次 LLM 调用
-- `verification_enabled=false`（默认）：零开销
+- `verification_enabled=false`：零开销
+- 进化动作（skill_manage）不调 LLM，只是文件写入

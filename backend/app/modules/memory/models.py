@@ -83,6 +83,7 @@ class Memory(Base, TimestampMixin):
     # 会话被删除后保留这个值（不做外键级联）—— 记忆比会话活得长，
     # 加了 CASCADE 会导致清理旧会话时记忆一起消失。
     origin_session_id: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 
     # 归档而非删除。用户"删掉"一条记忆时置位，仍可在界面里查看和恢复。
     #

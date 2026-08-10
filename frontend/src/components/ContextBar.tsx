@@ -175,7 +175,7 @@ export function ContextBar({
       {(tools + system) / win > 0.15 && (
         <p className="opacity-80">
           前两项每一轮都会重发，占窗口 {label(tools + system)}。想降下来：
-          设置页关掉用不到的 MCP 服务器，或精简人格与偏好里的行为规则。
+          设置页关掉用不到的 MCP 服务器，或精简智能体预设中的系统提示词。
         </p>
       )}
 

@@ -1,5 +1,5 @@
 """
-配置类路由：供应商、模型、绑定、Todo、元信息。
+配置类路由：模型组（端点）、模型、绑定、Todo、元信息。
 """
 
 import base64
@@ -11,9 +11,13 @@ from app.api import deps
 from app.api.schemas import (
     BindingListResponse,
     BindingOut,
-    CreateProviderRequest,
+    CreateEndpointRequest,
+    EndpointListResponse,
+    EndpointOut,
     MacroDetail,
     MacroUpsert,
+    McpServerCreate,
+    McpServerUpdate,
     McpToggle,
     MetaResponse,
     ModelListResponse,
@@ -22,8 +26,6 @@ from app.api.schemas import (
     ProbedModelOut,
     ProbeRequest,
     ProbeResponse,
-    ProviderListResponse,
-    ProviderOut,
     SetBindingRequest,
     SkillToggle,
     TodoListResponse,
@@ -38,10 +40,10 @@ from app.infra.sandbox.factory import fallback_reason as sandbox_fallback_reason
 from app.infra.sandbox.factory import get_sandbox
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.agent.tools.todo import _serialize, _stats, load_active
+from app.modules.endpoint import service as ps
+from app.modules.endpoint.models import Endpoint
 from app.modules.mcp.tools import build_tools
 from app.modules.memory import service as memory_service
-from app.modules.provider import service as ps
-from app.modules.provider.models import Provider
 from app.modules.session import repo
 from app.modules.session.models import Session
 from app.modules.skill import authoring
@@ -61,10 +63,10 @@ log = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-# ─────────────────────────── provider ───────────────────────────
+# ─────────────────────────── endpoint ───────────────────────────
 
 
-@router.post("/providers/probe", response_model=ProbeResponse, summary="探测模型列表")
+@router.post("/endpoints/probe", response_model=ProbeResponse, summary="探测模型列表")
 async def probe(body: ProbeRequest) -> ProbeResponse:
     """
     用户点名的核心功能：填 base_url + key，自动拉出可用模型列表。
@@ -87,12 +89,12 @@ async def probe(body: ProbeRequest) -> ProbeResponse:
     )
 
 
-@router.get("/providers", response_model=ProviderListResponse, summary="供应商列表")
-async def list_providers(db: AsyncSession = Depends(get_db)) -> ProviderListResponse:
-    rows = await ps.list_providers(db)
-    return ProviderListResponse(
+@router.get("/endpoints", response_model=EndpointListResponse, summary="模型组列表")
+async def list_endpoints(db: AsyncSession = Depends(get_db)) -> EndpointListResponse:
+    rows = await ps.list_endpoints(db)
+    return EndpointListResponse(
         items=[
-            ProviderOut(
+            EndpointOut(
                 id=p.id,
                 name=p.name,
                 base_url=p.base_url,
@@ -107,11 +109,11 @@ async def list_providers(db: AsyncSession = Depends(get_db)) -> ProviderListResp
     )
 
 
-@router.post("/providers", response_model=ProviderOut, status_code=201, summary="添加供应商")
-async def create_provider(
-    body: CreateProviderRequest, db: AsyncSession = Depends(get_db)
-) -> ProviderOut:
-    p = await ps.create_provider(
+@router.post("/endpoints", response_model=EndpointOut, status_code=201, summary="添加模型组（API 端点）")
+async def create_endpoint(
+    body: CreateEndpointRequest, db: AsyncSession = Depends(get_db)
+) -> EndpointOut:
+    p = await ps.create_endpoint(
         db,
         name=body.name,
         base_url=body.base_url,
@@ -120,14 +122,14 @@ async def create_provider(
     )
     models = await ps.list_models(db, p.id)
 
-    # 首次添加时自动绑定 chat 位 —— 否则用户加完供应商回到对话页
+    # 首次添加时自动绑定 chat 位 —— 否则用户加完端点回到对话页
     # 仍然报"未配置模型"，而他并不知道还差一步。
     if models and not await ps.has_chat_model(db):
         first_chat = next((m for m in models if m.enabled), models[0])
         await ps.set_binding(db, purpose="chat", model_pk=first_chat.id)
         log.info("auto_bound_chat", model=first_chat.model_id)
 
-    return ProviderOut(
+    return EndpointOut(
         id=p.id,
         name=p.name,
         base_url=p.base_url,
@@ -139,15 +141,15 @@ async def create_provider(
     )
 
 
-@router.delete("/providers/{provider_id}", summary="删除供应商")
-async def delete_provider(provider_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, bool]:
-    await ps.delete_provider(db, provider_id)
+@router.delete("/endpoints/{endpoint_id}", summary="删除模型组")
+async def delete_endpoint(endpoint_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, bool]:
+    await ps.delete_endpoint(db, endpoint_id)
     return {"ok": True}
 
 
 @router.get("/models", response_model=ModelListResponse, summary="模型列表")
 async def list_models(
-    provider_id: str | None = Query(None),
+    endpoint_id: str | None = Query(None),
     enabled_only: bool = Query(
         False, description="只返回已启用的。对话页的切换菜单用这个"
     ),
@@ -159,20 +161,20 @@ async def list_models(
     带 enabled_only 时只返回启用的 —— 对话页的快捷切换菜单用它。
     设置页要看到全部（包括禁用的），否则用户没法把它重新启用。
     """
-    rows = await ps.list_models(db, provider_id)
+    rows = await ps.list_models(db, endpoint_id)
     if enabled_only:
         rows = [m for m in rows if m.enabled]
 
-    # 一次查出所有供应商名，避免每个模型查一次
+    # 一次查出所有端点名，避免每个模型查一次
     pmap = {
-        p.id: p.name for p in (await db.execute(select(Provider))).scalars()
+        p.id: p.name for p in (await db.execute(select(Endpoint))).scalars()
     }
     return ModelListResponse(
         items=[
             ModelOut(
                 id=m.id,
-                provider_id=m.provider_id,
-                provider_name=pmap.get(m.provider_id, ""),
+                endpoint_id=m.endpoint_id,
+                endpoint_name=pmap.get(m.endpoint_id, ""),
                 model_id=m.model_id,
                 display_name=m.display_name,
                 context_window=m.context_window,
@@ -226,7 +228,7 @@ async def list_bindings(db: AsyncSession = Depends(get_db)) -> BindingListRespon
                 purpose=b.purpose,
                 model_pk=b.model_pk,
                 model_id=m.model_id,
-                provider_name=p.name,
+                endpoint_name=p.name,
             )
             for b, m, p in rows
         ]
@@ -785,7 +787,7 @@ async def upload_image(file: UploadFile = File(...)) -> dict[str, object]:
 
     ## 为什么返回 data URL 而不是文件路径
 
-    图片最终要以 base64 塞进 LLM 请求（供应商拉不到我们的 localhost 地址）。
+    图片最终要以 base64 塞进 LLM 请求（模型拉不到我们的 localhost 地址）。
     存文件再读回来编码等于多绕一圈，而且要处理清理问题。
 
     直接返回 data URL，前端拿着它渲染预览、发消息时原样带上。
@@ -793,9 +795,9 @@ async def upload_image(file: UploadFile = File(...)) -> dict[str, object]:
     ## 校验在服务端做
 
     只信前端校验等于没校验。这里查魔数 —— MIME 是前端声明的，
-    把 .exe 说成 image/png 上传，内容就会被 base64 发给供应商。
+    把 .exe 说成 image/png 上传，内容就会被 base64 发给模型。
     """
-    from app.modules.provider import vision
+    from app.modules.endpoint import vision
 
     raw = await file.read()
     mime = (file.content_type or "").lower()
@@ -981,6 +983,182 @@ async def toggle_mcp_server(
     tools = _reregister_mcp_tools(request.app.state.registry)
 
     return {"server_id": server_id, "enabled": body.enabled, "tools": tools}
+
+
+@router.get("/mcp/servers/{server_id}", summary="查看单个 MCP 服务器详情")
+async def mcp_server_detail(server_id: str) -> dict[str, object]:
+    """返回配置原文块，供编辑表单回填用。"""
+    # 先从连接状态取（含工具列表），再从配置取完整字段
+    from app.modules.mcp.loader import estimate_tokens, load_configs
+    from app.modules.mcp.manager import get_manager
+
+    mgr = get_manager()
+    state = None
+    for st in mgr.states():
+        if st.server_id == server_id:
+            state = st
+            break
+
+    configs, _errors = load_configs()
+    cfg = None
+    for c in configs:
+        if c.server_id == server_id:
+            cfg = c
+            break
+
+    if cfg is None and state is None:
+        raise NotFoundError(
+            f"服务器 {server_id} 不存在", code="server_not_found"
+        )
+
+    result: dict[str, object] = {
+        "server_id": server_id,
+        "transport": cfg.transport if cfg else (state.transport if state else "http"),
+        "enabled": cfg.enabled if cfg else True,
+    }
+    if cfg:
+        result.update({
+            "url": cfg.url,
+            "headers": cfg.headers,
+            "command": cfg.command,
+            "args": cfg.args,
+            "env": cfg.env,
+            "cwd": cfg.cwd,
+            "command_approved": cfg.command_approved,
+        })
+    if state:
+        result.update({
+            "status": state.status,
+            "error": state.error,
+            "tool_count": len(state.tools),
+            "tools": [{"name": t.name, "raw_name": t.raw_name, "description": t.description} for t in state.tools],
+            "estimated_tokens": estimate_tokens(state.tools),
+            "connected_at": state.connected_at,
+        })
+    return result
+
+
+@router.post("/mcp/servers", summary="添加 MCP 服务器", status_code=201)
+async def mcp_server_add(
+    body: McpServerCreate, request: Request
+) -> dict[str, object]:
+    """添加服务器到配置文件并立刻重连。"""
+    from app.modules.mcp.config import ServerConfig
+    from app.modules.mcp.loader import add_server, load_configs
+    from app.modules.mcp.manager import get_manager
+
+    # 查重
+    configs, _errors = load_configs()
+    if any(c.server_id == body.server_id for c in configs):
+        raise ConflictError(
+            f"server_id {body.server_id} 已存在", code="server_exists"
+        )
+
+    cfg = ServerConfig(
+        server_id=body.server_id,
+        transport=body.transport,  # type: ignore[arg-type]
+        enabled=body.enabled,
+        url=body.url,
+        headers=dict(body.headers),
+        command=body.command,
+        args=list(body.args),
+        env=dict(body.env),
+        cwd=body.cwd,
+        command_approved=False,  # 新加的 stdio 需要确认
+    )
+    try:
+        cfg.validate()
+    except ValueError as e:
+        raise BadRequestError(str(e), code="invalid_config") from e
+
+    add_server(cfg)
+
+    # 如果没启用或 stdio 未确认，不连接但写配置
+    mgr = get_manager()
+    if cfg.enabled and not (cfg.transport == "stdio" and not cfg.command_approved):
+        await mgr.reconnect(cfg)
+        _reregister_mcp_tools(request.app.state.registry)
+
+    return {
+        "server_id": cfg.server_id,
+        "transport": cfg.transport,
+        "enabled": cfg.enabled,
+    }
+
+
+@router.patch("/mcp/servers/{server_id}", summary="修改 MCP 服务器")
+async def mcp_server_update(
+    server_id: str, body: McpServerUpdate, request: Request
+) -> dict[str, object]:
+    """改配置并重连。只传要改的字段。"""
+    from app.modules.mcp.loader import load_configs, update_server
+    from app.modules.mcp.manager import get_manager
+
+    configs, _errors = load_configs()
+    current = None
+    for c in configs:
+        if c.server_id == server_id:
+            current = c
+            break
+    if current is None:
+        raise NotFoundError(
+            f"服务器 {server_id} 不存在", code="server_not_found"
+        )
+
+    data = body.model_dump(exclude_unset=True)
+
+    # 如果 transport 变了或者清了 command/url，需要校验
+    new_transport = data.get("transport", current.transport)
+    if new_transport == "stdio":
+        new_command = data.get("command", current.command)
+        if not new_command:
+            raise BadRequestError("stdio 传输必须给 command", code="invalid_config")
+
+    updated = update_server(server_id, data)
+    if not updated:
+        raise NotFoundError(
+            f"配置里没有 {server_id} 这个服务器", code="server_not_found"
+        )
+
+    # 重连
+    mgr = get_manager()
+    # 读回新配置
+    new_configs, _new_errors = load_configs()
+    new_cfg = next((c for c in new_configs if c.server_id == server_id), None)
+    if new_cfg is not None:
+        await mgr.reconnect(new_cfg)
+        _reregister_mcp_tools(request.app.state.registry)
+
+    return {"server_id": server_id, "ok": True}
+
+
+@router.delete("/mcp/servers/{server_id}", summary="删除 MCP 服务器")
+async def mcp_server_delete(
+    server_id: str, request: Request
+) -> dict[str, bool]:
+    """从配置里删掉并关闭连接。"""
+    from app.modules.mcp.loader import remove_server
+    from app.modules.mcp.manager import get_manager
+
+    ok = remove_server(server_id)
+    if not ok:
+        raise NotFoundError(
+            f"服务器 {server_id} 不存在", code="server_not_found"
+        )
+
+    # 断开并清理工具
+    mgr = get_manager()
+    old = mgr._conns.pop(server_id, None)  # noqa: SLF001
+    if old is not None:
+        await old.stop()
+    # 检查是否还有其他连接，没有则全部摘掉
+    if not mgr._conns:  # noqa: SLF001
+        for old_name in [n for n in request.app.state.registry.names() if n.startswith("mcp__")]:
+            request.app.state.registry.unregister(old_name)
+    else:
+        _reregister_mcp_tools(request.app.state.registry)
+
+    return {"ok": True}
 
 
 @router.get("/macros", summary="宏列表（前端提词器用）")

@@ -41,6 +41,8 @@ export interface StartChatOptions {
   /** 图片的 data URL。只在这一轮进 LLM 请求，不进历史 */
   images?: string[];
   attachment_ids?: string[];
+  /** 这次对话用哪个智能体。空串 = 不指定（直接用模型对话） */
+  agent_id?: string;
 }
 
 /** 后端返回的结构化错误 */
@@ -101,6 +103,7 @@ export function startChat(
           content: opts.content,
           refs: opts.refs ?? [],
           attachment_ids: opts.attachment_ids ?? [],
+          agent_id: opts.agent_id ?? "",
         }),
         signal: ctrl.signal,
       });

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Bot,
   Clock,
   Download,
   MessageSquarePlus,
@@ -227,6 +228,20 @@ export default function Sidebar() {
         >
           <Clock size={16} aria-hidden />
           定时任务
+        </NavLink>
+        <NavLink
+          to="/settings?tab=agents"
+          className={({ isActive }) =>
+            clsx(
+              "flex items-center gap-2 rounded-md px-2.5 py-2 text-sm transition",
+              isActive
+                ? "bg-[var(--color-surface-2)]"
+                : "text-[var(--color-muted)] hover:bg-[var(--color-surface-2)]/60",
+            )
+          }
+        >
+          <Bot size={16} aria-hidden />
+          智能体
         </NavLink>
         <NavLink
           to="/settings"

@@ -15,15 +15,16 @@
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 if TYPE_CHECKING:
-    from app.modules.agent.tools.base import ToolContext, ToolResult
-    from app.modules.agent.loop import _Accum, LoopResult
+    from app.modules.agent.loop import _Accum
     from app.modules.agent.messages import Msg
+    from app.modules.agent.tools.base import ToolContext, ToolResult
 
 log = structlog.get_logger(__name__)
 

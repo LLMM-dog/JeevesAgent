@@ -110,6 +110,8 @@ interface ChatState {
   workDir: string;
   /** 这次对话用哪个模型。空串 = 跟随功能位绑定 */
   modelPk: string;
+  /** 这次对话用哪个智能体。空串 = 未选择（直接用模型对话） */
+  agentId: string;
   /**
    * 实际生效的模型窗口。
    *
@@ -157,6 +159,8 @@ interface ChatState {
   setWorkDir: (dir: string) => Promise<void>;
   /** 设置这次对话用哪个模型。传空串回到默认绑定 */
   setWorkModel: (pk: string) => Promise<void>;
+  /** 设置这次对话用哪个智能体。传空串清除选择 */
+  setAgentId: (id: string) => Promise<void>;
   setVisionMode: (on: boolean) => Promise<void>;
   /** 轮询后台正在跑的 run，直到它结束 */
   watchBackgroundRun: (sessionId: string) => Promise<void>;
@@ -271,6 +275,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   approval: null,
   workDir: "",
   modelPk: "",
+  agentId: "",
   contextWindow: 0,
   approvalMode: "manual",
   visionMode: false,
@@ -341,6 +346,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 空串兜底：老会话在迁移前没有这个字段
         workDir: session.work_dir ?? "",
         modelPk: session.model_pk ?? "",
+        agentId: session.agent_id ?? "",
         contextWindow: session.context_window ?? 0,
         visionMode: session.vision_mode ?? false,
         // 【必须读回来】。不读的话切会话后开关显示的是上一个会话的状态 ——
@@ -473,7 +479,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const isStillCurrent = () => get().sessionId === sessionId;
 
     const cancel = startChat(
-      { session_id: sessionId, content, images: images ?? [], refs: refs ?? [] },
+      { session_id: sessionId, content, images: images ?? [], refs: refs ?? [], agent_id: get().agentId },
       {
         onEvent: (name, data) => {
           if (!isStillCurrent()) return;
@@ -573,6 +579,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 窗口也要跟着变 —— 换成 65K 的模型后，条还按 131K 画的话
     // 占用比例会显示成一半，用户以为还很空。
     set({ modelPk: s.model_pk ?? "", contextWindow: s.context_window ?? 0 });
+  },
+
+  async setAgentId(id) {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    // PATCH session 存 agent_id
+    const s = await api.patchSession(sessionId, { agent_id: id });
+    const update: Partial<ChatState> = { agentId: s.agent_id ?? "" };
+
+    // 如果智能体绑定了模型，自动切换到该模型
+    if (id) {
+      try {
+        const agent = await api.agents.get(id);
+        if (agent?.model_id) {
+          const m = await api.patchSession(sessionId, { model_pk: agent.model_id });
+          update.modelPk = m.model_pk ?? "";
+          update.contextWindow = m.context_window ?? 0;
+        }
+      } catch {
+        // 获取智能体信息失败不阻塞切换
+      }
+    }
+
+    set(update as Pick<ChatState, keyof ChatState>);
   },
 
   async setWorkDir(dir) {

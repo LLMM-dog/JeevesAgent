@@ -6,7 +6,7 @@ import clsx from "clsx";
 import { api } from "../lib/api";
 
 /**
- * 往已有供应商下加模型。
+ * 往已有端点下加模型。
  *
  * ## 为什么要自动拉列表
  *
@@ -19,7 +19,7 @@ import { api } from "../lib/api";
  * ## 为什么保留手填
  *
  * 有些端点不实现 /v1/models，或者返回的列表不全。拉不到时必须还能
- * 手填，否则这个供应商就没法加模型了。
+ * 手填，否则这个端点就没法加模型了。
  */
 export function AddModelForm({
   providerId,

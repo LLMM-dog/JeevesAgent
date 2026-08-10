@@ -300,7 +300,7 @@ async def main() -> int:
                 p.unlink(missing_ok=True)
             for pid in created:
                 await c.delete(f"{BASE}/api/providers/{pid}")
-            print(f"（已清理 {len(created)} 个供应商、{len(made)} 个临时文件）")
+            print(f"（已清理 {len(created)} 个端点、{len(made)} 个临时文件）")
 
 
 if __name__ == "__main__":

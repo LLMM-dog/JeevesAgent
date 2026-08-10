@@ -301,7 +301,7 @@ class OpenAICompatLLM:
 
         if status in (401, 403):
             return ProviderError(
-                "API Key 无效或无权限", hint=f"供应商返回：{detail[:200]}"
+                "API Key 无效或无权限", hint=f"模型返回：{detail[:200]}"
             )
         if status == 404:
             return ProviderError(
@@ -363,7 +363,7 @@ class OpenAICompatLLM:
         choice = choices[0]
         delta = choice.get("delta") or {}
 
-        # 推理内容单独一类。不同供应商字段名不一致，在这里归一：
+        # 推理内容单独一类。不同模型字段名不一致，在这里归一：
         #   DeepSeek-R1 → reasoning_content
         #   其它         → reasoning
         # 前端要折叠显示思维链，不能混在正文里。
@@ -404,7 +404,7 @@ class OpenAICompatLLM:
         探测模型列表。
 
         用 AsyncClient 且超时短（15s）—— 在 async 路由里用同步 httpx.get()
-        且没有 timeout，会阻塞整个 event loop，供应商域名不可达时能挂很久。
+        且没有 timeout，会阻塞整个 event loop，模型域名不可达时能挂很久。
 
         探测是交互式操作，用户在等着看结果，不能给 300 秒。
         """
@@ -546,7 +546,7 @@ class OpenAICompatLLM:
         msg = choices[0].get("message") or {}
         content = msg.get("content")
         if isinstance(content, list):
-            # 某些供应商回数组形式，取其中的 text 片段
+            # 某些模型回数组形式，取其中的 text 片段
             return " ".join(
                 p.get("text", "") for p in content if isinstance(p, dict)
             ).strip()

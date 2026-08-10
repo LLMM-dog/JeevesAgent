@@ -16,7 +16,7 @@ Todo 是**给用户看进度的**，不是给模型做规划的。
 
 本项目：
 
-- **落库**（`todo` 表，见 [../architecture/schema.md](../architecture/schema.md#todo)）。会话关掉再打开进度还在。
+- **落库**（`todo` 表，见 [../architecture/data-schema.md](../architecture/data-schema.md#todo)）。会话关掉再打开进度还在。
 - **不接 Todoist**。不引外部账号依赖。
 
 ## 数据模型要点

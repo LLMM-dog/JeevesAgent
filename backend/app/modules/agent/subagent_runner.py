@@ -26,7 +26,7 @@ from app.modules.agent.loop import AgentLoop
 from app.modules.agent.messages import Msg
 from app.modules.agent.specs import AgentSpec
 from app.modules.agent.tools.base import ToolContext, ToolRegistry, ToolResult
-from app.modules.provider import service as provider_service
+from app.modules.endpoint import service as provider_service
 
 log = structlog.get_logger(__name__)
 

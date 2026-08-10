@@ -45,6 +45,7 @@ class Session(Base, TimestampMixin):
     # 不加外键：模型被删掉时这里会悬空，但那时回落到默认绑定就行，
     # 比级联删掉整个会话好得多。取用时校验存在性。
     model_pk: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 
     workspace_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("workspace.id"), nullable=False

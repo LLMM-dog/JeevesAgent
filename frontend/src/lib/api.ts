@@ -7,6 +7,7 @@
 
 import { ApiError } from "./sse";
 import type {
+  AgentItem,
   BindingOut,
   BrowseResult,
   CronRun,
@@ -17,7 +18,6 @@ import type {
   MetaResponse,
   ModelItem,
   ModelOut,
-  PersonaFile,
   ProbeResponse,
   ProviderOut,
   Purpose,
@@ -221,9 +221,9 @@ export const api = {
   },
 
 /**
-   * 拉这个供应商可用的模型列表。
+   * 拉这个端点可用的模型列表。
    *
-   * 用已存的端点和 Key —— 往【已有】供应商下加模型时，让用户再填一遍
+   * 用已存的端点和 Key —— 往【已有】端点下加模型时，让用户再填一遍
    * base_url 和 Key 是荒谬的（而且 Key 存的是密文，前端拿不到明文）。
    *
    * already_added 标出已加过的，前端置灰。不标的话用户点了才知道重复。
@@ -276,19 +276,6 @@ export const api = {
 
   deleteModel: (pk: string) =>
     request<{ ok: boolean }>(`/models/${pk}`, { method: "DELETE" }),
-
-  // ── 人格与偏好 ──
-
-  personas: () => request<{ items: PersonaFile[] }>("/personas"),
-
-  savePersona: (key: string, content: string) =>
-    request<PersonaFile>(`/personas/${key}`, {
-      method: "PUT",
-      json: { content },
-    }),
-
-  resetPersona: (key: string) =>
-    request<PersonaFile>(`/personas/${key}/reset`, { method: "POST" }),
 
   // ── 文件访问：白名单与目录浏览 ──
 
@@ -449,6 +436,66 @@ export const api = {
       tools: number;
       config_errors: string[];
     }>("/mcp/reload", { method: "POST" }),
+
+  mcpGetServer: (serverId: string) =>
+    request<{
+      server_id: string;
+      transport: string;
+      enabled: boolean;
+      url: string;
+      headers: Record<string, string>;
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      cwd: string;
+      command_approved: boolean;
+      status: string;
+      error: string;
+      tool_count: number;
+      tools: { name: string; raw_name: string; description: string }[];
+      estimated_tokens: number;
+      connected_at: number | null;
+    }>(`/mcp/servers/${encodeURIComponent(serverId)}`),
+
+  mcpAdd: (body: {
+    server_id: string;
+    transport: string;
+    url?: string;
+    headers?: Record<string, string>;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    cwd?: string;
+    enabled?: boolean;
+  }) =>
+    request<{ server_id: string; transport: string; enabled: boolean }>(
+      "/mcp/servers",
+      { method: "POST", json: body },
+    ),
+
+  mcpUpdate: (
+    serverId: string,
+    body: {
+      transport?: string;
+      url?: string;
+      headers?: Record<string, string>;
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+      enabled?: boolean;
+    },
+  ) =>
+    request<{ server_id: string; ok: boolean }>(
+      `/mcp/servers/${encodeURIComponent(serverId)}`,
+      { method: "PATCH", json: body },
+    ),
+
+  mcpDelete: (serverId: string) =>
+    request<{ ok: boolean }>(
+      `/mcp/servers/${encodeURIComponent(serverId)}`,
+      { method: "DELETE" },
+    ),
 
   // ---- 长期记忆 ----
   listMemories: (opts?: { includeArchived?: boolean; theme?: string }) => {
@@ -670,6 +717,8 @@ export const api = {
     body: Partial<{
       /** 这次对话用哪个模型。传空串回到默认绑定 */
       model_pk: string;
+      /** 这次对话用哪个智能体。传空串清除选择 */
+      agent_id: string;
       /** 这次对话的工作目录。传空串清除 */
       work_dir: string;
       title: string;
@@ -718,7 +767,7 @@ export const api = {
       json: { call_id, ...payload },
     }),
 
-  // ─────────────────────────── 供应商 ───────────────────────────
+  // ─────────────────────────── 端点 ───────────────────────────
 
   probe: (base_url: string, api_key: string) =>
     request<ProbeResponse>("/providers/probe", {
@@ -781,4 +830,28 @@ export const api = {
     request<{ archived_count: number }>(`/sessions/${sessionId}/todos/archive`, {
       method: "POST",
     }),
+
+  // ── 智能体 ──
+
+  agents: {
+    list: (opts?: boolean | { hidden?: boolean; using_skill?: string; using_mcp?: string }) => {
+      const q = new URLSearchParams();
+      if (typeof opts === "boolean") {
+        q.set("hidden", String(opts));
+      } else if (opts) {
+        if (opts.hidden !== undefined) q.set("hidden", String(opts.hidden));
+        if (opts.using_skill) q.set("using_skill", opts.using_skill);
+        if (opts.using_mcp) q.set("using_mcp", opts.using_mcp);
+      }
+      const qs = q.toString();
+      return request<AgentItem[]>(`/agents${qs ? `?${qs}` : ""}`);
+    },
+    get: (id: string) => request<AgentItem>(`/agents/${id}`),
+    create: (data: Partial<AgentItem>) =>
+      request<AgentItem>("/agents", { method: "POST", json: data }),
+    update: (id: string, data: Partial<AgentItem>) =>
+      request<AgentItem>(`/agents/${id}`, { method: "PATCH", json: data }),
+    delete: (id: string) =>
+      request<{ ok: boolean }>(`/agents/${id}`, { method: "DELETE" }),
+  },
 };

@@ -45,6 +45,7 @@ class SessionDetail(SessionBrief):
     private_mode: bool
     amnesia_mode: bool
     vision_mode: bool
+    agent_id: str = ""
 
 
 class SessionListResponse(BaseModel):
@@ -74,6 +75,7 @@ class PatchSessionRequest(BaseModel):
     private_mode: bool | None = None
     amnesia_mode: bool | None = None
     vision_mode: bool | None = None
+    agent_id: str | None = None
 
 
 class MessageOut(BaseModel):
@@ -119,6 +121,7 @@ class ChatRequest(BaseModel):
     #
     # 服务端仍然会校验（魔数 + 大小 + 数量），只信前端校验等于没校验。
     images: list[str] = Field(default_factory=list)
+    agent_id: str = ""  # 选择的智能体，空串=默认
 
 
 class CancelResponse(BaseModel):
@@ -137,7 +140,7 @@ class AnswerRequest(BaseModel):
     selected: list[str] | None = None
 
 
-# ─────────────────────────── provider ───────────────────────────
+# ─────────────────────────── endpoint ───────────────────────────
 
 
 class ProbeRequest(BaseModel):
@@ -158,20 +161,20 @@ class ProbeResponse(BaseModel):
     models: list[ProbedModelOut]
 
 
-class CreateProviderModel(BaseModel):
+class CreateEndpointModel(BaseModel):
     model_id: str
     display_name: str = ""
     context_window: int | None = None
 
 
-class CreateProviderRequest(BaseModel):
+class CreateEndpointRequest(BaseModel):
     name: str = Field(min_length=1)
     base_url: str = Field(min_length=1)
     api_key: str = Field(min_length=1)
-    models: list[CreateProviderModel] = Field(default_factory=list)
+    models: list[CreateEndpointModel] = Field(default_factory=list)
 
 
-class ProviderOut(BaseModel):
+class EndpointOut(BaseModel):
     id: str
     name: str
     base_url: str
@@ -183,16 +186,16 @@ class ProviderOut(BaseModel):
     created_at: int
 
 
-class ProviderListResponse(BaseModel):
-    items: list[ProviderOut]
+class EndpointListResponse(BaseModel):
+    items: list[EndpointOut]
 
 
 class ModelOut(BaseModel):
     id: str
-    provider_id: str
-    # 供应商名。对话页的切换菜单要显示"供应商 / 模型"，
-    # 只有 provider_id 的话前端还得再查一次
-    provider_name: str = ""
+    endpoint_id: str
+    # 端点名。对话页下拉显示 "端点 / 模型"。
+    # 只有 endpoint_id 的话前端还得再查一次
+    endpoint_name: str = ""
     model_id: str
     display_name: str
     context_window: int
@@ -206,9 +209,9 @@ class ModelOut(BaseModel):
 
 
 class ModelCreate(BaseModel):
-    """往已有供应商下加一个模型。不用重建供应商。"""
+    """往已有模型组下加一个模型。不用重建端点。"""
 
-    provider_id: str
+    endpoint_id: str
     model_id: str = Field(..., min_length=1)
     display_name: str = ""
     context_window: int = Field(32768, ge=1024)
@@ -222,21 +225,12 @@ class ModelPatch(BaseModel):
     price_out_per_1m: float | None = None
 
 
-class PersonaFile(BaseModel):
-    key: str
-    filename: str
-    label: str
-    hint: str
-    content: str
-    exists: bool = True
-
-
-class PersonaUpdate(BaseModel):
-    content: str
-
-
 class ModelListResponse(BaseModel):
     items: list[ModelOut]
+
+
+class VisionVerifyRequest(BaseModel):
+    model_pk: str
 
 
 class BindingOut(BaseModel):
@@ -246,7 +240,7 @@ class BindingOut(BaseModel):
     model_pk: str
     # join 出来给前端显示"DeepSeek / deepseek-chat"，省一次往返
     model_id: str
-    provider_name: str
+    endpoint_name: str
 
 
 class BindingListResponse(BaseModel):
@@ -390,3 +384,33 @@ class SkillToggle(BaseModel):
 
 class McpToggle(BaseModel):
     enabled: bool
+
+
+class McpServerCreate(BaseModel):
+    """添加 MCP 服务器的请求体。"""
+
+    server_id: str = Field(..., pattern=r"^[a-zA-Z0-9_-]+$")
+    transport: str = Field(default="http", pattern=r"^(http|stdio)$")
+    # http 模式
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    # stdio 模式
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str = ""
+    # 通用
+    enabled: bool = True
+
+
+class McpServerUpdate(BaseModel):
+    """修改 MCP 服务器的请求体。只传要改的字段。"""
+
+    transport: str | None = Field(default=None, pattern=r"^(http|stdio)$")
+    url: str | None = None
+    headers: dict[str, str] | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    enabled: bool | None = None

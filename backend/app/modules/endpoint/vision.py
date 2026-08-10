@@ -33,7 +33,7 @@ log = structlog.get_logger(__name__)
 
 # 支持的图片类型。
 #
-# 【白名单而非黑名单】。传 svg 上去的话，某些供应商会当文本解析，
+# 【白名单而非黑名单】。传 svg 上去的话，某些模型会当文本解析，
 # 而 svg 里能塞 <script> 和外部引用 —— 那是一条注入路径。
 ALLOWED_MIME = {
     "image/png": ".png",
@@ -44,7 +44,7 @@ ALLOWED_MIME = {
 
 # 单张图上限 8MB（编码前）。
 #
-# base64 会让体积涨约 33%，8MB 变 10.7MB —— 已经接近多数供应商的
+# base64 会让体积涨约 33%，8MB 变 10.7MB —— 已经接近多数模型的
 # 请求体上限。再大的图应该先压缩。
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
@@ -66,7 +66,7 @@ def _make_probe_png() -> str:
         {"code":20015,"message":"image_url provided is not a valid image."}
 
     而同一个模型换成 16x16 纯色图立刻返回 200 并正确答出"红色"。
-    区别在于**全透明像素解码后没有任何可见内容**，部分供应商的图片
+    区别在于**全透明像素解码后没有任何可见内容**，部分模型的图片
     校验器认为这不是有效图片。
 
     这个假阴性很危险：它会把一个真正支持视觉的模型判成"不支持"，
@@ -123,7 +123,7 @@ class ImagePart:
         转成 OpenAI 兼容的 image_url 结构。
 
         用 data URL 而不是 http URL：图片存在本地工作区，
-        给供应商一个 localhost 地址它拉不到。
+        给模型一个 localhost 地址它拉不到。
         """
         return {
             "type": "image_url",
@@ -138,7 +138,7 @@ def validate_image(raw: bytes, mime: str) -> tuple[bool, str]:
     ## 为什么要查魔数而不只看 MIME
 
     MIME 来自前端声明，可以随便填。把一个 .exe 说成 image/png 上传，
-    然后它被 base64 塞进请求发给供应商 —— 虽然供应商会拒绝，
+    然后它被 base64 塞进请求发给模型 —— 虽然模型会拒绝，
     但我们不该把用户的任意文件内容外发。
     """
     if mime not in ALLOWED_MIME:
@@ -150,7 +150,7 @@ def validate_image(raw: bytes, mime: str) -> tuple[bool, str]:
         mb = len(raw) / 1024 / 1024
         return False, (
             f"图片 {mb:.1f}MB 超过上限 {MAX_IMAGE_BYTES // 1024 // 1024}MB。"
-            "base64 编码会再涨三分之一，多数供应商会直接拒绝"
+            "base64 编码会再涨三分之一，多数模型会直接拒绝"
         )
     if not raw:
         return False, "图片是空的"

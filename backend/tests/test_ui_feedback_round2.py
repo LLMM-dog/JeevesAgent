@@ -5,7 +5,7 @@
 
 1. 启用/禁用报"请求参数不合法" —— 前端用 body 而不是 json，
    请求少了 Content-Type，FastAPI 直接 422
-2. 再次添加供应商报"无法添加" —— 应该并入已有分组并去重模型
+2. 再次添加端点报"无法添加" —— 应该并入已有分组并去重模型
 3. 加模型要手敲名字 —— 应该自动拉可用列表 + 模糊搜索
 4. 切换模型后按钮文字不更新 —— zustand 状态没被 invalidateQueries 影响
 5. 工作目录按钮该直接显示当前目录，长路径优先保留尾部
@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest_asyncio
 from app.core.crypto import encrypt
-from app.core.ids import provider_id
-from app.modules.provider.models import Model, Provider
+from app.core.ids import endpoint_id
+from app.modules.endpoint.models import Endpoint, Model
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,8 +87,8 @@ class TestApiUsesJsonNotBody:
         这条不是在测我们的代码，是在锁住"为什么必须用 json"——
         以后有人想改回 body 时，这条会告诉他后果。
         """
-        p = Provider(
-            id=provider_id(),
+        p = Endpoint(
+            id=endpoint_id(),
             name="ct-test",
             base_url="https://example.com/v1",
             api_key_cipher=encrypt("sk-test-x-000000000000"),
@@ -97,7 +97,7 @@ class TestApiUsesJsonNotBody:
         await db.flush()
         m = Model(
             id="mdl_cttest0000000000000000",
-            provider_id=p.id,
+            endpoint_id=p.id,
             model_id="m1",
             context_window=8192,
             enabled=1,
@@ -135,10 +135,10 @@ class TestApiUsesJsonNotBody:
 
 class TestProviderUpsert:
     """
-    第 2 条：再次添加供应商报"无法添加"。
-
+    第 2 条：再次添加端点报"无法添加"。
+    先加端点，之后想往里加模型，于是再次走「添加端点」—— 他不想新建端点，只想往里加模型。
     用户的实际路径是"先加端点，之后想再加几个模型，于是又走一次
-    添加供应商"—— 他不想新建供应商，只想往里加模型。
+    添加端点"—— 他不想新建端点，只想往里加模型。
     """
 
     async def test_same_name_merges(self, client: AsyncClient) -> None:
@@ -148,15 +148,15 @@ class TestProviderUpsert:
             "api_key": "sk-test-first-000000",
             "models": [{"model_id": "m-a", "context_window": 8192}],
         }
-        r1 = await client.post("/api/providers", json=body)
+        r1 = await client.post("/api/endpoints", json=body)
         assert r1.status_code == 201
         pid = r1.json()["id"]
 
         # 第二次：加一个新模型
         body2 = dict(body, models=[{"model_id": "m-b", "context_window": 8192}])
-        r2 = await client.post("/api/providers", json=body2)
+        r2 = await client.post("/api/endpoints", json=body2)
         assert r2.status_code == 201, r2.text
-        assert r2.json()["id"] == pid, "同名应该并入同一个供应商，不是新建"
+        assert r2.json()["id"] == pid, "同名应该并入同一个端点，不是新建"
         assert r2.json()["model_count"] == 2
 
     async def test_same_endpoint_and_key_merges(self, client: AsyncClient) -> None:
@@ -169,9 +169,9 @@ class TestProviderUpsert:
             "api_key": "sk-test-identical-11111",
             "models": [{"model_id": "x-1", "context_window": 8192}],
         }
-        r1 = await client.post("/api/providers", json=dict(base, name="第一次"))
+        r1 = await client.post("/api/endpoints", json=dict(base, name="第一次"))
         r2 = await client.post(
-            "/api/providers",
+            "/api/endpoints",
             json=dict(base, name="第二次", models=[{"model_id": "x-2"}]),
         )
         assert r1.json()["id"] == r2.json()["id"]
@@ -185,10 +185,10 @@ class TestProviderUpsert:
             "models": [{"model_id": "s-1", "context_window": 8192}],
         }
         r1 = await client.post(
-            "/api/providers", json=dict(base, name="个人", api_key="sk-fake-personal-0001")
+            "/api/endpoints", json=dict(base, name="个人", api_key="sk-fake-personal-0001")
         )
         r2 = await client.post(
-            "/api/providers", json=dict(base, name="团队", api_key="sk-fake-team-0002")
+            "/api/endpoints", json=dict(base, name="团队", api_key="sk-fake-team-0002")
         )
         assert r1.json()["id"] != r2.json()["id"]
 
@@ -196,7 +196,7 @@ class TestProviderUpsert:
         """
         重复的模型要静默跳过。
 
-        不去重的话 (provider_id, model_id) 唯一索引会抛 IntegrityError，
+        不去重的话 (endpoint_id, model_id) 唯一索引会抛 IntegrityError，
         而那个报错指向数据库约束，完全不提示"这个模型你已经加过了"。
         """
         body = {
@@ -208,12 +208,12 @@ class TestProviderUpsert:
                 {"model_id": "same-one", "context_window": 8192},
             ],
         }
-        r = await client.post("/api/providers", json=body)
+        r = await client.post("/api/endpoints", json=body)
         assert r.status_code == 201
         assert r.json()["model_count"] == 1, "同一次请求里的重复也要去掉"
 
         # 再来一次，仍然只有一个
-        r2 = await client.post("/api/providers", json=body)
+        r2 = await client.post("/api/endpoints", json=body)
         assert r2.json()["model_count"] == 1
 
     async def test_merge_updates_key(self, client: AsyncClient, db: AsyncSession) -> None:
@@ -227,11 +227,11 @@ class TestProviderUpsert:
             "api_key": "sk-test-rotated-000001",
             "models": [{"model_id": "k-1", "context_window": 8192}],
         }
-        r1 = await client.post("/api/providers", json=body)
+        r1 = await client.post("/api/endpoints", json=body)
         old_hint = r1.json()["key_hint"]
 
         r2 = await client.post(
-            "/api/providers", json=dict(body, api_key="sk-test-rotated-000002")
+            "/api/endpoints", json=dict(body, api_key="sk-test-rotated-000002")
         )
         assert r2.json()["key_hint"] != old_hint
 
@@ -241,7 +241,7 @@ class TestAvailableModels:
 
     async def test_endpoint_exists(self, client: AsyncClient) -> None:
         r = await client.get("/api/providers/prv_nope/available-models")
-        # 供应商不存在是 404，不是 405 —— 说明路由注册了
+        # 端点不存在是 404，不是 405 —— 说明路由注册了
         assert r.status_code == 404
 
     def test_form_has_fuzzy_search(self) -> None:
@@ -255,7 +255,7 @@ class TestAvailableModels:
     def test_form_allows_manual_entry(self) -> None:
         """
         有些端点不实现 /v1/models。拉不到时必须还能手填，
-        否则这个供应商就没法加模型了。
+        否则这个端点就没法加模型了。
         """
         src = (FRONT / "components" / "AddModelForm.tsx").read_text(encoding="utf-8")
         assert "拉不到模型列表" in src, "没有处理拉取失败"

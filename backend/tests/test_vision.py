@@ -15,7 +15,7 @@ import base64
 from typing import Any
 
 import pytest
-from app.modules.provider import vision
+from app.modules.endpoint import vision
 
 
 def _png(size: int = 64) -> bytes:
@@ -49,7 +49,7 @@ class TestValidateImage:
         """
         白名单而非黑名单。
 
-        svg 里能塞 <script> 和外部引用 —— 某些供应商会当文本解析，
+        svg 里能塞 <script> 和外部引用 —— 某些服务商会当文本解析，
         那是一条注入路径。
         """
         ok, err = vision.validate_image(b"<svg></svg>", "image/svg+xml")
@@ -61,7 +61,7 @@ class TestValidateImage:
         查魔数而不只看 MIME。
 
         MIME 来自前端声明，可以随便填。把 .exe 说成 image/png 上传，
-        内容就会被 base64 发给供应商。
+        内容就会被 base64 发给服务商。
         """
         ok, err = vision.validate_image(b"MZ\x90\x00fake exe", "image/png")
         assert not ok
@@ -152,7 +152,7 @@ class TestBuildContent:
     def test_uses_data_url_not_http(self) -> None:
         """
         用 data URL 而不是 http URL —— 图片存在本地，
-        给供应商一个 localhost 地址它拉不到。
+        给服务商一个 localhost 地址它拉不到。
         """
         img = vision.ImagePart(mime="image/png", data_b64="abc")
         assert img.to_api()["image_url"]["url"].startswith("data:")
@@ -245,7 +245,7 @@ class TestProbeVision:
             {"code":20015,"message":"image_url provided is not a valid image."}
 
         而同一个模型换成 16x16 纯色图立刻 200 并正确答出"红色"。
-        全透明像素解码后没有任何可见内容，部分供应商的校验器认为
+        全透明像素解码后没有任何可见内容，部分服务商的校验器认为
         这不是有效图片。
 
         后果是把一个真正支持视觉的模型判成"不支持"，而错误信息说的是
@@ -258,7 +258,7 @@ class TestProbeVision:
         w, h, _bitdepth, colortype = struct.unpack(">IIBB", raw[16:26])
         # colortype 2 = RGB 真彩色（无 alpha）。4 和 6 带 alpha，不要用
         assert colortype == 2, f"核验图不该带 alpha 通道（colortype={colortype}）"
-        # 不能是 1x1 —— 太小的图会被部分供应商的校验器拒
+        # 不能是 1x1 —— 太小的图会被部分服务商的校验器拒
         assert w >= 8 and h >= 8, f"核验图太小：{w}x{h}"
 
     async def test_invalid_image_error_flagged_as_suspicious(self) -> None:
@@ -456,10 +456,10 @@ class TestThreeStateVision:
         做成布尔并默认 false 的话，用户会看到"不支持视觉"却不知道
         那只是"没测过"。
 
-        直接读列默认值，不插库 —— provider_id 有外键，插库要先造供应商，
+        直接读列默认值，不插库 —— endpoint_id 有外键，插库要先造端点，
         而这个测试关心的只是"默认值是什么"。
         """
-        from app.modules.provider.models import Model
+        from app.modules.endpoint.models import Model
 
         assert Model.__table__.c.supports_vision.default.arg == "unknown"
 
@@ -468,12 +468,12 @@ class TestThreeStateVision:
         ResolvedModel.supports_vision 是布尔，只有 "true" 才映射成 True。
         unknown 要映射成 False —— 未知不能当支持用。
         """
-        from app.modules.provider.models import Model
+        from app.modules.endpoint.models import Model
 
         for state, expected in (("true", True), ("false", False), ("unknown", False)):
             m = Model(
                 id=f"mdl_{state}",
-                provider_id="prv_x",
+                endpoint_id="prv_x",
                 model_id="m",
                 supports_vision=state,
             )

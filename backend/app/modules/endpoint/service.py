@@ -1,5 +1,5 @@
 """
-供应商与模型服务。
+端点与模型服务。
 
 核心是 probe_models —— 用户点名要的"不用手动输入模型名"。
 """
@@ -11,12 +11,12 @@ import structlog
 from app.core.crypto import decrypt, encrypt, key_hint
 from app.core.events import Ev, emit
 from app.core.exceptions import NoModelBoundError, NotFoundError
-from app.core.ids import binding_id, model_id, provider_id
+from app.core.ids import binding_id, endpoint_id, model_id
 from app.core.time import now_ms
 from app.infra.llm.openai_compat import normalize_base_url
 from app.infra.llm.port import LLMPort, ResolvedModel
-from app.modules.provider.models import Model, ModelBinding, Provider
-from app.modules.provider.windows import looks_non_chat, lookup_window
+from app.modules.endpoint.models import Endpoint, Model, ModelBinding
+from app.modules.endpoint.windows import looks_non_chat, lookup_window
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,22 +62,22 @@ async def probe_models(
     return normalized, out
 
 
-async def create_provider(
+async def create_endpoint(
     db: AsyncSession,
     *,
     name: str,
     base_url: str,
     api_key: str,
     models: list[dict[str, Any]],
-) -> Provider:
+) -> Endpoint:
     """
-    建 provider + 它的 model。同名或同端点则【并入已有分组】。
+    建端点 + 它的 model。同名或同端点则【并入已有分组】。
 
     ## 为什么不再报"名称已存在"
 
     原来同名直接 409。但用户的实际操作路径是：先加一个端点，之后想
-    再加几个模型，于是又走一次「添加供应商」——得到"无法添加"。
-    而他并不想新建供应商，只是想往这个端点下加模型。
+    再加几个模型，于是又走一次「添加端点」——得到"无法添加"。
+    而他并不想新建端点，只是想往这个端点下加模型。
 
     现在的行为：
 
@@ -93,20 +93,20 @@ async def create_provider(
 
     # 先按名字找，再按"同端点同 Key"找
     p = (
-        await db.execute(select(Provider).where(Provider.name == name))
+        await db.execute(select(Endpoint).where(Endpoint.name == name))
     ).scalar_one_or_none()
     if p is None:
         p = (
             await db.execute(
-                select(Provider).where(
-                    Provider.base_url == norm_url, Provider.key_hint == hint
+                select(Endpoint).where(
+                    Endpoint.base_url == norm_url, Endpoint.key_hint == hint
                 )
             )
         ).scalars().first()
 
     if p is None:
-        p = Provider(
-            id=provider_id(),
+        p = Endpoint(
+            id=endpoint_id(),
             name=name,
             base_url=norm_url,
             api_key_cipher=encrypt(api_key),
@@ -125,19 +125,19 @@ async def create_provider(
     # 【必须显式 flush】。本项目不声明 relationship()（async 下惰性加载
     # 会抛 MissingGreenlet，是个更大的坑），而没有 relationship 时
     # SQLAlchemy 的 unit of work 不保证父行先插 —— 实测它会先 INSERT model
-    # 再 INSERT provider，在 foreign_keys=ON 下直接 IntegrityError。
+    # 再 INSERT endpoint，在 foreign_keys=ON 下直接 IntegrityError。
     # 报错指向 model 表，完全不提示"顺序不对"。
     await db.flush()
 
     # 已有的模型 id，用来去重。
     #
-    # 不去重的话 (provider_id, model_id) 上的唯一索引会抛
+    # 不去重的话 (endpoint_id, model_id) 上的唯一索引会抛
     # IntegrityError，而那个报错指向数据库约束，
     # 完全不提示"这个模型你已经加过了"。
     have = {
         m.model_id
         for m in (
-            await db.execute(select(Model).where(Model.provider_id == p.id))
+            await db.execute(select(Model).where(Model.endpoint_id == p.id))
         ).scalars()
     }
 
@@ -154,7 +154,7 @@ async def create_provider(
         db.add(
             Model(
                 id=model_id(),
-                provider_id=p.id,
+                endpoint_id=p.id,
                 model_id=mid,
                 display_name=str(m.get("display_name", "") or ""),
                 context_window=int(window),
@@ -166,34 +166,34 @@ async def create_provider(
     return p
 
 
-async def list_providers(db: AsyncSession) -> list[tuple[Provider, int]]:
-    providers = list((await db.execute(select(Provider))).scalars())
-    out: list[tuple[Provider, int]] = []
-    for p in providers:
+async def list_endpoints(db: AsyncSession) -> list[tuple[Endpoint, int]]:
+    endpoints = list((await db.execute(select(Endpoint))).scalars())
+    out: list[tuple[Endpoint, int]] = []
+    for p in endpoints:
         models = list(
-            (await db.execute(select(Model).where(Model.provider_id == p.id))).scalars()
+            (await db.execute(select(Model).where(Model.endpoint_id == p.id))).scalars()
         )
         out.append((p, len(models)))
     return out
 
 
-async def get_provider(db: AsyncSession, pid: str) -> Provider:
-    p = (await db.execute(select(Provider).where(Provider.id == pid))).scalar_one_or_none()
+async def get_endpoint(db: AsyncSession, pid: str) -> Endpoint:
+    p = (await db.execute(select(Endpoint).where(Endpoint.id == pid))).scalar_one_or_none()
     if p is None:
-        raise NotFoundError("供应商不存在", code="provider_not_found")
+        raise NotFoundError("端点不存在", code="endpoint_not_found")
     return p
 
 
-async def delete_provider(db: AsyncSession, pid: str) -> None:
-    await get_provider(db, pid)
-    await db.execute(delete(Provider).where(Provider.id == pid))
+async def delete_endpoint(db: AsyncSession, pid: str) -> None:
+    await get_endpoint(db, pid)
+    await db.execute(delete(Endpoint).where(Endpoint.id == pid))
     await db.commit()
 
 
-async def list_models(db: AsyncSession, provider_id_: str | None = None) -> list[Model]:
+async def list_models(db: AsyncSession, endpoint_id_: str | None = None) -> list[Model]:
     stmt = select(Model)
-    if provider_id_:
-        stmt = stmt.where(Model.provider_id == provider_id_)
+    if endpoint_id_:
+        stmt = stmt.where(Model.endpoint_id == endpoint_id_)
     return list((await db.execute(stmt)).scalars())
 
 
@@ -231,12 +231,12 @@ async def set_binding(
     return b
 
 
-async def list_bindings(db: AsyncSession) -> list[tuple[ModelBinding, Model, Provider]]:
-    out: list[tuple[ModelBinding, Model, Provider]] = []
+async def list_bindings(db: AsyncSession) -> list[tuple[ModelBinding, Model, Endpoint]]:
+    out: list[tuple[ModelBinding, Model, Endpoint]] = []
     for b in (await db.execute(select(ModelBinding))).scalars():
         try:
             m = await get_model(db, b.model_pk)
-            p = await get_provider(db, m.provider_id)
+            p = await get_endpoint(db, m.endpoint_id)
         except NotFoundError:
             continue
         out.append((b, m, p))
@@ -279,14 +279,14 @@ async def resolve(
         # 禁用的也放行：用户可能先在对话里选了它，之后才在设置页禁用。
         # 这时打断正在进行的对话比让它继续用更糟。
         if m is not None:
-            p_ = await get_provider(db, m.provider_id)
+            p_ = await get_endpoint(db, m.endpoint_id)
             return ResolvedModel(
                 model_id=m.model_id,
                 base_url=p_.base_url,
                 api_key=decrypt(p_.api_key_cipher),
                 context_window=m.context_window,
                 supports_vision=m.supports_vision == "true",
-                provider_name=p_.name,
+                endpoint_name=p_.name,
                 purpose=purpose,
                 price_in_per_1m=m.price_in_per_1m,
                 price_out_per_1m=m.price_out_per_1m,
@@ -318,7 +318,7 @@ async def resolve(
         raise NoModelBoundError(purpose)
 
     m = await get_model(db, chosen.model_pk)
-    p = await get_provider(db, m.provider_id)
+    p = await get_endpoint(db, m.endpoint_id)
 
     if used_idx > 0:
         requested, used = attempts[0], attempts[used_idx]
@@ -336,7 +336,7 @@ async def resolve(
         api_key=decrypt(p.api_key_cipher),
         context_window=m.context_window,
         supports_vision=m.supports_vision == "true",
-        provider_name=p.name,
+        endpoint_name=p.name,
         purpose=purpose,
         # 带上单价，让 span 能存快照。
         # NULL 表示未配价，不是免费 —— compute_cost 会返回 0，
@@ -362,10 +362,10 @@ async def verify_vision(db: AsyncSession, llm: LLMPort, model_pk: str) -> Model:
     核验失败时把结果写成 `false` 并记时间。不写的话用户每次打开设置页
     都看到"未核验"，会反复点 —— 每次都花一次请求的钱。
     """
-    from app.modules.provider import vision
+    from app.modules.endpoint import vision
 
     m = await get_model(db, model_pk)
-    p = await get_provider(db, m.provider_id)
+    p = await get_endpoint(db, m.endpoint_id)
 
     ok, detail = await vision.probe_vision(
         llm, p.base_url, decrypt(p.api_key_cipher), m.model_id

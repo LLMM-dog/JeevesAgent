@@ -1,7 +1,8 @@
 # 多智能体系统架构设计 v2
 
-> 状态：规划中 | 日期：2026-08-08
+> 状态：实施中 | 日期：2026-08-10
 > v2 变更：验证增强改为每智能体属性、智能体可自管理 skills、记忆隔离
+> 阶段 1-2（智能体定义 CRUD + 单智能体链路）已完成。后续计划见 [multi-agent-roadmap.md](multi-agent-roadmap.md)。
 
 ---
 
@@ -114,39 +115,42 @@ skill_manage(action="delete", name="my-skill")
 
 ---
 
-## 3. 记忆隔离
+## 3. 记忆体系
 
-### 3.1 三层隔离
+### 3.1 三层记忆（两种存储）
+
+| 层 | 存储 | 作用域 | 例 |
+|----|------|--------|-----|
+| **人格 / Skills** | 文件（`personas/`、`skills/`） | 跨智能体、跨会话 | AGENTS.md 规则、验证 skill |
+| **用户 profile** | `memory` 表（`agent_id=''`, `session_id=NULL`） | 跨智能体、跨会话 | "用户偏好 pytest" |
+| **会话记忆** | `memory` 表（`agent_id + session_id`） | 每智能体、每会话独立 | "刚才读了 auth.py" |
+
+**Skills 就是跨会话长期记忆**——智能体和验证智能体通过 `skill_manage` 创建/修改 skills 来持久化知识和规则。这些 skills 是文件，存在 `skills/` 目录下，不依赖数据库。
+
+```sql
+-- memory 表查询
+-- user profile（跨智能体共享）
+SELECT * FROM memory WHERE agent_id='' AND session_id IS NULL;
+
+-- 当前会话中当前智能体的记忆
+SELECT * FROM memory WHERE agent_id='adf_xxx' AND session_id='ses_xxx';
+```
+
+### 3.2 验证智能体的自我进化
+
+验证智能体**不是往 memory 表写数据**来进化——而是调用 `skill_manage` 创建**验证 skill**：
 
 ```
-memory 表
-├── target="user"          ← 用户 profile（跨智能体共享）
-│   session_id: NULL
-│   agent_id: NULL
-│
-├── target="agent"         ← 智能体记忆（每智能体独立）
-│   session_id: NULL
-│   agent_id: "adf_代码审查员"
-│
-└── target="session"       ← 会话记忆（每智能体、每会话独立）
-    session_id: "ses_xxx"
-    agent_id: "adf_代码审查员"
+第 3 次发现 Agent 声称 write_file 但文件为空:
+  → skill_manage(action="create", name="check-file-not-empty",
+      content="验证规则：当步骤涉及 write_file 时，用 read_file 读取确认非空")
+
+第 5 次发现 Agent 跳过测试直接声称完成:
+  → skill_manage(action="create", name="require-test-evidence",
+      content="验证规则：如果步骤涉及代码修改，检查是否执行了测试命令")
 ```
 
-`agent_memory` 是该智能体跨会话积累的经验。"代码审查员"在被多次使用后，会记住"这个项目的测试框架是 pytest"、"用户偏好严格的类型检查"等。
-
-`session_memory` 只在当前会话有效。切换智能体时，会话记忆也切换——用户和"代码审查员"的对话记忆不会污染"研究员"。
-
-### 3.2 验证智能体也有独立记忆
-
-```python
-# 验证智能体的记忆条目示例
-memory(
-    target="agent",
-    agent_id="adf_代码审查员_verification",  # 独立 ID
-    content="该智能体常犯的错误：声称修改了文件但未验证。已强化检查规则。"
-)
-```
+这些 skill 存在 `skills/verification/` 下，是文件。**任何智能体都能加载它们**——不是只有创建它的验证智能体才能用。一个验证智能体创造的规则可以被其他智能体的验证智能体复用。
 
 ---
 

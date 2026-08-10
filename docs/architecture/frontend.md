@@ -5,18 +5,15 @@
 | 项 | 选择 | 理由 |
 | --- | --- | --- |
 | 框架 | React 19 | 已有经验，生态最全 |
-| 构建 | Vite 5 | 启动快，配置少 |
+| 构建 | Vite 7 | 启动快，配置少 |
 | 语言 | TypeScript 5 | |
-| 样式 | Tailwind 3 | |
-| 组件 | shadcn/ui（Radix 原语） | 组件代码进项目可改，不是黑盒依赖 |
+| 样式 | Tailwind 4 + @tailwindcss/vite | 零配置，v4 用 CSS 配置替代 JS |
 | 状态 | zustand | 比 Redux 轻，比 Context 好用。无样板代码 |
+| 数据请求 | @tanstack/react-query | 缓存、去重、乐观更新 |
 | 请求 | 原生 fetch | **不用 axios**，见下 |
-| 路由 | react-router-dom 6 | |
-| Markdown | react-markdown + remark-gfm + rehype-sanitize | |
-| 代码高亮 | shiki 或 react-syntax-highlighter | |
-| 虚拟滚动 | react-virtuoso | 长会话必需 |
-| Toast | sonner | |
-| 表单 | react-hook-form + zod | 只在设置页用 |
+| 路由 | react-router-dom 7 | |
+| Markdown | react-markdown + remark-gfm + shiki 语法高亮 | |
+| 图标 | lucide-react | |
 
 ### 为什么不用 axios
 

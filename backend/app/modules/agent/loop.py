@@ -44,6 +44,13 @@ from app.core.runtime_state import cancel_all_pending
 from app.infra.llm.openai_compat import classify_error
 from app.infra.llm.port import LLMChunk, LLMPort, ResolvedModel, TokenUsage, ToolCallDelta
 from app.modules.agent import compaction
+from app.modules.agent.hooks import (
+    AfterLlmContext,
+    HookRegistry,
+    OnCompactContext,
+    OnMessageContext,
+    ShouldStopContext,
+)
 from app.modules.agent.messages import Msg, ToolCall, find_missing_tool_calls, repair_tool_pairing
 from app.modules.agent.tokens import count_text, count_tools, estimate_tokens
 from app.modules.agent.tools.base import (
@@ -52,17 +59,9 @@ from app.modules.agent.tools.base import (
     ToolRegistry,
     ToolResult,
 )
-from app.modules.provider import service as provider_service
+from app.modules.endpoint import service as provider_service
 from app.modules.session import repo
 from app.modules.trace.recorder import record_span
-
-from app.modules.agent.hooks import (
-    AfterLlmContext,
-    HookRegistry,
-    OnCompactContext,
-    OnMessageContext,
-    ShouldStopContext,
-)
 
 log = structlog.get_logger(__name__)
 
@@ -659,6 +658,7 @@ class AgentLoop:
             return False
 
         new_messages, summary = out
+        old_messages = self.messages  # 保存压缩前的消息，用于钩子的 token 估算
         self.messages = new_messages
         # summary 要落库 —— 否则下次打开会话时重新组装上下文，
         # 压缩成果丢失，又会立刻撞一次超限。
@@ -671,12 +671,15 @@ class AgentLoop:
 
         # ── ON_COMPACT 钩子 ──
         if self.hooks.has_hooks:
+            specs = self.registry.to_specs() or None
+            before_est = estimate_tokens(old_messages, specs)
+            after_est = estimate_tokens(new_messages, specs)
             self.hooks.fire_on_compact(
                 OnCompactContext(
                     session_id=self.session_id,
                     agent_name=self.agent_name,
-                    before_tokens=before,
-                    after_tokens=after,
+                    before_tokens=before_est,
+                    after_tokens=after_est,
                 )
             )
 

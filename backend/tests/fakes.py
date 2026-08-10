@@ -81,7 +81,7 @@ def fake_model(context_window: int = 32768) -> ResolvedModel:
         base_url="http://fake/v1",
         api_key="sk-fake",
         context_window=context_window,
-        provider_name="fake",
+        endpoint_name="fake",
     )
 
 

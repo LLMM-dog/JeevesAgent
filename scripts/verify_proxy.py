@@ -54,7 +54,7 @@ async def main() -> int:
         if not meta["has_chat_model"]:
             print(
                 "\n   没有绑定对话模型，无法验证 SSE。\n"
-                "   请先在设置页添加供应商，或用 scripts/verify_real.py"
+                "   请先在设置页添加端点，或用 scripts/verify_real.py"
             )
             return 1
 

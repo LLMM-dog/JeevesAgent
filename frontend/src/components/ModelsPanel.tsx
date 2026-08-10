@@ -16,15 +16,15 @@ import { api } from "../lib/api";
 import type { ModelItem, ProviderOut } from "../lib/types";
 
 /**
- * 模型配置：按供应商分组，但增删的单位是【单个模型】。
+ * 模型配置：按模型组分组，但增删的单位是【单个模型】。
  *
- * ## 为什么不能以供应商为单位
+ * ## 为什么不能以模型组为单位
  *
- * 原来删一个供应商会连带删掉它下面所有模型和功能位绑定 —— 用户只是
+ * 原来删一个模型组会连带删掉它下面所有模型和功能位绑定 —— 用户只是
  * 想去掉一个不用的模型，结果配置全没了要重做一遍。
  *
- * 现在供应商只是分组（哪个端点、哪个 Key），删模型就只删那一个。
- * 删整个供应商仍然可以，但要单独点组标题上的删除，且提示写清后果。
+ * 现在模型组只是分组（哪个端点、哪个 Key），删模型就只删那一个。
+ * 删整个模型组仍然可以，但要单独点组标题上的删除，且提示写清后果。
  *
  * ## 启用/禁用是什么
  *
@@ -83,7 +83,7 @@ export default function ModelsPanel() {
       <header>
         <h2 className="text-lg font-medium">模型</h2>
         <p className="mt-1 text-sm" style={{ color: "var(--color-muted)" }}>
-          按供应商分组。增删的单位是单个模型 —— 删一个不影响同组的其它模型。
+          按模型组分组。增删的单位是单个模型 —— 删一个不影响同组的其它模型。
           <br />
           禁用的模型不出现在对话页的快捷切换菜单里，但配置保留。
         </p>
@@ -101,7 +101,7 @@ export default function ModelsPanel() {
 
       {provs.length === 0 ? (
         <p className="text-sm" style={{ color: "var(--color-muted)" }}>
-          还没有供应商。先在上方「添加供应商」里加一个端点。
+          还没有端点。先在上方「添加端点」里加一个端点。
         </p>
       ) : (
         <ul className="space-y-3">
@@ -167,7 +167,7 @@ export default function ModelsPanel() {
                     onClick={() => {
                       if (
                         confirm(
-                          `删除整个供应商「${p.name}」？\n\n` +
+                          `删除整个模型组「${p.name}」？\n\n` +
                             `它下面 ${mine.length} 个模型和相关的功能位绑定都会删掉。\n` +
                             `只想去掉某个模型的话，用模型行上的删除按钮。`,
                         )
@@ -175,8 +175,8 @@ export default function ModelsPanel() {
                         delProvider.mutate(p.id);
                       }
                     }}
-                    aria-label={`删除供应商 ${p.name}`}
-                    title="删除整个供应商（含它的所有模型）"
+                    aria-label={`删除模型组 ${p.name}`}
+                    title="删除整个模型组（含它的所有模型）"
                     className="shrink-0 rounded p-1"
                     style={{ color: "var(--color-muted)" }}
                   >
@@ -217,7 +217,7 @@ export default function ModelsPanel() {
                         className="px-3 py-3 text-xs"
                         style={{ color: "var(--color-muted)" }}
                       >
-                        这个供应商下还没有模型。点上面的「加模型」。
+                        这个模型组下还没有模型。点上面的「加模型」。
                       </li>
                     ) : (
                       mine.map((m) => (

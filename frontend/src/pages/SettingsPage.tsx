@@ -11,7 +11,7 @@ import VisionPanel from "@/components/VisionPanel";
 import SkillsPanel from "@/components/SkillsPanel";
 import TracePanel from "@/components/TracePanel";
 import ModelsPanel from "@/components/ModelsPanel";
-import PersonaPanel from "@/components/PersonaPanel";
+import AgentsPanel from "@/components/AgentsPanel";
 import WhitelistPanel from "@/components/WhitelistPanel";
 import { api } from "@/lib/api";
 import { ApiError } from "@/lib/sse";
@@ -97,7 +97,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
 
   return (
     <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-      <h2 className="mb-3 text-sm font-medium">添加供应商</h2>
+      <h2 className="mb-3 text-sm font-medium">添加端点</h2>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="block">
@@ -228,7 +228,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
           <div className="mt-3 flex items-end gap-2">
             <label className="block flex-1">
               <span className="mb-1 block text-xs text-[var(--color-muted)]">
-                供应商名称
+                端点名称
               </span>
               <input
                 value={name}
@@ -256,7 +256,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
 // percent-encode 成一长串乱码，分享链接和翻日志时都不可读。
 const TABS = [
   { key: "models", label: "模型" },
-  { key: "persona", label: "人格与偏好" },
+  { key: "agents", label: "智能体" },
   { key: "skills", label: "技能" },
   { key: "mcp", label: "MCP" },
   { key: "memory", label: "记忆" },
@@ -474,6 +474,12 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {active === "agents" && (
+          <div {...panelProps("agents")}>
+            <AgentsPanel />
+          </div>
+        )}
+
         {active === "skills" && (
           <div {...panelProps("skills")}>
             <SkillsPanel />
@@ -491,12 +497,6 @@ export default function SettingsPage() {
         {active === "memory" && (
           <div {...panelProps("memory")}>
             <MemoryPanel />
-          </div>
-        )}
-
-        {active === "persona" && (
-          <div {...panelProps("persona")}>
-            <PersonaPanel />
           </div>
         )}
 

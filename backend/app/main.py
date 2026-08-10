@@ -34,7 +34,9 @@ from app.core.logging import setup_logging
 from app.core.time import now_ms
 from app.infra.db.session import dispose_engine, get_sessionmaker
 from app.infra.llm.openai_compat import close_llm
+from app.modules.agent import agent_service as agent_svc
 from app.modules.agent import run_registry
+from app.modules.agent.agent_router import router as agent_router
 from app.modules.agent.chat_service import ChatService
 from app.modules.agent.pathguard import AllowedPath, set_allowed
 from app.modules.agent.tools.asset import ManageAssetTool
@@ -58,7 +60,7 @@ from app.modules.agent.tools.memory import (
 from app.modules.agent.tools.skill import LoadSkillFileTool, LoadSkillTool
 from app.modules.agent.tools.subagent import SubAgentTool
 from app.modules.agent.tools.todo import TodoReadTool, TodoWriteTool
-from app.modules.provider.models import PathWhitelist  # noqa: F401
+from app.modules.endpoint.models import PathWhitelist  # noqa: F401
 from app.modules.session import repo
 from app.modules.todo.models import Todo  # noqa: F401
 from app.modules.trace.writer import init_writer as init_trace_writer
@@ -364,6 +366,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await init_runtime()
 
+    # 首次启动：创建默认智能体
+    async with get_sessionmaker()() as db:
+        await agent_svc.ensure_default(db)
+        await db.commit()
+
     # 追踪写入器。必须在处理请求之前起来 ——
     # 起晚了的话最早那几个 run 的 span 会静默丢掉。
     init_trace_writer(get_sessionmaker())
@@ -485,6 +492,7 @@ def create_app() -> FastAPI:
     app.include_router(
         routes_models.router, prefix=settings.api_prefix, tags=["models"]
     )
+    app.include_router(agent_router)
 
     # 静态文件【必须最后挂载】，在所有 API 路由注册之后 ——
     # 否则 "/" 的通配会吃掉 /api/*

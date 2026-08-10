@@ -5,7 +5,7 @@ LLM 抽象。
 FakeLLM 直接实现这个 Protocol，返回预设的 chunk 序列，
 agent loop 的测试就不需要 mock HTTP 或真实调用 API。
 
-只支持 OpenAI 兼容协议。绝大多数供应商（DeepSeek/Kimi/智谱/通义/OpenRouter/
+只支持 OpenAI 兼容协议。绝大多数模型服务（DeepSeek/Kimi/智谱/通义/OpenRouter/
 SiliconFlow）和几乎所有中转站都提供兼容端点，Ollama/vLLM/LM Studio 本地部署
 也都提供。一条协议路径 = 一份代码 = 一处 bug。
 """
@@ -57,7 +57,7 @@ class LLMChunk:
 
 @dataclass
 class ResolvedModel:
-    """一次 LLM 调用需要的全部信息。由 provider 模块解析绑定后产出。"""
+    """一次 LLM 调用需要的全部信息。由 endpoint 模块解析绑定后产出。"""
 
     model_id: str
     base_url: str
@@ -65,7 +65,7 @@ class ResolvedModel:
     context_window: int = 32768
     supports_vision: bool = False
     # 供日志和事件用，不参与请求
-    provider_name: str = ""
+    endpoint_name: str = ""
     purpose: str = "chat"
     # 每百万 token 单价（USD）。NULL 表示未配价，不是免费 ——
     # span 行里存这个快照值，好让历史成本可复算（价格会变）。
@@ -112,7 +112,7 @@ class LLMPort(Protocol):
 
         ## 为什么不复用 ResolvedModel
 
-        探测发生在【模型入库之前】—— 用户刚填完供应商信息，还没有
+        探测发生在【模型入库之前】—— 用户刚填完端点信息，还没有
         model 行，也就构造不出 ResolvedModel。所以直接收三个原始参数。
         """
         ...

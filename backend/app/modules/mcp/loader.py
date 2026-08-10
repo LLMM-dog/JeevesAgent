@@ -175,6 +175,168 @@ def set_enabled(server_id: str, enabled: bool, path: Path | None = None) -> bool
     return _set_enabled_textual(p, server_id, enabled)
 
 
+def _block_ranges(lines: list[str]) -> list[tuple[int, int]]:
+    """找到 YAML 列表里每个顶层项的起止行号。"""
+    starts = [i for i, ln in enumerate(lines) if re.match(r"^\s*-\s", ln)]
+    if not starts:
+        return []
+    out: list[tuple[int, int]] = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else len(lines)
+        out.append((s, e))
+    return out
+
+
+def _find_block(lines: list[str], server_id: str) -> tuple[int, int] | None:
+    """找指定 server_id 的块起止行号，没找到返回 None。"""
+    want = re.compile(
+        rf"^\s*(?:-\s+)?server_id:\s*['\"]?{re.escape(server_id)}['\"]?\s*(?:#.*)?$"
+    )
+    for s, e in _block_ranges(lines):
+        if any(want.match(lines[j]) for j in range(s, e)):
+            return s, e
+    return None
+
+
+def _indent_of_block(lines: list[str], s: int, e: int) -> str:
+    """推块的缩进。"""
+    for j in range(s + 1, e):
+        m = re.match(r"^(\s+)\S", lines[j])
+        if m:
+            return m.group(1)
+    lead = re.match(r"^(\s*)-", lines[s])
+    return (lead.group(1) if lead else "") + "  "
+
+
+def add_server(cfg: ServerConfig, path: Path | None = None) -> None:
+    """把服务器追加到 mcp_servers.yaml 末尾。"""
+    import yaml as _yaml
+
+    p = path or CONFIG_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    d: dict[str, Any] = {"server_id": cfg.server_id, "transport": cfg.transport}
+    if cfg.transport == "http":
+        if cfg.url:
+            d["url"] = cfg.url
+        if cfg.headers:
+            d["headers"] = dict(cfg.headers)
+    else:
+        if cfg.command:
+            d["command"] = cfg.command
+        if cfg.args:
+            d["args"] = list(cfg.args)
+        if cfg.env:
+            d["env"] = dict(cfg.env)
+        if cfg.cwd:
+            d["cwd"] = cfg.cwd
+    if not cfg.enabled:
+        d["enabled"] = False
+    if cfg.transport == "stdio" and cfg.command_approved:
+        d["command_approved"] = True
+
+    block = _yaml.dump(
+        [d], default_flow_style=False, allow_unicode=True, sort_keys=False
+    )
+    # pyyaml dump 列表会以 "- " 开头，去掉首行的 "[" 包装
+    if block.startswith("- "):
+        new_lines = block.rstrip("\n").splitlines()
+    else:
+        # pyyaml 可能输出成 ---\n- ...，去掉文档头
+        new_lines = block.rstrip("\n").splitlines()
+        # 跳过文档头
+        new_lines = [ln for ln in new_lines if not ln.startswith("---")]
+
+    existing = ""
+    if p.is_file():
+        existing = p.read_text(encoding="utf-8")
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+
+    p.write_text(existing + "\n".join(new_lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def update_server(
+    server_id: str, updates: dict[str, Any], path: Path | None = None
+) -> bool:
+    """逐行编辑更新服务器字段，返回是否找到。"""
+    p = path or CONFIG_PATH
+    if not p.is_file():
+        return False
+
+    lines = p.read_text(encoding="utf-8").splitlines()
+    block = _find_block(lines, server_id)
+    if block is None:
+        return False
+
+    s, e = block
+    indent = _indent_of_block(lines, s, e)
+
+    # 字段到 YAML 行的映射
+    replacements: dict[str, str] = {}
+    for key, val in updates.items():
+        if val is None:
+            continue
+        if isinstance(val, bool):
+            replacements[key] = "true" if val else "false"
+        elif isinstance(val, list):
+            # 简单列表：放到一行
+            import json as _json
+            replacements[key] = _json.dumps(val, ensure_ascii=False)
+        elif isinstance(val, dict):
+            # 字典：简单展开（嵌套不深）
+            import json as _json
+            replacements[key] = _json.dumps(val, ensure_ascii=False)
+        else:
+            replacements[key] = str(val)
+
+    # 逐行替换/插入
+    changed: set[str] = set()
+    for j in range(s, e):
+        for key, val_str in replacements.items():
+            if key in changed:
+                continue
+            m = re.match(rf"^(\s*){re.escape(key)}:\s*.*$", lines[j])
+            if m:
+                lines[j] = f"{m.group(1)}{key}: {val_str}"
+                changed.add(key)
+                break
+
+    # 未找到的键：插入到块末尾
+    insert_at = e
+    for key in replacements:
+        if key not in changed:
+            lines.insert(insert_at, f"{indent}{key}: {replacements[key]}")
+            insert_at += 1
+
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return True
+
+
+def remove_server(
+    server_id: str, path: Path | None = None
+) -> bool:
+    """从 YAML 里删除服务器块，返回是否找到。"""
+    p = path or CONFIG_PATH
+    if not p.is_file():
+        return False
+
+    lines = p.read_text(encoding="utf-8").splitlines()
+    block = _find_block(lines, server_id)
+    if block is None:
+        return False
+
+    s, e = block
+    # 删掉块，也删掉前面的空白行
+    del_start = s
+    while del_start > 0 and not lines[del_start - 1].strip():
+        del_start -= 1
+    del lines[del_start:e]
+
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return True
+
+
 def _set_enabled_textual(path: Path, server_id: str, enabled: bool) -> bool:
     """
     只改目标块里的 enabled 那一行。

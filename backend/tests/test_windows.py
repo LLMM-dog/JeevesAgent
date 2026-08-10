@@ -6,7 +6,7 @@
 """
 
 import pytest
-from app.modules.provider.windows import (
+from app.modules.endpoint.windows import (
     DEFAULT_WINDOW,
     looks_non_chat,
     lookup_window,

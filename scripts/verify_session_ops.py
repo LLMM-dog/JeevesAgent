@@ -308,7 +308,7 @@ async def main() -> int:  # noqa: PLR0915
         finally:
             for pid in created:
                 await c.delete(f"{BASE}/api/providers/{pid}")
-            print(f"（已清理 {len(created)} 个供应商）")
+            print(f"（已清理 {len(created)} 个端点）")
 
 
 def _finish(failures: list[str], c: object, created: list[str]) -> int:

@@ -803,7 +803,7 @@ class TestRunRollup:
 
     def test_unknown_usage_is_none_not_zero(self) -> None:
         """
-        供应商不报的字段用 None 而非 0 —— 要能区分"未知"和"确实是零"。
+        服务商不报的字段用 None 而非 0 —— 要能区分"未知"和"确实是零"。
         """
         from app.core.trace_context import SpanInfo
         from app.modules.trace.recorder import SpanSink

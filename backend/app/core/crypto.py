@@ -54,7 +54,7 @@ def decrypt(cipher: str) -> str:
         # 否则用户只会看到"解密失败"而想不到是密钥变了。
         raise EncryptionNotConfiguredError(
             "API Key 解密失败",
-            hint="加密密钥可能已变更。请到设置页重新填写该供应商的 API Key",
+            hint="加密密钥可能已变更。请到设置页重新填写该端点的 API Key",
         ) from e
 
 

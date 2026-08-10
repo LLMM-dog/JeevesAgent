@@ -10,7 +10,7 @@
 或直接传参：
   uv run python scripts/verify_real.py <base_url> <api_key> [模型名]
 
-走完整链路：探测 → 建供应商 → 绑定 → 对话 → 工具调用 → 落库校验 → 第二轮。
+走完整链路：探测 → 建端点 → 绑定 → 对话 → 工具调用 → 落库校验 → 第二轮。
 
 【凭证处理】Key 只用于构造请求头。输出里只显示尾 4 位，
 不打印完整值，不写进日志。
@@ -107,7 +107,7 @@ async def main() -> int:
         matched = sum(1 for m in models if m["window_source"] == "matched")
         print(f"   窗口匹配率: {matched}/{len(models)}")
 
-        print("\n2. 创建供应商（自动绑定 chat 位）")
+        print("\n2. 创建端点（自动绑定 chat 位）")
         import time
 
         name = f"verify-{int(time.time())}"

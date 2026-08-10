@@ -13,7 +13,7 @@
 
 ## 复用而不重写
 
-第 5 步（配模型）调的是 `provider.service.probe_models` / `create_provider`
+第 5 步（配模型）调的是 `endpoint.service.probe_models` / `create_endpoint`
 —— 和 Web 设置页【同一个函数】。
 
 各写一遍的话，两处的 URL 规范化规则、错误处理会逐渐分叉，
@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 import subprocess
@@ -179,22 +178,7 @@ def step2_backend_deps(skip: bool) -> None:
     if skip:
         say("  （--no-deps，跳过）")
         return
-    # 带 dev 是因为个人项目里跑测试是常规操作，
-    # 分开装会让人第一次跑 pytest 时报 "找不到 pytest"。
-    #
-    # 另外带上 mcp / search / web / cron 四个可选组。
-    #
-    # 【为什么默认装它们】：只装 dev 的话，联网搜索、网页正文提取、
-    # 定时任务、MCP 全都不注册 —— 而这些是文档里介绍过的功能。
-    # 用户按快速开始跑完，发现"说好的联网搜索呢"，
-    # 而工具列表里就是没有，也没有任何提示说"少装了一个组"。
-    #
-    # 这四个都是纯 Python 包、体积小、无系统依赖，装上没有代价。
-    #
-    # docker 组【不默认装】：它需要本机跑着 Docker 守护进程，
-    # 装了 SDK 但没有守护进程只会让沙箱探活多绕一圈。
-    # 要用 Docker 沙箱的人自己 uv sync --extra docker。
-    run(
+    ok = run(
         [
             "uv",
             "sync",
@@ -212,6 +196,10 @@ def step2_backend_deps(skip: bool) -> None:
         ROOT,
         "后端依赖",
     )
+    if not ok:
+        raise AbortError(
+            "后端依赖安装失败。请检查网络连接，然后手动运行：uv sync --extra dev --extra mcp --extra search --extra web --extra cron"
+        )
 
 
 def step3_frontend_deps(skip: bool) -> None:
@@ -233,6 +221,12 @@ def step3_frontend_deps(skip: bool) -> None:
 
 
 def gen_key() -> str:
+    try:
+        from cryptography.fernet import Fernet
+    except ModuleNotFoundError:
+        raise AbortError(
+            "缺少 cryptography 包。请先安装后端依赖：uv sync"
+        ) from None
     """
     生成 Fernet 密钥。
 
@@ -240,8 +234,6 @@ def gen_key() -> str:
     "Fernet key must be 32 url-safe base64-encoded bytes"，
     而这个错误信息完全不指向"你应该用 Fernet.generate_key()"。
     """
-    from cryptography.fernet import Fernet
-
     return Fernet.generate_key().decode()
 
 
@@ -320,7 +312,7 @@ async def _probe_and_save(base_url: str, api_key: str) -> bool:
     """
     from app.infra.db.session import get_sessionmaker, init_db
     from app.infra.llm.openai_compat import OpenAICompatAdapter
-    from app.modules.provider import service
+    from app.modules.endpoint import service
 
     await init_db()
     llm = OpenAICompatAdapter()
@@ -355,10 +347,10 @@ async def _probe_and_save(base_url: str, api_key: str) -> bool:
         say(f"  ✗ 序号无效：{pick}")
         return False
 
-    name = ask("给这个供应商起个名字", "默认")
+    name = ask("给这个端点起个名字", "默认")
     sm = get_sessionmaker()
     async with sm() as db:
-        prov = await service.create_provider(
+        prov = await service.create_endpoint(
             db,
             name=name,
             base_url=normalized,
@@ -385,7 +377,7 @@ def step5_model() -> None:
     say()
 
     if not ask_yes("现在配置？"):
-        say("  （跳过。启动后打开 http://127.0.0.1:9000 → 设置 → 添加供应商）")
+        say("  （跳过。启动后打开 http://127.0.0.1:9000 → 设置 → 添加端点）")
         return
 
     base_url = ask("Base URL（如 https://api.openai.com/v1）")
@@ -472,25 +464,7 @@ def outro() -> None:
     """
     say()
     say("=" * 52)
-    say("装好了。启动：")
-    say()
-    if os.name == "nt":
-        say("  双击 start.bat")
-    else:
-        say("  chmod +x start.sh    # 只需第一次")
-        say("  ./start.sh --prod")
-    say()
-    say("然后浏览器打开 http://127.0.0.1:9000")
-    say()
-    say("第一次进去要做两件事：")
-    say("  1. 设置 → 模型：填一个 OpenAI 兼容端点，选要用的模型")
-    say("  2. 对话页输入框上方：选这次对话的工作目录")
-    say()
-    say("要改代码的话用开发模式（前端热更新，端口 5173）：")
-    if os.name == "nt":
-        say("  start.bat -Dev")
-    else:
-        say("  ./start.sh")
+    say("初始化完成")
 
 
 def main() -> int:

@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest_asyncio
 from app.core.crypto import encrypt
-from app.core.ids import binding_id, model_id, provider_id
-from app.modules.provider.models import Model, ModelBinding, Provider
+from app.core.ids import binding_id, endpoint_id, model_id
+from app.modules.endpoint.models import Endpoint, Model, ModelBinding
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,8 +42,8 @@ async def client(db: AsyncSession, workspace_id: str) -> Any:
 
 @pytest_asyncio.fixture
 async def bound(db: AsyncSession) -> Model:
-    p = Provider(
-        id=provider_id(),
+    p = Endpoint(
+        id=endpoint_id(),
         name="r5",
         base_url="https://example.com/v1",
         api_key_cipher=encrypt("sk-test-r5-000000000000"),
@@ -52,7 +52,7 @@ async def bound(db: AsyncSession) -> Model:
     await db.flush()
     m = Model(
         id=model_id(),
-        provider_id=p.id,
+        endpoint_id=p.id,
         model_id="r5-model",
         context_window=131072,
         enabled=1,
@@ -181,7 +181,7 @@ class TestFixedOverheadAlwaysShown:
         """会话选了别的模型时，窗口要跟着那个模型。"""
         small = Model(
             id=model_id(),
-            provider_id=bound.provider_id,
+            endpoint_id=bound.endpoint_id,
             model_id="small-window",
             context_window=8192,
             enabled=1,
@@ -221,10 +221,10 @@ class TestFixedOverheadAlwaysShown:
 
     def test_overhead_invalidated_on_config_change(self) -> None:
         """
-        改了 MCP 或人格文件后固定开销会变，缓存要失效 ——
+        改了 MCP 或技能后固定开销会变，缓存要失效 ——
         不失效的话条上显示的还是旧值，而用户刚刚才改完。
         """
-        for name in ("McpPanel.tsx", "PersonaPanel.tsx"):
+        for name in ("McpPanel.tsx", "SkillsPanel.tsx"):
             src = (FRONT / "components" / name).read_text(encoding="utf-8")
             assert "contextOverhead" in src, f"{name} 改完没让固定开销失效"
 

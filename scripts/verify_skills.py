@@ -124,7 +124,7 @@ async def main() -> int:
             print("   缺 commit-message 技能，无法继续")
             return 1
 
-        print("\n1. 登记供应商")
+        print("\n1. 登记端点")
         pr = await c.post(
             f"{BASE}/api/providers",
             json={
@@ -281,7 +281,7 @@ async def main() -> int:
             return 0
         finally:
             await c.delete(f"{BASE}/api/providers/{pid}")
-            print("（已清理测试供应商）")
+            print("（已清理测试端点）")
 
 
 if __name__ == "__main__":

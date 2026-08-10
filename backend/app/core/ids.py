@@ -47,8 +47,8 @@ def todo_id() -> str:
     return new_id("todo")
 
 
-def provider_id() -> str:
-    return new_id("prv")
+def endpoint_id() -> str:
+    return new_id("ept")
 
 
 def model_id() -> str:

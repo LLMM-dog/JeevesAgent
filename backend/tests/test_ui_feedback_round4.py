@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest_asyncio
 from app.core.crypto import encrypt
-from app.core.ids import binding_id, model_id, provider_id
-from app.modules.provider.models import Model, ModelBinding, Provider
+from app.core.ids import binding_id, endpoint_id, model_id
+from app.modules.endpoint.models import Endpoint, Model, ModelBinding
 from app.modules.session import repo
 from app.modules.trace.models import Run
 from httpx import ASGITransport, AsyncClient
@@ -284,8 +284,8 @@ class TestContextBarSegments:
 
 @pytest_asyncio.fixture
 async def bound(db: AsyncSession) -> Model:
-    p = Provider(
-        id=provider_id(),
+    p = Endpoint(
+        id=endpoint_id(),
         name="r4",
         base_url="https://example.com/v1",
         api_key_cipher=encrypt("sk-test-r4-000000000000"),
@@ -294,7 +294,7 @@ async def bound(db: AsyncSession) -> Model:
     await db.flush()
     m = Model(
         id=model_id(),
-        provider_id=p.id,
+        endpoint_id=p.id,
         model_id="r4-model",
         context_window=65536,
         enabled=1,

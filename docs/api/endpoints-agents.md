@@ -154,41 +154,6 @@ Response 201:
 
 ---
 
-## 验证智能体配置
-
-### `GET /api/verification`
-
-获取当前验证配置。
-
-```
-Response 200:
-{
-  "enabled": false,
-  "system_prompt": "",
-  "model_id": null,
-  "strict_mode": false
-}
-```
-
-### `PUT /api/verification`
-
-更新验证配置（全量替换）。
-
-```
-Request:
-{
-  "enabled": true,
-  "system_prompt": "你是成果检查员。检查以下步骤...",
-  "model_id": "anthropic/claude-haiku-4",
-  "strict_mode": true
-}
-
-Response 200:
-{ ... }
-```
-
----
-
 ## 对话接口改动
 
 ### `POST /api/chat` — 增加 agent_id 参数

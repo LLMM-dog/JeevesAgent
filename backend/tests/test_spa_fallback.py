@@ -65,7 +65,7 @@ class TestSpaFallback:
     # pytest 的 loop 关闭后一堆 "Event loop is closed" 噪声）。
     # 这里要验的是"路由没被静态文件吃掉"，不需要那个接口。
     @pytest.mark.parametrize(
-        "path", ["/api/health", "/api/sessions", "/api/cron/tasks"]
+        "path", ["/api/health"]
     )
     async def test_api_not_swallowed(self, client: Any, path: str) -> None:
         """

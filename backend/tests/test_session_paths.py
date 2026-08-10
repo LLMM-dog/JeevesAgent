@@ -27,7 +27,7 @@ from app.modules.agent.pathguard import (
     scoped_guard,
     set_allowed,
 )
-from app.modules.provider.models import PathWhitelist
+from app.modules.endpoint.models import PathWhitelist
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -10,7 +10,7 @@
 | `model` | 该端点下的一个模型：`model_id` + 能力标记 + 上下文窗口 |
 | `model_binding` | 一个功能位绑到哪个模型 |
 
-DDL 见 [../architecture/schema-2.md](../architecture/schema-2.md#provider)。
+DDL 见 [../architecture/data-schema-2.md](../architecture/data-schema-2.md#provider)。
 
 ### 为什么用独立强类型表而不是通用 KV / JSON 配置
 

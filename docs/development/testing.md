@@ -69,7 +69,7 @@ def test_all_emitted_events_are_documented():
 
 用 `ast` 解析源码找 `emit(...)` 调用。这个测试能抓到"加了事件忘了写文档"。
 
-前端侧：`EventHandlers` interface 的所有字段必需（不用 `?`），后端加事件时 TS 编译报错。见 [../architecture/sse.md](../architecture/sse.md#dispatch)。
+前端侧：`EventHandlers` interface 的所有字段必需（不用 `?`），后端加事件时 TS 编译报错。见 [../architecture/frontend-sse.md](../architecture/frontend-sse.md#dispatch)。
 
 两边配合，任一方漏了都会被发现。
 

@@ -177,7 +177,7 @@ const decoder = new TextDecoder();
 
 **这里容易踩坑**：后端是 POST，前端 `useStreamResponse.ts` 写的是 `method: "GET"`，整条链路根本跑不通。
 
-代价是失去 `EventSource` 的自动重连。手动实现指数退避重试，见 [../architecture/sse.md](../architecture/sse.md)。
+代价是失去 `EventSource` 的自动重连。手动实现指数退避重试，见 [../architecture/frontend-sse.md](../architecture/frontend-sse.md)。
 
 ## 响应头
 

@@ -126,10 +126,10 @@ def normalize_model_name(raw: str) -> str:
         if name == before:
             break
 
-    # 点号分隔的供应商前缀：anthropic.claude-3-5-sonnet
+    # 点号分隔的端点前缀：anthropic.claude-3-5-sonnet
     if "." in name:
         head, _, tail = name.partition(".")
-        # 只有当 head 看起来是供应商名（纯字母）且 tail 还包含连字符时才剥,
+        # 只有当 head 看起来是端点名（纯字母）且 tail 还包含连字符时才剥,
         # 否则会把 qwen2.5 / glm-4.5 的版本号切掉
         if head.isalpha() and "-" in tail:
             name = tail

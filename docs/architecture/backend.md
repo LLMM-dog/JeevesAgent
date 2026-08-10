@@ -32,11 +32,9 @@ backend/
 | `trace_context.py` | `span_id` / `parent_span_id` / `depth` 的 ContextVar 传递 |
 | `exceptions.py` | `AppError` 体系 |
 | `crypto.py` | Fernet 加解密，密文带 `v1:` 前缀 |
-| `pathguard.py` | 路径白名单 + 拒止锚校验，见 [security.md](security.md) |
-| `prompts.py` | 提示词加载 + `{{var}}` 渲染 + 路径穿越校验 |
-| `tokens.py` | tiktoken 估算 |
 | `logging.py` | structlog 配置 |
 | `time.py` | `now_ms()` 统一时间源 |
+| `runtime_state.py` | 会话级运行时状态（审批模式、审批等待） |
 
 ### 为什么 `time.py` 单独存在
 
@@ -50,19 +48,16 @@ backend/
 infra/
   db/         base.py session.py
   llm/        port.py openai_compat.py
-  sandbox/    port.py local.py docker.py
-  mcp/        client.py
-  websearch/  port.py tavily.py searxng.py
-  fs/         reader.py      # 文件读取 + 编码探测 + 二进制判定
-  http/       client.py      # httpx 单例，trust_env=False
+  sandbox/    port.py local.py docker.py factory.py
 ```
+
 
 ### port + 适配器不是过度设计
 
-三个已知的换实现场景，都是真会发生的：
+三个已知的换实现场景：
 
 1. **sandbox** 有本地和 Docker 两个实现，运行时按配置选，且 Docker 不可用要降级。没有 port 就得在调用点写 if/else。
-2. **websearch** 的 Tavily 要 API Key 且收费，SearXNG 可自建。用哪个取决于用户当时有什么。
+2. **websearch** 的 Tavily 要 API Key 且收费，DuckDuckGo 免费零配置。用哪个取决于用户当时有什么。
 3. **llm** 虽然只有 OpenAI 兼容一个实现，但 port 的价值在**测试**——`FakeLLM` 直接实现 port，不用 mock HTTP。
 
 反例：`db` 不做 port。SQLAlchemy 本身已是抽象层，再包一层纯属浪费。
@@ -84,33 +79,31 @@ infra/
 | 文件 | 职责 |
 | --- | --- |
 | `models.py` | SQLAlchemy 模型 |
-| `schemas.py` | Pydantic 请求/响应模型 |
-| `service.py` | 业务逻辑，不碰 HTTP |
+| `service.py` | 业务逻辑，不碰 HTTP（或 `repo.py`，数据访问） |
 | `router.py` | FastAPI 路由，只做参数校验与调用 service |
 
 模块清单：
 
 ```
 modules/
-  session/       会话与消息的 CRUD、截断重发
-  agent/         agent loop、工具、压缩、AgentSpec、run 注册表
-    loop.py state.py compaction.py run_registry.py
-    agents/  spec.py mesh.py
-    tools/   base.py file.py exec.py todo.py skill.py subagent.py mcp_tool.py web.py
-  provider/      供应商、模型、功能位绑定、模型探测
-  skill/         技能加载、上传、宏
-  todo/          Todo 表与查询（工具在 agent/tools/todo.py）
+  session/       会话与消息的 CRUD、截断重发、导出
+  agent/         智能体循环、工具、压缩、AgentSpec、run 注册表、路径守卫
+    loop.py compaction.py hooks.py subagent_runner.py specs.py
+    prompts.py tokens.py messages.py refs.py models.py
+    tools/   内置工具（file, exec, todo, skill, subagent, memory, context, asset, web）
+  endpoint/      模型端点（原 provider）、模型探测、窗口匹配、视觉检测
+  skill/         技能加载、扫描、宏、打包、持久化
+  mcp/           MCP 连接管理、工具注册
+  cron/          定时任务：调度、错过窗口、时区、无头运行
   memory/        长期记忆
-  persona/       SOUL/USER/AGENTS 文件读写
-  settings/      路径白名单、拒止锚、全局偏好
-  trace/         run/span 查询
+  todo/          Todo 表定义（工具逻辑在 agent/tools/todo.py）
+  trace/         run/span 记录、脱敏、成本计算
+  web/           联网搜索、网页抓取、正文提取
 ```
 
-### 一条铁律：模块位置跟着表走
+### 模块结构约定
 
-一个容易踩的坑：`modelregistry` 模块有 service 没 router，端点写在 `admin` 里，结果"找实现得先猜到去 admin 里翻"。
-
-本项目规定：**只要一个模块有自己的表，它就必须有自己的 router**，即使只有一个端点。宁可多一个 15 行的文件，也不要让端点漂到别处。
+**只要一个模块有自己的表，它就必须有自己的服务（service/repo），端点统一在 API 层注册。** 不要把所有端点写在一个大 router 里——那会把不相关的关注点混在一起。
 
 ## main.py 装配顺序
 
@@ -179,4 +172,4 @@ jeeves/
   scripts/          setup / start
 ```
 
-运行时文件布局细节见 [../architecture/files.md](../architecture/files.md)。
+运行时文件布局细节见 [../architecture/data-files.md](../architecture/data-files.md)。

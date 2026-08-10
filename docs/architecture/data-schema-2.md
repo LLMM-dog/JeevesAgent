@@ -1,6 +1,6 @@
 # 数据库表结构（续）
 
-接 [schema.md](schema.md)。通用约定见该文件。
+接 [data-schema.md](data-schema.md)。通用约定见该文件。
 
 ## provider
 

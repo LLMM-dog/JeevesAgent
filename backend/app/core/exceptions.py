@@ -75,7 +75,7 @@ class NoModelBoundError(AppError):
     def __init__(self, purpose: str = "chat") -> None:
         super().__init__(
             f"未配置 {purpose} 功能位的模型",
-            hint="请到设置页添加供应商并绑定模型",
+            hint="请到设置页添加模型",
         )
 
 

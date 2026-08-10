@@ -203,4 +203,33 @@ CREATE INDEX idx_todo_session ON todo(session_id, archived_at, order_index);
 
 "一个会话同时只有一个 `in_progress`"靠应用层保证，不做数据库约束 —— SQLite 的部分唯一索引无法表达"某个值最多出现一次"。见 [../architecture/todo.md](../architecture/todo.md#一个会话同时只能有一个-in_progress)。
 
+## agent_defs
+
+```sql
+CREATE TABLE agent_defs (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    avatar          TEXT,
+    system_prompt   TEXT NOT NULL DEFAULT '',
+    model_id        TEXT,                    -- NULL=跟随对话设置
+    skill_names     TEXT NOT NULL DEFAULT '[]',   -- JSON 数组
+    mcp_servers     TEXT NOT NULL DEFAULT '[]',   -- JSON 数组
+    permission_read      INTEGER NOT NULL DEFAULT 1,
+    permission_write     INTEGER NOT NULL DEFAULT 0,
+    permission_shell     INTEGER NOT NULL DEFAULT 0,
+    permission_network   INTEGER NOT NULL DEFAULT 0,
+    permission_subagent  INTEGER NOT NULL DEFAULT 0,
+    verification_enabled INTEGER NOT NULL DEFAULT 0,
+    strict_mode          INTEGER NOT NULL DEFAULT 0,
+    hidden         INTEGER NOT NULL DEFAULT 0,
+    max_turns      INTEGER,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    deleted_at     INTEGER
+);
+CREATE INDEX ix_agent_defs_name ON agent_defs(name);
+CREATE INDEX ix_agent_defs_deleted ON agent_defs(deleted_at);
+```
+
 `archived_at` 非空表示已验收关闭。查询当前清单时过滤 `archived_at IS NULL`。

@@ -29,6 +29,8 @@ export interface SessionBrief {
 export interface SessionDetail extends SessionBrief {
   /** 这次对话用哪个模型。空串 = 跟随功能位绑定 */
   model_pk: string;
+  /** 这次对话用哪个智能体。空串 = 未选择（直接用模型对话） */
+  agent_id: string;
   /** 实际生效的模型窗口。0 表示未配模型 */
   context_window: number;
   /** 这次对话的工作目录。空串 = 未设置 */
@@ -336,7 +338,7 @@ export interface SseEventMap {
   done: DoneEvent;
 }
 
-// ─────────────────────────── 供应商 ───────────────────────────
+// ─────────────────────────── 端点 ───────────────────────────
 
 export interface ProbedModel {
   model_id: string;
@@ -552,12 +554,12 @@ export interface BrowseResult {
   roots: BrowseEntry[];
 }
 
-// ── 模型与人格 ──
+// ── 模型 ──
 
 export interface ModelItem {
   id: string;
   provider_id: string;
-  /** 供应商名，用于菜单里显示"供应商 / 模型" */
+  /** 端点名，用于菜单里显示"端点 / 模型" */
   provider_name: string;
   model_id: string;
   display_name: string;
@@ -571,11 +573,26 @@ export interface ModelItem {
   price_out_per_1m: number | null;
 }
 
-export interface PersonaFile {
-  key: string;
-  filename: string;
-  label: string;
-  hint: string;
-  content: string;
-  exists: boolean;
+// ── 智能体 ──
+
+export interface AgentItem {
+  id: string;
+  name: string;
+  description: string;
+  avatar: string | null;
+  hidden: boolean;
+  is_default: boolean;
+  permission_read: boolean;
+  permission_write: boolean;
+  permission_shell: boolean;
+  permission_network: boolean;
+  permission_subagent: boolean;
+  verification_enabled: boolean;
+  strict_mode: boolean;
+  system_prompt: string;
+  model_id: string | null;
+  skill_names: string[];
+  mcp_servers: string[];
+  created_at: number;
+  updated_at: number;
 }

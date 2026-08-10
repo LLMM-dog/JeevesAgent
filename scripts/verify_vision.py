@@ -346,7 +346,7 @@ async def main() -> int:
         finally:
             for pid in created:
                 await c.delete(f"{BASE}/api/providers/{pid}")
-            print(f"（已清理 {len(created)} 个测试供应商）")
+            print(f"（已清理 {len(created)} 个测试端点）")
 
 
 if __name__ == "__main__":

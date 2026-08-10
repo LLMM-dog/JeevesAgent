@@ -32,7 +32,7 @@ from app.core.config import PROJECT_ROOT
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.core.ids import path_id
 from app.infra.db.session import get_db
-from app.modules.provider.models import PathWhitelist
+from app.modules.endpoint.models import PathWhitelist
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -155,7 +155,7 @@ async def patch_whitelist(
 
 # 删除成功返回 {"ok": true}，不用 204。
 #
-# 项目里其它删除接口（会话、供应商）都是这个形态，前端统一按
+# 项目里其它删除接口（会话、端点）都是这个形态，前端统一按
 # 有响应体处理。混用 204 会让前端多一条分支。
 @router.delete("/whitelist/{item_id}", summary="删白名单")
 async def delete_whitelist(

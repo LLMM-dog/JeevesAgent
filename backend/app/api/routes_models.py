@@ -1,22 +1,13 @@
 """
-模型个体管理与人格/偏好编辑。
+模型管理与 API 端点探测。
 
 ## 为什么模型要能单独增删
 
-原来添加供应商时必须一次性填好所有模型，之后要加一个模型只能
-把整个供应商删掉重建 —— 而删供应商会级联删掉它下面所有模型的
+原来添加端点时必须一次性填好所有模型，之后要加一个模型只能
+把整个端点删掉重建 —— 而删端点会级联删掉它下面所有模型的
 功能位绑定，用户等于要把配置重做一遍。
 
-供应商仍然存在，但它的角色降为【分组】：模型属于哪个端点、用哪个
-API Key。增删的单位是模型。
-
-## 为什么人格要能在界面里编辑
-
-SOUL.md（性格）和 USER.md（自述）直接进系统提示词，是影响输出最
-明显的两个文件。但它们在 personas/ 目录下，用户要用编辑器打开、
-还得知道有这两个文件存在。
-
-prompts.py 的 _read 没有缓存，所以存盘即生效，不用重启。
+端点角色降为【分组】：模型属于哪个端点、用哪个 API Key。增删的单位是模型。
 """
 
 from __future__ import annotations
@@ -27,10 +18,8 @@ from app.api.schemas import (
     ModelCreate,
     ModelOut,
     ModelPatch,
-    PersonaFile,
-    PersonaUpdate,
 )
-from app.core.config import PROJECT_ROOT, settings
+from app.core.config import settings
 from app.core.crypto import decrypt
 from app.core.exceptions import (
     AppError,
@@ -44,8 +33,8 @@ from app.infra.llm.openai_compat import get_llm
 from app.modules.agent import prompts
 from app.modules.agent.tokens import count_text, count_tools
 from app.modules.agent.tools.base import ToolRegistry
-from app.modules.provider import service as ps
-from app.modules.provider.models import Model, ModelBinding, Provider
+from app.modules.endpoint import service as ps
+from app.modules.endpoint.models import Endpoint, Model, ModelBinding
 from app.modules.session.models import Session
 from app.modules.skill import registry as skill_registry
 from app.modules.skill import state as skill_state
@@ -68,11 +57,11 @@ _PURPOSE_CN = {
 }
 
 
-def _out(m: Model, provider_name: str = "") -> ModelOut:
+def _out(m: Model, endpoint_name: str = "") -> ModelOut:
     return ModelOut(
         id=m.id,
-        provider_id=m.provider_id,
-        provider_name=provider_name,
+        endpoint_id=m.endpoint_id,
+        endpoint_name=endpoint_name,
         model_id=m.model_id,
         display_name=m.display_name or m.model_id,
         context_window=m.context_window,
@@ -88,16 +77,16 @@ def _out(m: Model, provider_name: str = "") -> ModelOut:
 @router.post("/models", response_model=ModelOut, status_code=201, summary="添加单个模型")
 async def add_model(body: ModelCreate, db: AsyncSession = Depends(get_db)) -> ModelOut:
     """
-    往已有供应商下加一个模型。
+    往已有端点下加一个模型。
 
-    不需要重建供应商 —— 那会级联删掉所有功能位绑定，
+    不需要重建端点 —— 那会级联删掉所有功能位绑定，
     用户要把配置重做一遍。
     """
     p = (
-        await db.execute(select(Provider).where(Provider.id == body.provider_id))
+        await db.execute(select(Endpoint).where(Endpoint.id == body.endpoint_id))
     ).scalars().first()
     if p is None:
-        raise NotFoundError("供应商不存在", code="provider_not_found")
+        raise NotFoundError("端点不存在", code="endpoint_not_found")
 
     mid = body.model_id.strip()
     if not mid:
@@ -106,16 +95,16 @@ async def add_model(body: ModelCreate, db: AsyncSession = Depends(get_db)) -> Mo
     dup = (
         await db.execute(
             select(Model).where(
-                Model.provider_id == body.provider_id, Model.model_id == mid
+                Model.endpoint_id == body.endpoint_id, Model.model_id == mid
             )
         )
     ).scalars().first()
     if dup is not None:
-        raise ConflictError(f"这个供应商下已经有 {mid} 了", code="model_exists")
+        raise ConflictError(f"该端点下已有 {mid} 了", code="model_exists")
 
     m = Model(
         id=new_model_id(),
-        provider_id=body.provider_id,
+        endpoint_id=body.endpoint_id,
         model_id=mid,
         display_name=body.display_name or "",
         context_window=body.context_window,
@@ -187,7 +176,7 @@ async def patch_model(
 
     await db.commit()
     p = (
-        await db.execute(select(Provider).where(Provider.id == m.provider_id))
+        await db.execute(select(Endpoint).where(Endpoint.id == m.endpoint_id))
     ).scalars().first()
     return _out(m, p.name if p else "")
 
@@ -231,118 +220,10 @@ async def delete_model(
     return {"ok": True}
 
 
-# ── 人格与个人偏好 ──
-
-# 可编辑的文件白名单。
-#
-# 【必须是白名单】而不是拼路径。用参数拼的话传
-# ../../.env 就能读写任意文件 —— 这个坑在技能加载上踩过。
-_PERSONA_FILES = {
-    "soul": (
-        "SOUL.md",
-        "性格设定",
-        "决定它怎么说话：语气、详略、要不要反驳你。直接进系统提示词。",
-    ),
-    "user": (
-        "USER.md",
-        "关于你",
-        "你的技术栈、习惯、偏好。它据此调整默认假设，少问几个来回。",
-    ),
-    "behavior": (
-        "AGENTS.md",
-        "行为规则",
-        "工作流程与硬性约束。改坏了会明显影响可用性，建议先备份。",
-    ),
-}
-_PERSONA_DIR = PROJECT_ROOT / "personas"
-_MAX_PERSONA_BYTES = 64 * 1024
-
-
-@router.get("/personas", response_model=dict, summary="人格与偏好")
-async def list_personas() -> dict[str, object]:
-    items = []
-    for key, (fname, label, hint) in _PERSONA_FILES.items():
-        f = _PERSONA_DIR / fname
-        try:
-            content = f.read_text(encoding="utf-8") if f.is_file() else ""
-        except (OSError, UnicodeDecodeError):
-            content = ""
-        items.append(
-            PersonaFile(
-                key=key,
-                filename=fname,
-                label=label,
-                hint=hint,
-                content=content,
-                exists=f.is_file(),
-            )
-        )
-    return {"items": items}
-
-
-@router.put("/personas/{key}", response_model=PersonaFile, summary="保存人格文件")
-async def save_persona(key: str, body: PersonaUpdate) -> PersonaFile:
-    """
-    存盘即生效，不用重启 —— prompts.py 的 _read 没有缓存。
-
-    这是有意的：加了缓存的话改完要重启才生效，
-    而用户会以为"改了没用"。
-    """
-    if key not in _PERSONA_FILES:
-        raise NotFoundError(f"未知的人格文件：{key}", code="unknown_persona")
-
-    raw = body.content
-    if len(raw.encode("utf-8")) > _MAX_PERSONA_BYTES:
-        raise BadRequestError(
-            f"内容超过 {_MAX_PERSONA_BYTES // 1024} KB。"
-            "人格文件每轮对话都会进提示词，太长会挤掉上下文预算",
-            code="persona_too_long",
-        )
-
-    fname, label, hint = _PERSONA_FILES[key]
-    f = _PERSONA_DIR / fname
-    _PERSONA_DIR.mkdir(parents=True, exist_ok=True)
-    # newline="\n" 统一行尾。不统一的话 Windows 上写出 CRLF，
-    # 而 git 里存的是 LF，每次保存都产生一个全文件 diff。
-    f.write_text(raw, encoding="utf-8", newline="\n")
-    log.info("persona_saved", key=key, bytes=len(raw.encode("utf-8")))
-    return PersonaFile(
-        key=key,
-        filename=fname,
-        label=label,
-        hint=hint,
-        content=raw,
-        exists=True,
-    )
-
-
-@router.post("/personas/{key}/reset", response_model=PersonaFile, summary="恢复示例内容")
-async def reset_persona(key: str) -> PersonaFile:
-    """
-    从 .example.md 恢复。
-
-    改坏了要有退路 —— 尤其 AGENTS.md，写错会明显影响可用性，
-    而用户不一定记得原来是什么。
-    """
-    if key not in _PERSONA_FILES:
-        raise NotFoundError(f"未知的人格文件：{key}", code="unknown_persona")
-    fname, label, hint = _PERSONA_FILES[key]
-    example = _PERSONA_DIR / fname.replace(".md", ".example.md")
-    if not example.is_file():
-        raise NotFoundError(
-            f"没有 {example.name}，无法恢复", code="no_example"
-        )
-    content = example.read_text(encoding="utf-8")
-    (_PERSONA_DIR / fname).write_text(content, encoding="utf-8", newline="\n")
-    log.info("persona_reset", key=key)
-    return PersonaFile(
-        key=key, filename=fname, label=label, hint=hint, content=content, exists=True
-    )
-
 @router.get(
     "/providers/{provider_id}/available-models",
     response_model=dict,
-    summary="拉这个供应商可用的模型列表",
+    summary="拉取端点可用的模型列表",
 )
 async def available_models(
     provider_id: str, db: AsyncSession = Depends(get_db)
@@ -353,7 +234,7 @@ async def available_models(
     ## 为什么需要这个而不是复用 /providers/probe
 
     那个要求请求体里带 base_url 和 api_key。而这里的场景是"往【已有】
-    供应商下加模型"—— 端点和 Key 都已经存过了，让用户再填一遍
+    端点下加模型"—— 端点和 Key 都已经存过了，让用户再填一遍
     是荒谬的（而且 Key 存的是密文，前端根本拿不到明文）。
 
     ## 返回值里标出已添加的
@@ -362,15 +243,15 @@ async def available_models(
     而重复添加会撞 (provider_id, model_id) 唯一索引。
     """
     p_ = (
-        await db.execute(select(Provider).where(Provider.id == provider_id))
-    ).scalars().first()
+        await db.execute(select(Endpoint).where(Endpoint.id == provider_id))
+        ).scalars().first()
     if p_ is None:
-        raise NotFoundError("供应商不存在", code="provider_not_found")
+        raise NotFoundError("端点不存在", code="endpoint_not_found")
 
     have = {
         m.model_id
         for m in (
-            await db.execute(select(Model).where(Model.provider_id == provider_id))
+            await db.execute(select(Model).where(Model.endpoint_id == provider_id))
         ).scalars()
     }
 

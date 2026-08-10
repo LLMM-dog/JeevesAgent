@@ -583,11 +583,11 @@ class TestSetupNonInteractive:
 
 class TestModelsPanelGrouping:
     """
-    模型配置按供应商分组，但增删以【单个模型】为单位。
+    模型配置按模型组分组，但增删以【单个模型】为单位。
 
     ## 原来的问题
 
-    设置页只有一个"已配置的供应商"列表，删除按钮删的是整个供应商 ——
+    设置页只有一个"已配置的端点"列表，删除按钮删的是整个模型组 ——
     连带它下面所有模型和功能位绑定。用户只想去掉一个不用的模型，
     结果配置全没了。
     """
@@ -621,13 +621,13 @@ class TestModelsPanelGrouping:
 
     def test_provider_delete_warns_about_scope(self) -> None:
         """
-        删整个供应商仍然可以，但提示必须写清后果，
+        删整个模型组仍然可以，但提示必须写清后果，
         并指出"只想删一个模型"的做法。
         """
         src = (
             ROOT / "frontend" / "src" / "components" / "ModelsPanel.tsx"
         ).read_text(encoding="utf-8")
-        assert "删除整个供应商" in src
+        assert "删除整个模型组" in src
         assert "用模型行上的删除按钮" in src
 
     def test_settings_page_uses_it(self) -> None:
@@ -635,8 +635,8 @@ class TestModelsPanelGrouping:
             encoding="utf-8"
         )
         assert "<ModelsPanel />" in src
-        # 旧的供应商列表不该还在
-        assert "已配置的供应商" not in src, "旧的供应商列表没删掉"
+        # 旧的端点列表不该还在
+        assert "已配置的端点" not in src, "旧的端点列表没删掉"
 
     def test_settings_shows_all_models(self) -> None:
         """

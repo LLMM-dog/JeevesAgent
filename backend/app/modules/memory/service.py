@@ -351,7 +351,7 @@ async def themes(db: AsyncSession) -> list[tuple[str, int]]:
 
 
 async def recall(
-    db: AsyncSession, query: str, *, top_k: int = DEFAULT_TOP_K
+    db: AsyncSession, query: str, *, top_k: int = DEFAULT_TOP_K, agent_id: str | None = None
 ) -> list[RecallHit]:
     """
     召回相关记忆。**零 LLM 调用**。
@@ -388,6 +388,11 @@ async def recall(
             await db.execute(
                 select(Memory)
                 .where(Memory.archived_at.is_(None), or_(*conds))
+                .where(
+                    Memory.agent_id.in_(["", agent_id])
+                    if agent_id is not None
+                    else True
+                )
                 .order_by(Memory.hit.desc())
                 .limit(100)
             )
