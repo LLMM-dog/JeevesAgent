@@ -219,18 +219,48 @@ async def commit_session(
         report.skipped = "会话中没有智能体参与过"
         return report
 
-    # 【并发执行】。各智能体读写隔离（layout 按 agent_id 分目录），
-    # 向量化都往同一个 memory_index 表写但按 agent_id + session_id 分区，
-    # 不会冲突。
+    # 【避免并发冲突】
+    #
+    # global 和 session 记忆是共享的，多个智能体同时写会冲突。
+    # 策略：只让**第一个智能体**提取全部三层（global + session + agent），
+    # 其他智能体只提取自己的 agent 记忆（`agent_only=True`）。
+    #
+    # 这样：
+    # - session 记忆只有一份（语义正确）
+    # - 避免并发写冲突
+    # - 避免重复提取
     import asyncio
 
-    tasks = [
-        commit_session_agent(
-            db, session_id=session_id, agent_id=aid, llm_call=llm_call, keep_recent_turns=keep_recent_turns
-        )
-        for aid in agent_ids
-    ]
-    agent_reports = await asyncio.gather(*tasks)
+    first_agent = agent_ids[0]
+    other_agents = agent_ids[1:]
+
+    # 第一个智能体：提取全部三层
+    first_report = await commit_session_agent(
+        db,
+        session_id=session_id,
+        agent_id=first_agent,
+        llm_call=llm_call,
+        keep_recent_turns=keep_recent_turns,
+        agent_only=False,  # 提取 global + session + agent
+    )
+
+    # 其他智能体：并发提取各自的 agent 记忆
+    if other_agents:
+        other_tasks = [
+            commit_session_agent(
+                db,
+                session_id=session_id,
+                agent_id=aid,
+                llm_call=llm_call,
+                keep_recent_turns=keep_recent_turns,
+                agent_only=True,  # 只提取 agent 层
+            )
+            for aid in other_agents
+        ]
+        other_reports = await asyncio.gather(*other_tasks)
+        agent_reports = [first_report, *other_reports]
+    else:
+        agent_reports = [first_report]
     report.agents = list(agent_reports)
 
     log.info(
@@ -251,6 +281,7 @@ async def commit_session_agent(
     llm_call: Any,
     keep_recent_turns: int | None = None,
     use_watermark: bool = True,
+    agent_only: bool = False,
 ) -> AgentReport:
     """
     对单个智能体跑一次记忆提取。
@@ -263,6 +294,14 @@ async def commit_session_agent(
     ## 全量提取（use_watermark=False）
 
     每次读全部消息（旧版行为）。用于兼容旧测试和单次手动提取场景。
+
+    ## agent_only 参数
+
+    - `False`（默认）：提取 global + session + agent 三层记忆
+    - `True`：只提取 agent 层记忆，避免多智能体并发写冲突
+
+    在多智能体场景下，只有第一个智能体会用 `agent_only=False`，
+    其他智能体用 `agent_only=True`。
 
     ## 与旧版的差别
 
@@ -338,17 +377,24 @@ async def commit_session_agent(
 
     # ── 3. 预取 ──
     #
-    # 【按当前智能体隔离】。scope_session 里带的是这个智能体的 agent_id，
-    # 所以 layout 会读 agents/<本智能体>/ 而不会碰到别的智能体的记忆。
-    pre = await prefetch_mod.prefetch(scope_session)
+    # ## agent_only 模式
+    #
+    # `agent_only=True` 时只用 scope_agent（只读 agent 层），避免：
+    # - 多个智能体并发写 global/session 记忆（数据竞争）
+    # - 重复提取共享记忆（浪费 token）
+    #
+    # `agent_only=False` 时用 scope_session（读 global + session + agent），
+    # 这是多智能体场景下的"第一个智能体"，或单智能体模式。
+    prefetch_scope = scope_agent if agent_only else scope_session
+    pre = await prefetch_mod.prefetch(prefetch_scope)
     agent_report.prefetched_items = pre.total
 
     # ── 4. ReAct 循环 ──
-    schemas = memory_service.visible_types(scope_session)
+    schemas = memory_service.visible_types(prefetch_scope)
     tool_runner: ToolRunner | None = None
     if not pre.eager:
         # lazy 模式需要工具。eager 模式传 None 表示"不给工具"。
-        tool_runner = ToolRunner(scope=scope_session, pages=pre.pages, read_uris=set(pre.read_uris))
+        tool_runner = ToolRunner(scope=prefetch_scope, pages=pre.pages, read_uris=set(pre.read_uris))
 
     loop = ExtractLoop(
         llm_call=llm_call,
@@ -379,6 +425,7 @@ async def commit_session_agent(
         scope_session=scope_session,
         extract_context=ctx,
         warnings=agent_report.warnings,
+        agent_only=agent_only,
     )
 
     # ── 6. 合并写入 ──
@@ -640,6 +687,7 @@ def _to_write_ops(
     scope_session: MemoryScope,
     extract_context: ExtractContext,
     warnings: list[str],
+    agent_only: bool = False,
 ) -> list[WriteOp]:
     """
     把模型输出转成写入操作。
@@ -653,7 +701,14 @@ def _to_write_ops(
 
     模型对新记忆误填了一个 id 是常见错误。当新建处理的结果是"多了一条
     可能重复的记忆"，报错的结果是"这条信息永久丢失"。前者可以之后合并。
+
+    ## agent_only 参数
+
+    `True` 时只写 agent 层记忆，跳过 global 和 session 类型。
+    用于多智能体场景下的非首个智能体，避免并发写冲突。
     """
+    from app.modules.memory.schema import MemoryScopeKind
+
     by_name = {s.memory_type: s for s in schemas}
     ops: list[WriteOp] = []
 
@@ -663,7 +718,18 @@ def _to_write_ops(
             warnings.append(f"未知记忆类型 {mtype}，已忽略 {len(items)} 条")
             continue
 
-        scope = scope_session if schema.scope is MemoryScopeKind.SESSION else scope_agent
+        # agent_only 模式下跳过 global 和 session 类型
+        if agent_only and schema.scope in (MemoryScopeKind.GLOBAL, MemoryScopeKind.SESSION):
+            warnings.append(f"{mtype}：agent_only 模式下跳过 {len(items)} 条 {schema.scope.value} 记忆")
+            continue
+
+        # 根据 schema.scope 选择正确的 scope
+        if schema.scope is MemoryScopeKind.SESSION:
+            scope = scope_session
+        elif schema.scope is MemoryScopeKind.GLOBAL:
+            scope = MemoryScope()  # global scope 没有 agent_id
+        else:  # AGENT
+            scope = scope_agent
 
         for item in items:
             fields = {k: v for k, v in item.items() if k != "page_id"}
