@@ -574,3 +574,340 @@ async def _load_fallback(
     # 总字符预算截断
     if eager and budget > 0:
         result.trim_to_budget(budget)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 多智能体预取
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@dataclass
+class MultiAgentPrefetchResult:
+    """
+    多智能体预取结果。
+
+    包含：
+    1. 共享记忆（global + session）
+    2. 每个智能体的私有记忆（agent scope）
+    """
+
+    # 共享记忆（global + session），所有智能体都能看到
+    shared: PrefetchResult = field(default_factory=PrefetchResult)
+
+    # 每个智能体的私有记忆 {agent_id: PrefetchResult}
+    agents: dict[str, PrefetchResult] = field(default_factory=dict)
+
+    def merge_for_agent(self, agent_id: str) -> PrefetchResult:
+        """
+        为指定智能体合并预取结果：共享记忆 + 该智能体的私有记忆。
+
+        ## 合并策略
+
+        1. 使用智能体的 page_id_map（保证 page_id 唯一）
+        2. 先加载共享记忆，再加载私有记忆
+        3. 如果有类型重叠，私有记忆的条目追加在后面
+
+        Returns:
+            合并后的 PrefetchResult，可直接传给 ExtractLoop
+        """
+        agent_result = self.agents.get(agent_id)
+        if not agent_result:
+            # 该智能体没有私有记忆，只返回共享记忆
+            return self.shared
+
+        # 创建新的 PrefetchResult，使用智能体的 page_id_map
+        merged = PrefetchResult(
+            pages=agent_result.pages,  # 使用智能体的 page_id_map
+            eager=self.shared.eager or agent_result.eager,
+        )
+
+        # 1. 先加载共享记忆
+        for memory_type, items in self.shared.by_type.items():
+            merged.by_type[memory_type] = list(items)
+            for item in items:
+                merged.pages.assign(item.uri)
+                if item.uri in self.shared.read_uris:
+                    merged.read_uris.add(item.uri)
+
+        # 2. 再加载私有记忆（追加或新增）
+        for memory_type, items in agent_result.by_type.items():
+            if memory_type not in merged.by_type:
+                merged.by_type[memory_type] = []
+            merged.by_type[memory_type].extend(items)
+            for item in items:
+                merged.pages.assign(item.uri)
+                if item.uri in agent_result.read_uris:
+                    merged.read_uris.add(item.uri)
+
+        return merged
+
+
+async def prefetch_multi_agent(
+    session_id: str,
+    agent_ids: list[str],
+    *,
+    messages: list[Any] | None = None,
+    db: Any = None,
+    model: Any = None,
+    eager: bool | None = None,
+    topn: int | None = None,
+) -> MultiAgentPrefetchResult:
+    """
+    多智能体场景的两阶段预取。
+
+    ## 流程
+
+    1. **第一阶段**：提取会话共享记忆（global + session）
+       - **Global 记忆**：直接全量读取（通常是配置、身份等，量少且都需要）
+       - **Session 记忆**：向量搜索（事件、对话摘要等，需要相关性排序）
+       - 一次搜索，所有智能体共享结果
+
+    2. **第二阶段**：并行提取每个智能体的私有记忆
+       - 每个智能体只读取自己的 agent scope
+       - 根据 schema 决定是向量搜索还是直接读取
+       - 多个智能体并发执行
+
+    3. **合并**：调用 `merge_for_agent(agent_id)` 为每个智能体组装完整上下文
+
+    ## 为什么区分搜索和直接读取
+
+    - **Global 记忆**（profile, identity, soul）：
+      - 量少（通常 < 5 条）
+      - 都需要（不存在"不相关"的情况）
+      - 直接读取，省去向量化和搜索开销
+
+    - **Session/Agent 记忆**（events, preferences, entities）：
+      - 量大（可能几十上百条）
+      - 需要相关性排序（只加载与当前对话相关的）
+      - 向量搜索，避免预取太多无关内容
+
+    ## 参数
+
+    - session_id: 会话 ID
+    - agent_ids: 参与该会话的所有智能体 ID
+    - messages: 对话消息列表（用于构建搜索查询）
+    - db: 数据库连接
+    - model: 嵌入模型
+    - eager: 是否预读全文
+    - topn: 搜索结果数量
+
+    ## 返回
+
+    MultiAgentPrefetchResult，包含：
+    - shared: 共享记忆（global + session）
+    - agents: {agent_id: 私有记忆}
+
+    使用 `result.merge_for_agent(agent_id)` 获取该智能体的完整预取结果。
+    """
+    import asyncio
+
+    result = MultiAgentPrefetchResult()
+    _eager = eager if eager is not None else True
+    _topn = topn or settings.memory.prefetch_search_topn
+
+    # ── 第一阶段：提取共享记忆（global + session）──
+    if not agent_ids:
+        log.warning("memory_prefetch_no_agents", session_id=session_id)
+        return result
+
+    first_agent = agent_ids[0]
+    shared_scope = MemoryScope(agent_id=first_agent, session_id=session_id)
+    shared_result = PrefetchResult(eager=_eager)
+
+    # 1.1 Global 记忆：直接全量读取
+    for schema in memory_service.visible_types(shared_scope):
+        if schema.scope is not MemoryScopeKind.GLOBAL:
+            continue
+        if schema.operation_mode is OperationMode.ADD_ONLY:
+            continue
+
+        items = await memory_service.list_items(shared_scope, schema.memory_type)
+        if items:
+            shared_result.by_type[schema.memory_type] = items
+            for item in items:
+                shared_result.pages.assign(item.uri)
+                if _eager:
+                    shared_result.read_uris.add(item.uri)
+
+            log.debug(
+                "memory_prefetch_global_direct",
+                memory_type=schema.memory_type,
+                items=len(items),
+            )
+
+    # 1.2 Session 记忆：向量搜索（如果有 messages + db + model）
+    if messages and db and model:
+        query_text = build_search_query(messages)
+
+        # 只搜索 session 级别的记忆
+        session_types = [
+            s.memory_type
+            for s in memory_service.visible_types(shared_scope)
+            if s.scope is MemoryScopeKind.SESSION
+            and s.operation_mode is not OperationMode.ADD_ONLY
+        ]
+
+        if session_types:
+            try:
+                search_results = await memory_service.search_memories(
+                    db=db,
+                    scope=shared_scope,
+                    query=query_text,
+                    model=model,
+                    limit=_topn,
+                )
+
+                # 使用现有的 _load_from_search 逻辑
+                budget = settings.memory.prefetch_preview_chars
+                await _load_from_search(
+                    scope=shared_scope,
+                    hits=search_results,
+                    result=shared_result,
+                    budget=budget,
+                    eager=_eager,
+                )
+
+                log.info(
+                    "memory_prefetch_session_search",
+                    query_chars=len(query_text),
+                    results=len(search_results),
+                    loaded=sum(len(v) for v in shared_result.by_type.values()),
+                )
+            except Exception as e:
+                log.warning("memory_prefetch_session_search_failed", error=str(e))
+    else:
+        # 没有向量搜索能力，回退到按 updated_at 排序
+        for schema in memory_service.visible_types(shared_scope):
+            if schema.scope is not MemoryScopeKind.SESSION:
+                continue
+            if schema.operation_mode is OperationMode.ADD_ONLY:
+                continue
+
+            items = await memory_service.list_items(shared_scope, schema.memory_type)
+            if items:
+                items = items[: max(1, _topn)]
+                shared_result.by_type[schema.memory_type] = items
+                for item in items:
+                    shared_result.pages.assign(item.uri)
+                    if _eager:
+                        shared_result.read_uris.add(item.uri)
+
+                log.debug(
+                    "memory_prefetch_session_fallback",
+                    memory_type=schema.memory_type,
+                    items=len(items),
+                )
+
+    result.shared = shared_result
+
+    log.info(
+        "memory_prefetch_shared_done",
+        session_id=session_id,
+        items=sum(len(v) for v in shared_result.by_type.values()),
+        types=len(shared_result.by_type),
+    )
+
+    # ── 第二阶段：并行提取每个智能体的私有记忆 ──
+    async def prefetch_agent_private(agent_id: str) -> tuple[str, PrefetchResult]:
+        """
+        提取单个智能体的私有记忆（只读 agent scope）。
+
+        根据记忆类型特性决定是否需要搜索：
+        - 静态配置类（profile, identity）：直接读取
+        - 动态累积类（preferences, entities）：向量搜索
+        """
+        agent_scope = MemoryScope(agent_id=agent_id)
+        agent_result = PrefetchResult(eager=_eager)
+
+        # 获取 agent 级别的 schema
+        agent_schemas = [
+            s
+            for s in memory_service.visible_types(agent_scope)
+            if s.scope is MemoryScopeKind.AGENT
+            and s.operation_mode is not OperationMode.ADD_ONLY
+        ]
+
+        # 区分静态和动态类型
+        static_types = []  # 直接读取
+        dynamic_types = []  # 向量搜索
+
+        for schema in agent_schemas:
+            # 判断标准：静态文件名的记忆直接读，动态文件名的搜索
+            # 参考 OpenViking session_extract_context_provider.py:502-507
+            if schema.memory_type in ("profile", "identity", "soul"):
+                static_types.append(schema)
+            else:
+                dynamic_types.append(schema)
+
+        # 直接读取静态类型
+        for schema in static_types:
+            items = await memory_service.list_items(agent_scope, schema.memory_type)
+            if items:
+                agent_result.by_type[schema.memory_type] = items
+                for item in items:
+                    agent_result.pages.assign(item.uri)
+                    if _eager:
+                        agent_result.read_uris.add(item.uri)
+
+        # 向量搜索动态类型（如果有搜索能力）
+        if dynamic_types and messages and db and model:
+            query_text = build_search_query(messages)
+            try:
+                search_results = await memory_service.search_memories(
+                    db=db,
+                    scope=agent_scope,
+                    query=query_text,
+                    model=model,
+                    limit=_topn,
+                )
+
+                budget = settings.memory.prefetch_preview_chars
+                await _load_from_search(
+                    scope=agent_scope,
+                    hits=search_results,
+                    result=agent_result,
+                    budget=budget,
+                    eager=_eager,
+                )
+            except Exception as e:
+                log.warning(
+                    "memory_prefetch_agent_search_failed",
+                    agent_id=agent_id,
+                    error=str(e),
+                )
+        else:
+            # 没有搜索能力，回退到直接读取 top-N
+            for schema in dynamic_types:
+                items = await memory_service.list_items(agent_scope, schema.memory_type)
+                if items:
+                    items = items[: max(1, _topn)]
+                    agent_result.by_type[schema.memory_type] = items
+                    for item in items:
+                        agent_result.pages.assign(item.uri)
+                        if _eager:
+                            agent_result.read_uris.add(item.uri)
+
+        log.debug(
+            "memory_prefetch_agent_done",
+            agent_id=agent_id,
+            items=sum(len(v) for v in agent_result.by_type.values()),
+            types=len(agent_result.by_type),
+        )
+        return agent_id, agent_result
+
+    # 并行提取所有智能体的私有记忆
+    tasks = [prefetch_agent_private(aid) for aid in agent_ids]
+    agent_results = await asyncio.gather(*tasks)
+    result.agents = dict(agent_results)
+
+    log.info(
+        "memory_prefetch_multi_agent_done",
+        session_id=session_id,
+        agents=len(agent_ids),
+        shared_items=sum(len(v) for v in result.shared.by_type.values()),
+        total_agent_items=sum(
+            sum(len(v) for v in ar.by_type.values()) for ar in result.agents.values()
+        ),
+    )
+
+    return result

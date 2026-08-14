@@ -45,7 +45,16 @@ class Session(Base, TimestampMixin):
     # 不加外键：模型被删掉时这里会悬空，但那时回落到默认绑定就行，
     # 比级联删掉整个会话好得多。取用时校验存在性。
     model_pk: Mapped[str] = mapped_column(String(32), default="", nullable=False)
-    agent_id: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+
+    # 参与该会话的智能体列表（JSON 数组）。
+    #
+    # 支持多智能体协作：多个智能体可以同时参与一个会话。
+    # 会话中可以动态添加或移除智能体。
+    # 空列表 = 无智能体（仅用户消息）。
+    #
+    # 存储格式：JSON 数组字符串，如 '["agent1", "agent2"]'
+    # SQLite 不支持原生数组类型，用 JSON 列 + Python 侧序列化。
+    agent_ids: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
 
     workspace_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("workspace.id"), nullable=False
@@ -76,6 +85,52 @@ class Session(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_session_list", pinned.desc(), last_message_at.desc()),
     )
+
+    def get_agent_ids(self) -> list[str]:
+        """获取智能体 ID 列表。"""
+        import json
+
+        if not self.agent_ids:
+            return []
+        try:
+            ids = json.loads(self.agent_ids)
+            return ids if isinstance(ids, list) else []
+        except Exception:
+            return []
+
+    def set_agent_ids(self, ids: list[str]) -> None:
+        """设置智能体 ID 列表。"""
+        import json
+
+        self.agent_ids = json.dumps(ids)
+
+    def add_agent(self, agent_id: str) -> bool:
+        """
+        添加智能体到会话。
+
+        Returns:
+            True 如果添加成功，False 如果已存在
+        """
+        ids = self.get_agent_ids()
+        if agent_id in ids:
+            return False
+        ids.append(agent_id)
+        self.set_agent_ids(ids)
+        return True
+
+    def remove_agent(self, agent_id: str) -> bool:
+        """
+        从会话中移除智能体。
+
+        Returns:
+            True 如果移除成功，False 如果不存在
+        """
+        ids = self.get_agent_ids()
+        if agent_id not in ids:
+            return False
+        ids.remove(agent_id)
+        self.set_agent_ids(ids)
+        return True
 
 
 class Message(Base, TimestampMixin):

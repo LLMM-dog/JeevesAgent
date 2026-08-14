@@ -155,6 +155,36 @@ class CommitReport:
         return " | ".join(parts)
 
 
+async def _load_messages_for_extract(
+    db: AsyncSession,
+    session_id: str,
+    keep_recent_turns: int | None = None,
+) -> tuple[list[Any], list[int]]:
+    """
+    加载会话消息用于记忆提取。
+
+    返回：
+    - messages: 消息列表（截断后）
+    - timestamps: 时间戳列表（截断后）
+    """
+    from app.modules.session import repo
+
+    # 读取全部消息（agent_name=None 表示不过滤智能体）
+    rows = await repo.load_messages(db, session_id, agent_name=None)
+    if not rows:
+        return [], []
+
+    msgs = [repo.row_to_msg(r) for r in rows]
+    stamps = [r.created_at for r in rows]
+
+    # 截断（保留最近 N 轮）
+    prepared = prepare(msgs, stamps, keep_recent_turns=keep_recent_turns)
+    if prepared.is_empty:
+        return [], []
+
+    return prepared.messages, prepared.timestamps
+
+
 async def commit_session(
     db: AsyncSession,
     *,
@@ -219,48 +249,77 @@ async def commit_session(
         report.skipped = "会话中没有智能体参与过"
         return report
 
-    # 【避免并发冲突】
+    # ── 两阶段预取 ──
     #
-    # global 和 session 记忆是共享的，多个智能体同时写会冲突。
-    # 策略：只让**第一个智能体**提取全部三层（global + session + agent），
-    # 其他智能体只提取自己的 agent 记忆（`agent_only=True`）。
+    # 1. 提取共享记忆（global + session）：一次搜索，所有智能体共享
+    # 2. 并行提取每个智能体的私有记忆（agent scope）
     #
-    # 这样：
-    # - session 记忆只有一份（语义正确）
-    # - 避免并发写冲突
-    # - 避免重复提取
+    # 这样避免重复搜索，同时隔离私有记忆。
     import asyncio
+    from app.modules.memory.prefetch import prefetch_multi_agent
 
-    first_agent = agent_ids[0]
-    other_agents = agent_ids[1:]
-
-    # 第一个智能体：提取全部三层
-    first_report = await commit_session_agent(
+    # 读取消息（用于构建搜索查询）
+    messages, timestamps = await _load_messages_for_extract(
         db,
         session_id=session_id,
-        agent_id=first_agent,
-        llm_call=llm_call,
         keep_recent_turns=keep_recent_turns,
-        agent_only=False,  # 提取 global + session + agent
     )
 
-    # 其他智能体：并发提取各自的 agent 记忆
-    if other_agents:
-        other_tasks = [
-            commit_session_agent(
-                db,
-                session_id=session_id,
-                agent_id=aid,
-                llm_call=llm_call,
-                keep_recent_turns=keep_recent_turns,
-                agent_only=True,  # 只提取 agent 层
-            )
-            for aid in other_agents
-        ]
-        other_reports = await asyncio.gather(*other_tasks)
-        agent_reports = [first_report, *other_reports]
-    else:
-        agent_reports = [first_report]
+    if not messages:
+        report.skipped = "会话中没有消息"
+        return report
+
+    # 获取嵌入模型（如果有）
+    embedding_model = None
+    try:
+        from app.modules.llm import get_embedding_model
+
+        embedding_model = await get_embedding_model(db, agent_name="")
+    except Exception as e:
+        log.debug("memory_embedding_model_unavailable", error=str(e))
+
+    # 多智能体预取（两阶段：共享 + 私有）
+    multi_prefetch = await prefetch_multi_agent(
+        session_id=session_id,
+        agent_ids=agent_ids,
+        messages=messages,
+        db=db,
+        model=embedding_model,
+        eager=True,
+    )
+
+    log.info(
+        "memory_multi_agent_prefetch_done",
+        session_id=session_id,
+        agents=len(agent_ids),
+        shared_items=sum(len(v) for v in multi_prefetch.shared.by_type.values()),
+    )
+
+    # ── 并行提取所有智能体的记忆 ──
+    #
+    # 每个智能体：
+    # - 看到全部消息（用户 + 所有智能体）
+    # - 看到共享记忆（global + session）+ 自己的私有记忆（agent）
+    # - 只写入自己作用域内的记忆
+
+    async def commit_agent_with_prefetch(agent_id: str) -> AgentReport:
+        """为单个智能体执行提取，使用已预取的记忆。"""
+        # 合并该智能体的完整预取结果（共享 + 私有）
+        agent_prefetch = multi_prefetch.merge_for_agent(agent_id)
+
+        return await commit_session_agent(
+            db,
+            session_id=session_id,
+            agent_id=agent_id,
+            llm_call=llm_call,
+            keep_recent_turns=keep_recent_turns,
+            prefetched=agent_prefetch,
+            messages_cache=(messages, timestamps),
+        )
+
+    # 并行提取所有智能体
+    tasks = [commit_agent_with_prefetch(aid) for aid in agent_ids]
+    agent_reports = await asyncio.gather(*tasks)
     report.agents = list(agent_reports)
 
     log.info(
@@ -281,7 +340,8 @@ async def commit_session_agent(
     llm_call: Any,
     keep_recent_turns: int | None = None,
     use_watermark: bool = True,
-    agent_only: bool = False,
+    prefetched: Any = None,
+    messages_cache: tuple[list[Any], list[int]] | None = None,
 ) -> AgentReport:
     """
     对单个智能体跑一次记忆提取。
@@ -295,13 +355,13 @@ async def commit_session_agent(
 
     每次读全部消息（旧版行为）。用于兼容旧测试和单次手动提取场景。
 
-    ## agent_only 参数
+    ## 预取结果（prefetched）和消息缓存（messages_cache）
 
-    - `False`（默认）：提取 global + session + agent 三层记忆
-    - `True`：只提取 agent 层记忆，避免多智能体并发写冲突
+    多智能体模式下，这两个参数用于避免重复计算：
+    - `prefetched`：已预取的记忆（共享 + 私有）
+    - `messages_cache`：已加载的消息列表
 
-    在多智能体场景下，只有第一个智能体会用 `agent_only=False`，
-    其他智能体用 `agent_only=True`。
+    单智能体模式下这两个参数为 None，函数内部自行加载。
 
     ## 与旧版的差别
 
@@ -373,40 +433,37 @@ async def commit_session_agent(
 
     ctx = from_messages(prepared.messages, prepared.timestamps)
 
-    # ── 3. 预取（用截断后的消息构建搜索查询） ──
+    # ── 3. 预取 ──
     #
-    # ## 为什么用截断后的消息
-    #
-    # 截断是为了不提取"正在进行的对话"（最近 N 轮）。
-    # 向量搜索也应该基于"可以提取的部分"：
-    # - 最近 N 轮还在进行中，不应该被提取
-    # - 搜索也不应该基于这些"临时上下文"召回记忆
-    #
-    # ## agent_only 模式
-    #
-    # `agent_only=True` 时只用 scope_agent（只读 agent 层），避免：
-    # - 多个智能体并发写 global/session 记忆（数据竞争）
-    # - 重复提取共享记忆（浪费 token）
-    #
-    # `agent_only=False` 时用 scope_session（读 global + session + agent），
-    # 这是多智能体场景下的"第一个智能体"，或单智能体模式。
-    scope_agent = MemoryScope(agent_id=agent_id)
-    scope_session = MemoryScope(agent_id=agent_id, session_id=session_id)
-    prefetch_scope = scope_agent if agent_only else scope_session
+    # 如果有 prefetched（多智能体模式），直接使用；否则执行预取。
+    if prefetched:
+        pre = prefetched
+        agent_report.prefetched_items = pre.total
+        # 多智能体模式：预取结果已包含共享记忆 + 私有记忆
+        prefetch_scope = MemoryScope(agent_id=agent_id, session_id=session_id)
+    else:
+        # 单智能体模式：执行预取
+        # ## 为什么用截断后的消息
+        #
+        # 截断是为了不提取"正在进行的对话"（最近 N 轮）。
+        # 向量搜索也应该基于"可以提取的部分"：
+        # - 最近 N 轮还在进行中，不应该被提取
+        # - 搜索也不应该基于这些"临时上下文"召回记忆
+        prefetch_scope = MemoryScope(agent_id=agent_id, session_id=session_id)
 
-    # 获取嵌入模型（用于向量搜索）
-    embed_model = await memory_service.resolve_embedding_model(db)
-    if not embed_model:
-        log.debug("memory_prefetch_no_embedding", reason="未配置嵌入模型")
+        # 获取嵌入模型（用于向量搜索）
+        embed_model = await memory_service.resolve_embedding_model(db)
+        if not embed_model:
+            log.debug("memory_prefetch_no_embedding", reason="未配置嵌入模型")
 
-    # 预取：向量搜索 + 预算感知加载
-    pre = await prefetch_mod.prefetch(
-        prefetch_scope,
-        messages=prepared.messages,  # 截断后的消息
-        db=db,
-        model=embed_model,
-    )
-    agent_report.prefetched_items = pre.total
+        # 预取：向量搜索 + 预算感知加载
+        pre = await prefetch_mod.prefetch(
+            prefetch_scope,
+            messages=prepared.messages,  # 截断后的消息
+            db=db,
+            model=embed_model,
+        )
+        agent_report.prefetched_items = pre.total
 
     # ── 4. ReAct 循环 ──
     #
@@ -715,7 +772,6 @@ def _to_write_ops(
     scope_session: MemoryScope,
     extract_context: ExtractContext,
     warnings: list[str],
-    agent_only: bool = False,
 ) -> list[WriteOp]:
     """
     把模型输出转成写入操作。
@@ -730,10 +786,14 @@ def _to_write_ops(
     模型对新记忆误填了一个 id 是常见错误。当新建处理的结果是"多了一条
     可能重复的记忆"，报错的结果是"这条信息永久丢失"。前者可以之后合并。
 
-    ## agent_only 参数
+    ## Scope 隔离
 
-    `True` 时只写 agent 层记忆，跳过 global 和 session 类型。
-    用于多智能体场景下的非首个智能体，避免并发写冲突。
+    每个智能体只能写入自己作用域内的记忆：
+    - Global：所有智能体共享（如系统配置）
+    - Session：会话内所有智能体共享（如对话摘要）
+    - Agent：智能体私有（如个人偏好）
+
+    写入冲突由文件系统的原子性和版本号机制保护。
     """
     from app.modules.memory.schema import MemoryScopeKind
 
@@ -744,11 +804,6 @@ def _to_write_ops(
         schema = by_name.get(mtype)
         if schema is None:
             warnings.append(f"未知记忆类型 {mtype}，已忽略 {len(items)} 条")
-            continue
-
-        # agent_only 模式下跳过 global 和 session 类型
-        if agent_only and schema.scope in (MemoryScopeKind.GLOBAL, MemoryScopeKind.SESSION):
-            warnings.append(f"{mtype}：agent_only 模式下跳过 {len(items)} 条 {schema.scope.value} 记忆")
             continue
 
         # 根据 schema.scope 选择正确的 scope
