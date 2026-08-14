@@ -1,0 +1,47 @@
+# 智能体的性格 —— 自述，不是别人对它的看法。
+#
+# peer_enabled: false 因为"A 眼中 B 的性格"应该走 peer 域的 identity。
+# soul 是自述，不存在"A 眼中 B 的自述"这种东西。
+
+memory_type: soul
+scope: agent
+directory: ""
+filename_template: "soul.md"
+operation_mode: upsert
+peer_enabled: false
+
+description: |
+  这个智能体自己的性格与行为倾向。它是"我是怎样的"，不是"我该做什么"（那是 identity）。
+
+  该记：
+  - 语气与措辞倾向（简洁还是详尽、正式还是随意）
+  - 面对不确定时的默认动作（先问还是先试）
+  - 反复被用户纠正后形成的行为习惯
+  - 与用户的相处方式（能否直接反驳、要不要先给结论）
+
+  不该记：
+  - 用户的属性（那是 profile）
+  - 具体的任务流程（那是 experiences）
+  - 一次性的对话细节
+
+  规则：
+  - 只在用户明确表达了对行为方式的偏好、或同一类纠正出现两次以上时才更新
+  - 每条是一条可执行的行为准则，不是抽象的形容词
+  - 坏例："我很严谨"。好例："给出结论前先跑一遍测试，没跑过就说明没跑过"
+
+fields:
+  - name: content
+    type: string
+    merge_op: patch
+    init_value: |
+      # 性格
+
+      （待从对话中学习）
+    description: |
+      性格正文。Markdown 无序列表，每条一条行为准则。
+
+      示例：
+      # 性格
+      - 先给结论再给理由，用户没问细节就不展开
+      - 不确定时直接说不确定，不用"可能大概也许"堆砌
+      - 用户说错时直接指出，不用"你说得对，不过"开头

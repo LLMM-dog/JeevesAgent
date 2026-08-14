@@ -1,0 +1,79 @@
+# 技能使用心得。
+#
+# 技能与工具的可见性规则【不同】：技能是智能体自己能写的，且用户可以自由
+# 分配可见性（全池可见 + 按智能体覆盖 + 新建默认对作者可见）。
+# 见 docs/architecture/memory.md#技能全池可见--按智能体可写覆盖--新建默认可见
+#
+# 但记忆本身仍是 agent 域的：A 写的技能心得不会自动被 B 看到，
+# 即使 B 也能看见那个技能。心得属于用它的那个智能体。
+
+memory_type: skill_notes
+scope: agent
+directory: "skill_notes"
+filename_template: "{{ skill_name }}.md"
+operation_mode: upsert
+peer_enabled: true
+
+description: |
+  某个技能的使用心得。按技能名分文件。
+
+  该记：
+  - 这个技能在什么任务上真正有效
+  - 技能正文里没写清、但实践中必须知道的前提
+  - 按技能流程走却失败的情形及原因
+  - 对技能本身的改进意见（下次可以自己去改 SKILL.md）
+
+  不该记：
+  - 技能正文的内容摘要（用 load_skill 就能读到，重复存是浪费）
+  - 单次执行的结果
+
+  规则：
+  - skill_name 必须是实际加载过的技能名，原样复制
+  - 计数字段填【本次新增的次数】，系统会累加
+
+content_template: |
+  # 技能：{{ skill_name }}
+
+  - 累计使用：{{ total_uses }}
+  - 累计失败：{{ fail_count }}
+
+  {{ content }}
+
+embedding_template: |-
+  技能 {{ skill_name }}
+
+  {{ content }}
+
+overview_template: |-
+  # 技能心得索引
+
+  {% for item in items %}
+  - [{{ item.file_content.skill_name|default(item.file_name, true) }}](./{{ item.file_name }})：使用 {{ item.file_content.total_uses|default(0, true) }} 次
+  {% endfor %}
+
+fields:
+  - name: skill_name
+    type: string
+    merge_op: immutable
+    description: |
+      技能名。原样复制自实际的 load_skill 调用（是 SKILL.md frontmatter 里的
+      name，不是目录名）。拿不到确切的名字时不要生成这条记忆。
+
+  - name: total_uses
+    type: int
+    merge_op: sum
+    init_value: 0
+    description: 本次新增的使用次数。系统会累加到历史值上。
+
+  - name: fail_count
+    type: int
+    merge_op: sum
+    init_value: 0
+    description: 本次新增的失败次数。系统会累加到历史值上。
+
+  - name: content
+    type: string
+    merge_op: patch
+    description: |
+      使用心得。Markdown，2-4 个 H2 小节，每节下是无序列表。
+      建议的小节：适用场景 / 隐含前提 / 失败情形 / 改进意见

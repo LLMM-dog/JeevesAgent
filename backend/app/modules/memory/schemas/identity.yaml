@@ -1,0 +1,52 @@
+# 智能体的角色定位。
+#
+# peer_enabled: true —— 在 peers/<B>/identity.md 下时表示"A 认为 B 是什么角色"。
+# 这是多智能体协作的基础：A 要委派任务给 B，得先知道 B 擅长什么。
+
+memory_type: identity
+scope: agent
+directory: ""
+filename_template: "identity.md"
+operation_mode: upsert
+peer_enabled: true
+
+description: |
+  角色定位。这个智能体（或在 peer 目录下时：被观察的那个智能体）是做什么的。
+
+  该记：
+  - 职责范围与边界（做什么、明确不做什么）
+  - 擅长的任务类型
+  - 已被证实不擅长的任务类型
+  - 与其它智能体的分工
+
+  不该记：
+  - 行为风格（那是 soul）
+  - 具体的做事方法（那是 experiences）
+
+  规则：
+  - "不擅长"必须有依据 —— 至少两次实际失败，不是一次意外
+  - 在 peer 目录下时，写的是观察结论而非评判：记"漏了边界情况"，不记"不靠谱"
+
+fields:
+  - name: content
+    type: string
+    merge_op: patch
+    init_value: |
+      # 角色
+
+      （待从对话中学习）
+    description: |
+      角色正文。Markdown，H1 + 2-3 个 H2 小节，每个小节下是无序列表。
+
+      示例：
+      # 代码审查员
+
+      ## 职责
+      - 只报告问题，不改代码
+      - 每个问题必须带 `文件:行号`
+
+      ## 擅长
+      - 找出被 except Exception 吞掉的异常
+
+      ## 不擅长
+      - 判断性能问题（两次把 O(n) 误判成 O(n²)，2026-07 / 2026-08）

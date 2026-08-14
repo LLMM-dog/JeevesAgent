@@ -1,0 +1,95 @@
+# 可复用经验 —— 从执行轨迹提炼出的可迁移模式。
+#
+# 三段式结构照抄 OpenViking（experiences.yaml:26-46），因为那套约束是针对
+# "输出要直接注入系统提示词"调过的：Situation 是入口条件，Approach 是正向
+# 步骤，Reflect 是负向约束，三者互斥不重复。
+#
+# content 用 replace 而非 patch：经验要被整体重新审视，不是增量累积的。
+# 这一点也与 OpenViking 一致。
+
+memory_type: experiences
+scope: agent
+directory: "experiences"
+filename_template: "{{ experience_name }}.md"
+operation_mode: upsert
+peer_enabled: true
+
+description: |
+  可复用的经验。一个可迁移的模式：什么情况触发它、什么做法有效、为什么。
+
+  【不是过程记录】。过程记录是 trajectories。经验是从轨迹里抽出来的、
+  去掉具体实例后仍然成立的那部分。
+
+  该记：
+  - 一类问题的有效解法（"pytest 挂住时先查 except 是否吞了 CancelledError"）
+  - 踩过的坑及其规避方式
+  - 某个工具链的正确用法顺序
+
+  不该记：
+  - 只发生过一次且没有普遍性的操作
+  - 具体的 ID、路径、人名（必须抽象掉）
+  - 与已有经验重复的内容（该改已有的那条）
+
+content_template: |
+  # {{ experience_name }}
+
+  {{ content }}
+
+embedding_template: |-
+  {{ experience_name }}
+
+  {{ content }}
+
+overview_template: |-
+  # 经验索引
+
+  {% for item in items %}
+  - [{{ item.file_content.experience_name|default(item.file_name, true) }}](./{{ item.file_name }})
+  {% endfor %}
+
+fields:
+  - name: experience_name
+    type: string
+    merge_op: immutable
+    description: |
+      给这个【可泛化的模式】命名，不是给具体那一次命名。
+      小写下划线，最多 5 个词。
+
+      好例：pytest_asyncio_cancel_hang、alembic_sqlite_batch_mode
+      坏例：fix_bug_in_loop_py（指向具体文件）、solved_a_problem（没有信息）
+
+  - name: content
+    type: string
+    merge_op: replace
+    description: |
+      严格按以下三段式输出。这段内容会被直接注入自主智能体的系统提示词，
+      所以必须写成可执行的机器指令。
+
+      ## Situation
+      <无序列表：入口条件。什么场景、什么意图下这整块规则才适用>
+
+      ## Approach
+      <无序列表：正向执行步骤（"要做什么"）。命令式动词开头，
+       条件分支写成显式的 IF/THEN/ELSE。这里【只放】正向步骤>
+
+      ## Reflect
+      <无序列表：硬约束（"不要做什么"）。负向规则、边界条件、
+       防止重犯的启发式。这里【只放】负向约束>
+
+      规则：
+      - 互斥：Approach 只放正向步骤，Reflect 只放负向约束，同一个概念不要两边都写
+      - 最短路径：砍掉原轨迹里的试错、返工、无关准备，只留必要步骤
+      - 命令式：直接对未来的自己下指令（"读取 X"、"调用 Y"），不写"我将要..."
+      - 抽象化：去掉具体 ID、文件名、人名、原文片段，让规则可泛用
+      - 失败转约束：踩过的坑写成 Reflect 里的负向规则
+      - 原子性：一条经验只覆盖一个意图。Approach 超过 8 条就该拆成两条经验
+      - 格式：只用上面三个标题，顺序固定，全部用无序列表，不写引言和总结
+
+  - name: supersedes
+    type: string
+    merge_op: replace
+    description: |
+      被本条取代的旧经验的 experience_name。
+
+      只在本条【替换】一条名字不同、范围更窄的旧经验时填。系统会删掉旧的
+      并继承它的轨迹关联。同名更新时留空。

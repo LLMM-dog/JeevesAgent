@@ -1,0 +1,62 @@
+# 用户偏好 —— 该智能体视角下的。
+#
+# 放 agent 域而非 global：不同智能体观察到的偏好不同且都对 ——
+# 代码审查员看到"他不接受没有测试的 PR"，教学助手看到"他喜欢先看例子再看原理"。
+# 硬要合并成一份全局偏好会互相冲突。
+
+memory_type: preferences
+scope: agent
+directory: "preferences"
+filename_template: "{{ topic }}.md"
+operation_mode: upsert
+peer_enabled: true
+
+description: |
+  用户在某个主题上的偏好。按主题分文件。
+
+  该记：
+  - 明确表达的做法偏好（"以后改代码前先跑测试"）
+  - 反复出现的选择倾向（三次都选了同一种方案）
+  - 明确的禁止（"别用 emoji"）
+
+  不该记：
+  - 一次性的临时要求（"这次先别跑测试"）
+  - 用户的身份属性（那是 profile）
+  - 具体的技术方案（那是 experiences）
+
+  规则：
+  - 偏好必须是【跨会话仍然成立】的。只在这次对话里成立的不是偏好
+  - 一次表述 + 一次实际遵守，或两次表述，才算确立
+  - 与已有偏好冲突时用 SEARCH/REPLACE 改掉旧的，不要两条并存
+
+embedding_template: |-
+  主题：{{ topic }}
+
+  {{ content }}
+
+overview_template: |-
+  # 偏好索引
+
+  {% for item in items %}
+  - [{{ item.file_content.topic|default(item.file_name, true) }}](./{{ item.file_name }})
+  {% endfor %}
+
+fields:
+  - name: topic
+    type: string
+    merge_op: immutable
+    description: |
+      主题名。小写，下划线连接，最多 3 个词。它同时是文件名。
+
+      用稳定的领域名而不是具体内容：`testing` 而不是 `run_pytest_before_commit`，
+      `code_style` 而不是 `line_length_120`。同一领域的多条偏好该进同一个文件。
+
+  - name: content
+    type: string
+    merge_op: patch
+    description: |
+      该主题下的偏好。Markdown 无序列表，每条一句。
+
+      示例（topic=testing）：
+      - 改完代码必须跑 `uv run pytest backend/tests -q`，不跑不算做完
+      - 新功能要带测试，修 bug 要先写复现测试

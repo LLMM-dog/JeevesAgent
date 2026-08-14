@@ -1,0 +1,172 @@
+# 原子事件 —— 会话级。
+#
+# add_only：事件是痕迹，只增不改。这也意味着提取阶段的 prefetch 会跳过它
+# （既然只增不改，回顾已有事件只是白烧 token）。
+#
+# 按日期分层照抄 OpenViking（events.yaml:90）：跨会话看同一个智能体的事件时
+# 日期是最自然的浏览维度，而且"清理三个月前的事件"变成删目录。
+#
+# 下面的正反例来自 OpenViking 的 events.yaml。它用了 88 行讲"原子性"这一件事，
+# 因为 LLM 的默认倾向是"把一段对话总结成一个事件"，而那样的事件无法被检索 ——
+# 它什么都沾一点。
+
+memory_type: events
+scope: session
+directory: "events"
+filename_template: "{{ extract_context.get_year(ranges) }}/{{ extract_context.get_month(ranges) }}/{{ extract_context.get_day(ranges) }}/{{ event_name }}.md"
+operation_mode: add_only
+peer_enabled: false
+
+description: |
+  本次会话中发生的原子事件。
+
+  # 原子性要求
+  - 一个事件只记【一件】真实发生的事：一个决策、一个约定、一次进展、一个结果
+  - 宁可细不可粗。不要因为几件事出现在同一段对话里就合并成一个事件
+  - 摘要里必须包含"这件事为什么值得记"的关键事实：承诺、约定、确认、
+    计划变更、责任归属、结果
+  - 有时间表述（"昨天"、"下周"）时换算成具体的年月日
+  - 用第三人称转述，保留具体事实：谁说了什么、谁做了什么、结果如何
+  - 事件是【对话里谈到的真实事情】，不是对话本身。对话是媒介，不是事件
+
+  # 什么时候必须拆成多个事件
+  即使在同一个话题内，以下任一项变化就是一个新事件：
+  - 主要目标或对象变了
+  - 时间锚点变了
+  - 决策、提议或承诺变了
+  - 责任人或参与者变了
+  - 结果或状态变了
+
+  # 粒度示例
+
+  ## 坏例
+  对话事实：
+  - 提议周五聚餐
+  - 确认下周一开会
+  - 小明承诺带投影仪
+  坏的提取：
+  - event_name: 团队安排
+    summary: 讨论了团队安排，包括聚餐、下周会议和设备准备
+  为什么坏：把一个提议、一个日程确认、一个承诺合并成了一个粗事件。
+
+  ## 好例
+  - event_name: 周五聚餐提议
+    summary: 有人提议周五聚餐
+  - event_name: 下周一会议确认
+    summary: 确认了下周一的会议
+  - event_name: 投影仪携带承诺
+    summary: 小明承诺带投影仪
+  为什么好：每个事件只含一个决策/提议/承诺。
+
+  ## 坏例
+  对话事实：
+  - 上线延期到 6 月 3 日
+  - 发布清单的负责人改为 Lina
+  坏的提取：
+  - event_name: 发布调整
+    summary: 调整了发布计划，包括延期和负责人变更
+  为什么坏：把一个日程变更和一个责任归属合并了。
+
+  ## 好例
+  - event_name: 上线延期确认
+    summary: 上线延期到 2026-06-03
+  - event_name: 清单负责人确认
+    summary: Lina 成为发布清单的负责人
+
+  ## 坏例
+  对话事实：
+  - 开始实现同步功能
+  - 被依赖问题阻塞
+  - 依赖修好后恢复
+  - 当周完成上线
+  坏的提取：
+  - event_name: 同步功能进展
+    summary: 同步功能从实现推进到阻塞、恢复和完成
+  为什么坏：把一个多阶段的时间线压成了一个粗事件。
+
+  ## 好例
+  - event_name: 同步功能开始实现
+  - event_name: 依赖阻塞出现
+  - event_name: 同步工作恢复
+  - event_name: 上线完成
+  为什么好：开始、阻塞、恢复、完成是四次独立的状态变化，存成四个原子事件。
+
+content_template: |
+  # 摘要
+  {{ summary }}
+
+  - 时间：{{ extract_context.get_timestamp(ranges) }}
+  - 结果：{{ outcome }}
+
+  ## 目标
+  {{ goal }}
+
+  ## 对话原文
+  {{ extract_context.get_chat_log(ranges) }}
+
+embedding_template: |-
+  {{ event_name }}
+  {{ goal }}
+
+  {{ summary }}
+
+overview_template: |-
+  # 事件索引
+
+  {% for item in items %}
+  - [{{ item.file_content.summary|default(item.file_name, true) }}](./{{ item.file_name }})
+  {% endfor %}
+
+fields:
+  - name: event_name
+    type: string
+    merge_op: immutable
+    description: |
+      事件名。它同时是文件名。
+
+      规则：
+      1. 小写下划线连接，最多 4 个词
+      2. 【不含】任何日期、时间、年份或数字 —— 日期已经在路径里
+      3. 必须指向一个具体的提议、决策、承诺、安排、进展或结果，
+         不能是一个宽泛的话题筐
+      4. 禁止以 _chat / _talk / _conversation / _discussion 结尾
+      5. 禁止 xxx_chat、chat_about_xxx、daily_talk 这类模式
+      6. 当原始对话里确实包含多个子事件时，禁止用"团队安排"、"项目讨论"、
+         "周末计划"这类大伞名
+      7. 只输出名字本身，不加解释
+
+  - name: goal
+    type: string
+    merge_op: replace
+    description: 目标。5 个词以内说明产生这件事的意图或背景。
+
+  - name: summary
+    type: string
+    merge_op: replace
+    description: |
+      事件摘要。第三人称，1-3 句话，包含关键事实、决策和结果。
+      用具体的年月日，不用"昨天"、"上周"、"明天"这类相对表述。
+
+  - name: outcome
+    type: string
+    merge_op: replace
+    description: |
+      结果。只能取以下之一：success / failure / partial / in_progress / unknown
+
+  - name: ranges
+    type: string
+    merge_op: immutable
+    description: |
+      本事件对应的消息索引范围。支持三种写法：
+      - 区间："0-3"（第 0 到第 3 条）
+      - 单条："7"
+      - 混合："0-3,7,15-20"
+
+      系统据此从原始消息取出对话原文填入 chat_log，并推导事件的日期路径。
+      范围要覆盖这件事的完整上下文，但不要包含无关消息。
+
+# 没有 chat_log 字段：对话原文由 content_template 直接调
+# extract_context.get_chat_log(ranges) 取，不存进 frontmatter。
+#
+# 存进 frontmatter 是错的 —— 那会让几千字符的对话原文进 YAML，
+# 而 frontmatter 的定位是"标量和短列表"。原文属于正文。

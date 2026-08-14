@@ -1,452 +1,682 @@
-﻿"""
-长期记忆的 CRUD 与召回。
+"""
+记忆系统的唯一对外入口。
 
-## 三条从常见实现缺陷里得来的规则
+agent loop、路由、提取流程只 import 这个模块，不直接碰 file_store 或 index。
 
-**1. 每次变更必须记 reason**（抄 ，`consumer.py:170,194,210`）
+## 这一层负责什么
 
-`update` / `delete` / `merge` 强制要求 reason 参数，写进 `history`。
-排查"AI 为什么以为我喜欢 X"时这是唯一线索。
+- 隔离校验：scope 能不能访问这个记忆类型
+- 字段合并：按 merge_op 把 LLM 的输出合进已有内容
+- 幂等：内容没变就不写盘
+- 索引同步：写完文件顺手更新 memory_index
 
-**2. 召回不能是 O(记忆总量)**（避开 缺陷）
+## 不负责什么
 
-它的 LLM 检索器把**全量记忆注入 LLM**让它挑，
-记忆库越大越贵，且这个成本落在每一轮对话上。它自己也写了 BM25 版本
-（`mechanical_retriever.py`，"零 LLM 调用、毫秒级"）但默认没用。
+- 提取（LLM 编排）—— 之后的 extract.py
+- 召回（向量搜索 + 预算裁剪）—— 之后的 recall.py
+- 向量化 —— 之后的 vectorize.py
 
-这里走纯 SQL + 关键词打分，零 LLM 调用。
-
-**3. 读取路径绝不加 lru_cache**（避开 bug）
-
-它的 `get_narrative()` 加了 `@lru_cache(maxsize=1)`，
-而 `cache_clear()` 全库只在测试里出现 —— 写入的记忆读不出来，必须重启。
-同一个错误它在技能加载器上犯过一次，这里当红线。
+这三件都比本模块大，混进来会让这个文件失控（OpenViking 的 memory_updater.py
+是 64KB，因为它把提取编排、并发合并、向量化、链接图全塞在一层）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-import re
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import structlog
-from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BadRequestError, NotFoundError
-from app.core.ids import memory_id as new_memory_id
-from app.core.time import now_ms
-from app.modules.memory.models import Memory
+from app.infra.llm.port import ResolvedModel
+from app.modules.memory import index as index_mod
+from app.modules.memory import layout, registry, render
+from app.modules.memory import vectorize as vectorize_mod
+from app.modules.memory.file_store import FileMemoryStore
+from app.modules.memory.layout import PathScopeError
+from app.modules.memory.merge import MergeError, apply_merge
+from app.modules.memory.models import (
+    BatchResult,
+    DeleteResult,
+    MemoryItem,
+    MemoryScope,
+    WriteOp,
+    WriteResult,
+)
+from app.modules.memory.schema import (
+    MemoryScopeKind,
+    MemoryTypeSchema,
+    OperationMode,
+)
 
 log = structlog.get_logger(__name__)
 
-# 单条记忆的长度上限。
+_store = FileMemoryStore()
+
+# 每个 uri 一把锁。
 #
-# 超长记忆通常意味着模型把一整段对话塞进来了 —— 那不是记忆而是摘要，
-# 会在召回时挤占大量 token 且很难精确更新。
-MAX_CONTENT_CHARS = 300
-
-# 召回条数上限。
+# ## 为什么需要锁
 #
-# 5 条是权衡：太少会漏掉相关的，太多会稀释注意力并推高每轮成本。
-# 几百条记忆里真正相关的通常不超过 5 条。
-DEFAULT_TOP_K = 5
-
-# 召回内容的总字数上限。即使 top-k 内也不能无限长。
-RECALL_CHAR_BUDGET = 800
-
-# 中英文分词用的停用词。只挡最高频的 —— 停用词表越大越容易把
-# 有效关键词误挡（"我要用 Go" 里的 "用" 挡掉没事，"Go" 不能挡）。
-_STOPWORDS = frozenset(
-    {
-        "的", "了", "是", "在", "我", "你", "他", "她", "它", "们", "这", "那",
-        "有", "和", "与", "就", "都", "而", "及", "或", "一个", "什么", "怎么",
-        "the", "a", "an", "is", "are", "was", "were", "be", "to", "of", "and",
-        "or", "in", "on", "at", "for", "with", "it", "this", "that", "i", "you",
-    }
-)
+# 同一个文件的并发写会丢更新：两个协程都读到 version=3，各自合并后都写
+# version=4，后写的覆盖前面的改动，而前面那次改动【没有任何痕迹】。
+#
+# ## 为什么不用 OpenViking 那套
+#
+# 它的 StreamingMemoryUpdater 有 72KB：攒批、二次 LLM 合并、租约。
+# 那是为"多用户多会话同时 commit"设计的。Jeeves 是单用户单进程，
+# 一个会话一次 commit，asyncio 锁足够。
+#
+# 用 dict 而非 WeakValueDictionary：锁对象很小，而 weak 引用会让
+# "锁刚被创建还没被 acquire 时被 GC"变成一个需要考虑的竞态。
+_locks: dict[str, asyncio.Lock] = {}
 
 
-def _tokens(text: str) -> list[str]:
+def _lock_for(uri: str) -> asyncio.Lock:
+    lock = _locks.get(uri)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[uri] = lock
+    return lock
+
+
+# ── 类型可见性 ────────────────────────────────────
+
+
+def visible_types(scope: MemoryScope) -> list[MemoryTypeSchema]:
+    """这个 scope 能读写的记忆类型。"""
+    return [s for s in registry.get_schemas().enabled() if scope.allows(s.scope)]
+
+
+def get_schema(memory_type: str) -> MemoryTypeSchema | None:
+    return registry.get_schemas().get(memory_type)
+
+
+def _require_schema(scope: MemoryScope, memory_type: str) -> MemoryTypeSchema:
+    schema = get_schema(memory_type)
+    if schema is None:
+        known = ", ".join(registry.get_schemas().names())
+        raise ValueError(f"未知的记忆类型：{memory_type}。已注册：{known}")
+    if not schema.enabled:
+        raise ValueError(f"记忆类型 {memory_type} 已被禁用（enabled: false）")
+    if not scope.allows(schema.scope):
+        raise PathScopeError(
+            f"当前 scope 无权访问 {schema.scope.value} 域的 {memory_type}："
+            f"agent_id={scope.agent_id!r} session_id={scope.session_id!r}"
+        )
+    return schema
+
+
+# ── 读 ──────────────────────────────────────────
+
+
+async def get(scope: MemoryScope, memory_type: str, key: str = "") -> MemoryItem | None:
     """
-    粗分词。中文按 2-gram，英文/数字按单词。
+    读一条记忆。
 
-    不引入 jieba 这类分词库：召回是"缩小候选集"，不需要精确分词。
-    2-gram 对中文足够 —— "塔罗牌重构" 会切出 "塔罗"/"罗牌"/"牌重"/"重构"，
-    与记忆里的 "塔罗牌" 有重叠就能命中。
+    key 对单文件类型（profile / soul / identity）无意义，留空。
+    多文件类型的 key 是文件名的主体部分（preferences 的 topic、
+    tool_notes 的 tool_name）。
     """
-    text = text.lower()
-    out: list[str] = []
-    # 英文单词、数字
-    for w in re.findall(r"[a-z0-9_.+#-]{2,}", text):
-        if w not in _STOPWORDS:
-            out.append(w)
-    # 中文 2-gram
-    for run in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-        for i in range(len(run) - 1):
-            g = run[i : i + 2]
-            if g not in _STOPWORDS:
-                out.append(g)
+    schema = _require_schema(scope, memory_type)
+
+    if schema.single_file:
+        return await _store.read(scope, schema, schema.filename_template)
+
+    if not key:
+        raise ValueError(f"{memory_type} 是多文件类型，必须给 key")
+
+    # 用 key 反填模板变量。多文件类型的 filename_template 通常只有一个变量
+    # （{{ topic }}.md），所以填第一个非 system 字段就够。
+    # events 那种多变量模板（含 extract_context）走不到这里 —— 它是 add_only，
+    # 按 key 精确读没有意义。
+    rel_path = await _rel_path_from_key(schema, key)
+    return await _store.read(scope, schema, rel_path)
+
+
+async def _rel_path_from_key(schema: MemoryTypeSchema, key: str) -> str:
+    from app.modules.memory.schema import template_variables
+
+    variables = template_variables(schema.filename_template) - {"extract_context"}
+    if len(variables) != 1:
+        raise ValueError(
+            f"{schema.memory_type} 的 filename_template 有 {len(variables)} 个变量，无法按单个 key 定位。"
+            "请用 list_items 或 read_uri。"
+        )
+    var = next(iter(variables))
+    return await _store.resolve_path(MemoryScope(), schema, {var: key})
+
+
+async def read_uri(uri: str) -> MemoryItem | None:
+    return await _store.read_uri(uri)
+
+
+async def list_items(scope: MemoryScope, memory_type: str = "") -> list[MemoryItem]:
+    """
+    列举记忆。memory_type 为空时列举这个 scope 下所有类型。
+
+    不走索引而是直接扫文件：文件是真源，而这个方法的调用方（设置页、
+    提取阶段的 prefetch）需要正文，索引里没有正文。
+    索引的价值在"只要元数据"的场景（list_index）。
+    """
+    if memory_type:
+        schema = _require_schema(scope, memory_type)
+        return await _store.list_items(scope, schema)
+
+    out: list[MemoryItem] = []
+    for schema in visible_types(scope):
+        out.extend(await _store.list_items(scope, schema))
+    out.sort(key=lambda it: (-it.updated_at, it.uri))
     return out
 
 
-@dataclass
-class RecallHit:
-    memory: Memory
-    score: float
-
-
-def _append_history(mem: Memory, op: str, reason: str, before: dict[str, Any]) -> None:
-    """
-    追加一条变更记录。
-
-    history 存 JSON 字符串。解析失败时**从空数组重建而不是抛异常** ——
-    历史损坏不该让记忆本身变得不可修改。
-    """
-    try:
-        items = json.loads(mem.history or "[]")
-        if not isinstance(items, list):
-            items = []
-    except (json.JSONDecodeError, TypeError):
-        log.warning("memory_history_corrupt", memory_id=mem.id)
-        items = []
-    items.append({"op": op, "reason": reason, "before": before, "at": now_ms()})
-    # 只留最近 20 条。history 无上限增长的话，一条被反复修改的记忆
-    # 会把整行撑到几十 KB，而早期的变更几乎没有参考价值。
-    mem.history = json.dumps(items[-20:], ensure_ascii=False)
-
-
-def parse_history(mem: Memory) -> list[dict[str, Any]]:
-    try:
-        items = json.loads(mem.history or "[]")
-        return items if isinstance(items, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-
-# ─────────────────────────── 写 ───────────────────────────
-
-
-async def create(
+async def list_index(
     db: AsyncSession,
+    scope: MemoryScope,
     *,
-    content: str,
-    theme: str = "其他",
-    source: str = "auto",
-    confidence: float = 0.6,
-    origin_session_id: str = "",
-) -> Memory:
-    content = " ".join(content.split())
-    if not content:
-        raise BadRequestError("记忆内容不能为空", code="memory_empty")
-    if len(content) > MAX_CONTENT_CHARS:
-        # 截断而不是拒绝：模型偶尔会写长，直接拒绝会让它反复重试。
-        # 截断后仍然可用，而且日志里能看到发生过。
-        log.info("memory_content_truncated", chars=len(content))
-        content = content[:MAX_CONTENT_CHARS]
-
-    mem = Memory(
-        id=new_memory_id(),
-        content=content,
-        theme=" ".join(theme.split())[:64] or "其他",
-        history="[]",
-        hit=0,
-        confidence=max(0.0, min(1.0, confidence)),
-        source=source,
-        origin_session_id=origin_session_id,
+    memory_type: str = "",
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    """只要元数据的列举。设置页的记忆列表用这个，不读文件。"""
+    rows = await index_mod.list_rows(
+        db,
+        agent_id=scope.agent_id or None,
+        session_id=scope.session_id or None,
+        memory_type=memory_type,
+        limit=limit,
     )
-    db.add(mem)
-    await db.flush()
-    return mem
+    return [index_mod.row_to_dict(r) for r in rows]
 
 
-async def find_similar(
-    db: AsyncSession, content: str, *, limit: int = 3
-) -> list[Memory]:
-    """
-    找可能重复的记忆。用于写入前去重。
-
-    靠提示词让 LLM 自己判断重复（相关实现 的
-    merge_memories 描述），没有代码层面的相似度检查。这里先用关键词
-    交集粗筛，把候选给模型判断 —— 模型只需看几条而不是全部。
-    """
-    toks = set(_tokens(content))
-    if not toks:
-        return []
-    rows = list(
-        (
-            await db.execute(
-                select(Memory).where(Memory.archived_at.is_(None)).limit(500)
-            )
-        ).scalars()
-    )
-    scored: list[tuple[float, Memory]] = []
-    for m in rows:
-        mt = set(_tokens(m.content))
-        if not mt:
-            continue
-        # Jaccard 相似度
-        inter = len(toks & mt)
-        if inter == 0:
-            continue
-        score = inter / len(toks | mt)
-        if score >= 0.3:
-            scored.append((score, m))
-    scored.sort(key=lambda x: -x[0])
-    return [m for _s, m in scored[:limit]]
+# ── 写 ──────────────────────────────────────────
 
 
-async def update(
-    db: AsyncSession,
-    memory_id_: str,
+async def write(
+    scope: MemoryScope,
+    memory_type: str,
+    fields: dict[str, Any],
     *,
-    reason: str,
-    content: str | None = None,
-    theme: str | None = None,
-    confidence: float | None = None,
-) -> Memory:
+    db: AsyncSession | None = None,
+    extraction_id: str = "",
+    trace_id: str = "",
+    extract_context: Any = None,
+) -> WriteResult:
     """
-    修改。**reason 是必需参数**。
+    写一条记忆。已存在则按 merge_op 合并。
 
-    强制 reason 的理由：记忆一定会记错，排查时 history 是唯一线索。
-    做成可选参数的话调用方（尤其是 LLM）就会省略它。
+    db 可以为 None —— 那时只写文件不更新索引。提取流程会传 db，
+    而单元测试和脚本可以不传。
     """
-    if not reason.strip():
-        raise BadRequestError("修改记忆必须说明原因", code="memory_reason_required")
-    mem = await get(db, memory_id_)
-    before = {"content": mem.content, "theme": mem.theme, "confidence": mem.confidence}
-    if content is not None:
-        c = " ".join(content.split())[:MAX_CONTENT_CHARS]
-        if c:
-            mem.content = c
-    if theme is not None:
-        mem.theme = " ".join(theme.split())[:64] or mem.theme
-    if confidence is not None:
-        mem.confidence = max(0.0, min(1.0, confidence))
-    _append_history(mem, "update", reason, before)
-    await db.flush()
-    return mem
+    schema = _require_schema(scope, memory_type)
+    rel_path = await _store.resolve_path(scope, schema, fields, extract_context=extract_context)
+    uri_hint = f"{schema.memory_type}:{rel_path}"
 
-
-async def archive(db: AsyncSession, memory_id_: str, *, reason: str) -> Memory:
-    """
-    归档（软删）。
-
-    不真删的理由：模型下一轮可能重新提炼出同一条，用户得反复删。
-    归档保留了"这条被否决过"的信息。
-    """
-    if not reason.strip():
-        raise BadRequestError("删除记忆必须说明原因", code="memory_reason_required")
-    mem = await get(db, memory_id_)
-    _append_history(mem, "archive", reason, {"archived_at": mem.archived_at})
-    mem.archived_at = now_ms()
-    await db.flush()
-    return mem
-
-
-async def restore(db: AsyncSession, memory_id_: str) -> Memory:
-    mem = await get(db, memory_id_)
-    _append_history(mem, "restore", "用户恢复", {"archived_at": mem.archived_at})
-    mem.archived_at = None
-    await db.flush()
-    return mem
-
-
-async def merge(
-    db: AsyncSession,
-    *,
-    keep_id: str,
-    drop_id: str,
-    content: str,
-    reason: str,
-    theme: str | None = None,
-) -> Memory:
-    """
-    合并两条记忆。保留一条，归档另一条。
-
-    合并而非直接删：被归档的那条的 history 保留下来，
-    "这两条曾经是分开的"这个事实不丢。
-    """
-    if not reason.strip():
-        raise BadRequestError("合并记忆必须说明原因", code="memory_reason_required")
-    if keep_id == drop_id:
-        raise BadRequestError("不能和自己合并", code="memory_merge_self")
-
-    keep = await get(db, keep_id)
-    drop = await get(db, drop_id)
-
-    before = {"content": keep.content, "theme": keep.theme, "merged_from": drop.content}
-    keep.content = " ".join(content.split())[:MAX_CONTENT_CHARS] or keep.content
-    if theme:
-        keep.theme = " ".join(theme.split())[:64]
-    # 合并后置信度取较高的 —— 两条独立记录指向同一件事，
-    # 本身就是这件事更可信的证据
-    keep.confidence = max(keep.confidence, drop.confidence)
-    keep.hit = keep.hit + drop.hit
-    _append_history(keep, "merge", reason, before)
-
-    _append_history(drop, "merged_into", f"合并进 {keep_id}：{reason}", {})
-    drop.archived_at = now_ms()
-
-    await db.flush()
-    return keep
-
-
-async def touch_hits(db: AsyncSession, ids: list[str]) -> None:
-    """
-    召回命中后递增 hit。
-
-    单独一个函数是为了让召回本身保持只读 —— 召回在请求路径上，
-    写库失败不该影响这一轮对话。调用方决定要不要 await 它。
-    """
-    if not ids:
-        return
-    now = now_ms()
-    rows = list((await db.execute(select(Memory).where(Memory.id.in_(ids)))).scalars())
-    for m in rows:
-        m.hit += 1
-        m.last_hit_at = now
-    await db.flush()
-
-
-# ─────────────────────────── 读 ───────────────────────────
-
-
-async def get(db: AsyncSession, memory_id_: str) -> Memory:
-    mem = (
-        await db.execute(select(Memory).where(Memory.id == memory_id_))
-    ).scalar_one_or_none()
-    if mem is None:
-        raise NotFoundError("记忆不存在", code="memory_not_found")
-    return mem
-
-
-async def list_all(
-    db: AsyncSession,
-    *,
-    include_archived: bool = False,
-    theme: str | None = None,
-    limit: int = 200,
-) -> list[Memory]:
-    q = select(Memory)
-    if not include_archived:
-        q = q.where(Memory.archived_at.is_(None))
-    if theme:
-        q = q.where(Memory.theme == theme)
-    q = q.order_by(Memory.updated_at.desc()).limit(min(limit, 500))
-    return list((await db.execute(q)).scalars())
-
-
-async def themes(db: AsyncSession) -> list[tuple[str, int]]:
-    rows = (
-        await db.execute(
-            select(Memory.theme, func.count())
-            .where(Memory.archived_at.is_(None))
-            .group_by(Memory.theme)
-            .order_by(func.count().desc())
+    async with _lock_for(uri_hint):
+        return await _write_locked(
+            scope,
+            schema,
+            rel_path,
+            fields,
+            db=db,
+            extraction_id=extraction_id,
+            trace_id=trace_id,
+            extract_context=extract_context,
         )
-    ).all()
-    return [(r[0], int(r[1])) for r in rows]
 
 
-async def recall(
-    db: AsyncSession, query: str, *, top_k: int = DEFAULT_TOP_K, agent_id: str | None = None
-) -> list[RecallHit]:
-    """
-    召回相关记忆。**零 LLM 调用**。
-
-    ## 为什么不用 LLM 检索
-
-    LLM 检索器把全量记忆注入 LLM 让它挑
-    。这是 O(记忆总量) 的成本，而且落在
-    **每一轮对话**上 —— 记忆库单向增长，用得越久越贵。
-
-    而记忆的价值不随数量线性增长：几百条里真正相关的通常不超过 5 条。
-
-    ## 打分构成
-
-    关键词重叠是主项，confidence 和 hit 是调节项：
-    - 关键词重叠：命中几个词
-    - confidence：模型随口提炼的（0.6）不该压过用户手写的（1.0）
-    - hit：反复被用到的记忆更可能相关
-
-    时间不参与打分 —— "最近记的"不等于"更相关"。
-    """
-    toks = _tokens(query)
-    if not toks:
-        return []
-
-    # 先用 SQL 粗筛：至少包含一个关键词的候选。
+async def _write_locked(
+    scope: MemoryScope,
+    schema: MemoryTypeSchema,
+    rel_path: str,
+    fields: dict[str, Any],
+    *,
+    db: AsyncSession | None,
+    extraction_id: str,
+    trace_id: str,
+    extract_context: Any,
+) -> WriteResult:
+    # 【写前重读磁盘】，不用调用方传来的旧内容。
     #
-    # 这一步把候选集从"全部记忆"缩到"可能相关的"，是避免 O(n) 的关键。
-    # LIKE 在 SQLite 上对几千行足够快，不需要 FTS。
-    conds = [Memory.content.like(f"%{t}%") for t in set(toks[:12])]
-    conds.extend(Memory.theme.like(f"%{t}%") for t in set(toks[:12]))
-    rows = list(
-        (
-            await db.execute(
-                select(Memory)
-                .where(Memory.archived_at.is_(None), or_(*conds))
-                .where(
-                    Memory.agent_id.in_(["", agent_id])
-                    if agent_id is not None
-                    else True
-                )
-                .order_by(Memory.hit.desc())
-                .limit(100)
-            )
-        ).scalars()
+    # 理由（OpenViking memory_updater.py:1048 写明）：同一批操作里可能有多条
+    # patch 打到同一个 URI，后一条必须看到前一条的结果。用缓存会让第二条
+    # patch 的 SEARCH 匹配失败。
+    old = await _store.read(scope, schema, rel_path)
+
+    if schema.operation_mode is OperationMode.UPDATE_ONLY and old is None:
+        return WriteResult(
+            uri="",
+            memory_type=schema.memory_type,
+            changed=False,
+            created=False,
+            version=0,
+            error="update_only：目标不存在，跳过",
+        )
+
+    if schema.operation_mode is OperationMode.ADD_ONLY and old is not None:
+        # 只增不改：换个名字而不是覆盖或跳过。见 file_store.next_available_path。
+        rel_path = await _store.next_available_path(scope, schema, rel_path)
+        old = None
+
+    try:
+        merged = _merge_fields(schema, old, fields)
+    except MergeError as e:
+        log.warning(
+            "memory_merge_failed",
+            memory_type=schema.memory_type,
+            field=e.field_name,
+            error=str(e),
+        )
+        return WriteResult(
+            uri=old.uri if old else "",
+            memory_type=schema.memory_type,
+            changed=False,
+            created=False,
+            version=old.version if old else 0,
+            error=str(e),
+            before=old.body if old else "",
+        )
+
+    body = render.render_body(schema, merged, extract_context=extract_context)
+    item = render.build_item(schema, scope, merged, body, old=old)
+
+    # 幂等：内容没变就不写盘、version 不递增。
+    #
+    # 没有这一步的话每次 commit 都产生一堆无意义的 version 跳动和 git diff ——
+    # 而记忆目录进 git 的全部价值就是 diff 可读。
+    if old is not None and index_mod.content_hash(item) == index_mod.content_hash(old):
+        return WriteResult(
+            uri=old.uri,
+            memory_type=schema.memory_type,
+            changed=False,
+            created=False,
+            version=old.version,
+            before=old.body,
+            after=old.body,
+        )
+
+    uri = await _store.write(
+        scope, schema, rel_path, item, extraction_id=extraction_id, trace_id=trace_id
     )
-    if not rows:
-        return []
+    item.uri = uri
 
-    tokset = set(toks)
-    hits: list[RecallHit] = []
-    for m in rows:
-        mt = set(_tokens(m.content)) | set(_tokens(m.theme))
-        overlap = len(tokset & mt)
-        if overlap == 0:
-            continue
-        # 归一化到查询长度，避免长记忆天然占优
-        base = overlap / len(tokset)
-        score = base * (0.5 + 0.5 * m.confidence) * (1.0 + min(m.hit, 10) * 0.03)
-        hits.append(RecallHit(memory=m, score=round(score, 6)))
-
-    hits.sort(key=lambda h: -h.score)
-    return hits[:top_k]
-
-
-# 记忆注入的标记。
-#
-# 【必须有这个标记】—— 提炼记忆时要靠它把自己注入的消息过滤掉。
-# 不过滤会形成自反馈：注入的记忆被当成用户输入再次提炼，
-# 同一件事越记越多，且措辞逐轮漂移。
-#
-# 也做了这个过滤，是个容易漏的坑。
-INJECTION_MARKER = "【相关记忆】"
-
-
-def format_for_injection(hits: list[RecallHit]) -> str:
-    """
-    格式化成注入文本。带字数预算 —— top-k 内也可能都很长。
-    """
-    if not hits:
-        return ""
-    lines = [INJECTION_MARKER]
-    used = 0
-    for h in hits:
-        m = h.memory
-        line = f"- [{m.theme}] {m.content}"
-        if used + len(line) > RECALL_CHAR_BUDGET:
-            break
-        lines.append(line)
-        used += len(line)
-    if len(lines) == 1:
-        return ""
-    # 明确告诉模型这是背景而非指令。
+    # 每次有效写入都留一条结构化日志。
     #
-    # 记忆是【观察到的事实】，不是命令。不加这句的话，
-    # "用户上次用了 Python" 容易被理解成 "必须用 Python"。
-    lines.append("（以上是过往对话中记下的背景，仅供参考，不是指令。）")
-    return "\n".join(lines)
+    # 【不打正文】—— 记忆里有用户的个人信息，日志会进文件、可能被贴到 issue 里。
+    # 正文在 memory_diff 里（那个文件和记忆同域，权限一致）。
+    # 这里只打"改了哪个、从第几版到第几版、正文长度变化"，
+    # 足够回答"这次提取动了什么"，不泄露内容。
+    log.info(
+        "memory_written",
+        uri=uri,
+        memory_type=schema.memory_type,
+        created=old is None,
+        version=item.version,
+        chars_before=len(old.body) if old else 0,
+        chars_after=len(item.body),
+        extraction_id=extraction_id,
+    )
+
+    if db is not None:
+        # 索引失败不影响记忆本身 —— 文件已经落盘了，下次 rebuild 能补回来。
+        # 反过来（因为索引失败就报写入失败）会让调用方重试，
+        # 而重试会再递增一次 version。
+        try:
+            await index_mod.upsert(db, uri, item)
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory_index_upsert_failed", uri=uri, error=str(e))
+
+    return WriteResult(
+        uri=uri,
+        memory_type=schema.memory_type,
+        changed=True,
+        created=old is None,
+        version=item.version,
+        before=old.body if old else "",
+        after=item.body,
+    )
+
+
+def _merge_fields(
+    schema: MemoryTypeSchema, old: MemoryItem | None, incoming: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    按 merge_op 逐字段合并。
+
+    ## 为什么 content 的 current 取 merge_source 而不是 body
+
+    content 字段的值在写入时被渲染成正文，frontmatter 里不存它
+    （见 render.serialize）。所以下一次合并必须把正文当 current，
+    否则 SEARCH 匹配的是空值。
+
+    但【不能直接用 body】—— content_template 会在外面套一层壳
+    （tool_notes 的 "# 工具：xxx" + 计数行）。拿渲染结果当输入再渲染一次，
+    壳会被重复叠加。实测在试验场里 run_shell.md 长出了两个标题和两组计数行，
+    而 version 每涨一次多一层。
+
+    merge_source 优先返回 raw_content（渲染前的原始值），
+    只有没有模板时才回落 body。
+
+    OpenViking 靠 MemoryFile.content 始终是原始内容来避免这件事
+    （模板只在 serialize 时套用，dataclass.py:252 的 plain_content
+    只剥链接不剥模板）。我们把原始值单独存了一份。
+    """
+    merged: dict[str, Any] = {}
+
+    for field in schema.fields:
+        if field.name in incoming:
+            if old is None:
+                current = None
+            elif field.name == "content":
+                current = old.merge_source
+            else:
+                current = old.fields.get(field.name)
+            merged[field.name] = apply_merge(field, current, incoming[field.name])
+        elif old is not None:
+            # LLM 没提到这个字段 → 保留旧值。
+            # 不保留的话一次只改 summary 的更新会把 goal 抹掉。
+            merged[field.name] = (
+                old.merge_source if field.name == "content" else old.fields.get(field.name)
+            )
+        elif field.init_value is not None:
+            merged[field.name] = field.init_value
+
+    return {k: v for k, v in merged.items() if v is not None}
+
+
+async def write_many(
+    ops: list[WriteOp],
+    *,
+    db: AsyncSession | None = None,
+    extraction_id: str = "",
+    trace_id: str = "",
+) -> BatchResult:
+    """
+    批量写。
+
+    ## 为什么串行而不是 gather
+
+    同一批里可能有多条操作打到同一个文件（两条 patch 改 profile 的不同段落）。
+    并发执行时后者读到的是前者写之前的内容，SEARCH 会匹配失败 —— 而失败信息
+    看起来像"LLM 写错了 search"，实际是并发问题。
+
+    锁能挡住数据丢失，但挡不住这类假失败。串行执行让"后一条看到前一条的结果"
+    成为确定的行为。记忆写入不在热路径上，串行的代价可以接受。
+    """
+    result = BatchResult(extraction_id=extraction_id, trace_id=trace_id)
+    for op in ops:
+        try:
+            result.results.append(
+                await write(
+                    op.scope,
+                    op.memory_type,
+                    op.fields,
+                    db=db,
+                    extraction_id=op.extraction_id or extraction_id,
+                    trace_id=op.trace_id or trace_id,
+                    extract_context=op.extract_context,
+                )
+            )
+        except (ValueError, PathScopeError) as e:
+            result.results.append(
+                WriteResult(
+                    uri="",
+                    memory_type=op.memory_type,
+                    changed=False,
+                    created=False,
+                    version=0,
+                    error=str(e),
+                )
+            )
+    return result
+
+
+async def delete_uri(uri: str, *, db: AsyncSession | None = None) -> bool:
+    """删一条。痕迹需求见 delete_with_trace —— 这个函数只回布尔。"""
+    return (await delete_with_trace(uri, db=db)).ok
+
+
+async def delete_with_trace(uri: str, *, db: AsyncSession | None = None) -> DeleteResult:
+    """
+    删一条并保留正文。
+
+    ## 为什么删除前要先读
+
+    删掉的记忆【没有别处可查】。不留正文的话，"模型把一条重要经验删了"
+    这件事只剩一行 uri，无法判断该不该恢复，也无法恢复。
+
+    多一次读的成本换可追溯性，值得 —— 删除是低频操作。
+    """
+    item = await _store.read_uri(uri)
+    ok = await _store.delete_uri(uri)
+
+    if not ok:
+        return DeleteResult(uri=uri, error="文件不存在或删除失败")
+
+    if db is not None:
+        try:
+            await index_mod.remove(db, uri)
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory_index_remove_failed", uri=uri, error=str(e))
+
+    return DeleteResult(
+        uri=uri,
+        memory_type=item.memory_type if item else "",
+        deleted_content=item.body if item else "",
+    )
+
+
+# ── 目录索引 ──────────────────────────────────────
+
+
+async def resolve_embedding_model(db: AsyncSession) -> ResolvedModel | None:
+    """
+    解析当前配置的嵌入模型。没配返回 None。
+
+    ## 为什么没配是 None 而不是异常
+
+    嵌入模型是【可选】的。没配时向量召回关闭、回落关键词搜索，
+    系统仍然完全可用。抛异常会让"没配嵌入模型"变成"记忆功能不可用"，
+    而那是过度耦合。
+
+    不回落到 chat 模型：对话模型没有 /embeddings 端点，
+    调用它只会得到 404，而那个错误看起来像配置错误。
+    """
+    from app.modules.endpoint import service as endpoint_service
+
+    try:
+        resolved = await endpoint_service.resolve(db, purpose="embedding")
+    except Exception as e:  # noqa: BLE001
+        log.debug("memory_embedding_model_unavailable", error=str(e))
+        return None
+
+    # resolve 的兜底链会回落到 chat。嵌入必须是【显式配置】的 ——
+    # 拿一个对话模型去调 /embeddings 得到的 404 会被误读成配置错误。
+    if resolved.purpose != "embedding":
+        log.debug("memory_embedding_model_not_configured", fell_back_to=resolved.purpose)
+        return None
+    return resolved
+
+
+async def vectorize(db: AsyncSession, uris: list[str]) -> vectorize_mod.VectorizeReport:
+    """给这些 uri 算向量。嵌入模型没配时整体跳过。"""
+    model = await resolve_embedding_model(db)
+    return await vectorize_mod.vectorize_uris(db, uris, model=model, read_item=read_uri)
+
+
+async def search_semantic(
+    db: AsyncSession,
+    scope: MemoryScope,
+    query: str,
+    *,
+    limit: int = 10,
+    memory_type: str = "",
+) -> list[vectorize_mod.SearchHit]:
+    """语义搜索。搜索范围按三层隔离筛，见 vectorize.visible_scopes。"""
+    model = await resolve_embedding_model(db)
+    return await vectorize_mod.search(
+        db, scope, query, model=model, limit=limit, memory_type=memory_type
+    )
+
+
+async def vector_status(db: AsyncSession) -> dict[str, int]:
+    """向量的新鲜度统计。给设置页显示"有 N 条已失效"。"""
+    model = await resolve_embedding_model(db)
+    return await vectorize_mod.stale_count(db, model=model)
+
+
+async def revectorize(db: AsyncSession, *, only_stale: bool = True) -> vectorize_mod.VectorizeReport:
+    """
+    一键重算向量。用户换嵌入模型后手动触发。
+
+    不自动跑的理由见 vectorize.revectorize_all 的说明 ——
+    那可能是几千次 API 调用。
+    """
+    model = await resolve_embedding_model(db)
+    return await vectorize_mod.revectorize_all(
+        db, model=model, read_item=read_uri, only_stale=only_stale
+    )
+
+
+async def clear_vectors(db: AsyncSession) -> int:
+    """清空所有向量，让召回干净地回落关键词。"""
+    return await vectorize_mod.clear_all(db)
+
+
+async def write_diff(batch: BatchResult, *, scope: MemoryScope) -> str:
+    """
+    把一批改动的痕迹落盘。返回文件路径（相对 data/memory/）。
+
+    ## 为什么落盘而不是只打日志
+
+    日志会滚动、会被过滤、混在几万行里。而"上周它还知道我用 uv，怎么忘了"
+    这类问题需要按时间回溯【记忆本身的变更史】—— 那要求痕迹和记忆放在一起、
+    活得和记忆一样久。
+
+    OpenViking 把它写成归档目录里的 memory_diff.json。我们同样落盘，
+    但放在 .trace/ 下按 extraction_id 命名 —— 我们没有"归档"这个概念，
+    而按提取批次分文件让"这一次提取做了什么"是一个文件而非一段日志。
+    """
+    diff = batch.to_diff()
+    name = batch.extraction_id or f"anon_{diff['extracted_at']}"
+    rel = f"{name}.json"
+    path = layout.trace_dir(scope) / rel
+    await asyncio.to_thread(_write_json, path, diff)
+
+    log.info(
+        "memory_diff_written",
+        extraction_id=batch.extraction_id,
+        adds=diff["summary"]["total_adds"],
+        updates=diff["summary"]["total_updates"],
+        deletes=diff["summary"]["total_deletes"],
+        unchanged=diff["summary"]["total_unchanged"],
+        errors=diff["summary"]["total_errors"],
+        path=str(path),
+    )
+    return rel
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+async def refresh_overview(scope: MemoryScope, memory_type: str) -> str:
+    """
+    重建某类记忆的 .overview.md。schema 没有 overview_template 时是 no-op。
+
+    在写入之后调用，不是写入的一部分 —— 一批写入结束后重建一次比每写一条
+    重建一次省得多（重建要读整个目录）。
+    """
+    schema = _require_schema(scope, memory_type)
+    if not schema.overview_template:
+        return ""
+
+    items = await _store.list_items(scope, schema)
+    directory = layout.type_dir(scope, schema)
+    content = render.render_overview(schema, items, directory.name)
+    return await _store.write_overview(scope, schema, "", content)
+
+
+# ── 生命周期 ──────────────────────────────────────
+
+
+async def init_agent(agent_id: str, *, db: AsyncSession | None = None) -> list[str]:
+    """
+    建目录骨架 + 写单文件类型的初值。智能体创建时调用一次。
+
+    幂等：已存在的文件不覆盖，可以重复调用（重启、修复）。
+    """
+    created = await _store.init_agent(agent_id, registry.get_schemas().enabled())
+
+    if db is not None and created:
+        for uri in created:
+            item = await _store.read_uri(uri)
+            if item is not None:
+                try:
+                    await index_mod.upsert(db, uri, item)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("memory_index_upsert_failed", uri=uri, error=str(e))
+
+    log.info("memory_agent_initialized", agent_id=agent_id, created=len(created))
+    return created
+
+
+async def drop_agent(agent_id: str, *, db: AsyncSession | None = None) -> int:
+    count = await _store.drop_agent(agent_id)
+    if db is not None:
+        await index_mod.remove_agent(db, agent_id)
+    log.info("memory_agent_dropped", agent_id=agent_id, files=count)
+    return count
+
+
+async def drop_session(agent_id: str, session_id: str, *, db: AsyncSession | None = None) -> int:
+    count = await _store.drop_session(agent_id, session_id)
+    if db is not None:
+        await index_mod.remove_session(db, agent_id, session_id)
+    log.info("memory_session_dropped", agent_id=agent_id, session_id=session_id, files=count)
+    return count
+
+
+async def rebuild_index(db: AsyncSession) -> int:
+    """
+    从文件全量重建索引。
+
+    什么时候需要：手动改过记忆文件、索引表被清空、或怀疑索引与文件不一致。
+    保留 active_count（热度是行为数据，不该被重建抹掉）。
+    """
+    entries = await _store.iter_all()
+    n = await index_mod.replace_all(db, entries)
+    log.info("memory_index_rebuilt", count=n)
+    return n
+
+
+def diagnostics() -> list[dict[str, str]]:
+    """schema 加载期的问题。设置页显示用。"""
+    return [
+        {"level": d.level, "message": d.message, "source": d.source}
+        for d in registry.get_schemas().diagnostics
+    ]
+
+
+__all__ = [
+    "MemoryScope",
+    "MemoryScopeKind",
+    "delete_uri",
+    "delete_with_trace",
+    "diagnostics",
+    "write_diff",
+    "drop_agent",
+    "drop_session",
+    "get",
+    "get_schema",
+    "init_agent",
+    "list_index",
+    "list_items",
+    "read_uri",
+    "rebuild_index",
+    "refresh_overview",
+    "visible_types",
+    "write",
+    "write_many",
+]

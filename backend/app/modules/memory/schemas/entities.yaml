@@ -1,0 +1,89 @@
+# 实体卡片 —— 会话级。
+#
+# 会话隔离的理由（docs/architecture/memory.md#为什么事件和实体只在会话内生效）：
+# 会话 A 里的"张三 = 后端同事"会在会话 B（完全无关的话题）里被召回并注入
+# 提示词，模型于是开始提张三。这不是记性好，是串台。
+#
+# 结构约束照抄 OpenViking（entities.yaml:42）：H1 + 一句描述 + 2-4 个 H2，
+# 每个 H2 下必须是列表。理由是实体卡片会被整段注入提示词，
+# 段落式正文在预算紧张时无法"只取前几条"降级，列表可以。
+
+memory_type: entities
+scope: session
+directory: "entities"
+filename_template: "{{ category }}/{{ name }}.md"
+operation_mode: upsert
+peer_enabled: false
+
+description: |
+  第三方实体卡片。本次对话里提到的人、组织、地点、项目、产品、作品、概念。
+
+  记的是"这个实体是什么"以及它的稳定关系。
+
+  该记：
+  - 身份、来源、角色、与用户的关系
+  - 明确说过、之后可能被问到的具体事实：数量、日期、地点、头衔、亲属关系
+  - 与其它实体的关系
+
+  不该记：
+  - 用户自己（那是 profile）
+  - 一次性的、与实体本身无关的事（那是 events）
+  - 推测出来的属性
+
+  规则：
+  - category 和 name 一旦定了就不改 —— 改它们等于换文件路径，那是删旧建新
+  - 更新时合并去重，除非被明确否定，不要删掉已有的原子事实
+  - 别为了"概括"而丢掉确切的名字、数量、日期、地点、头衔、亲属关系
+
+embedding_template: |-
+  {{ category }} / {{ name }}
+
+  {{ content }}
+
+overview_template: |-
+  # 实体索引{% if items %}（{{ items[0].file_content.category|default(directory_name, true) }}）{% endif %}
+
+  {% for item in items %}
+  - [{{ item.file_content.name|default(item.file_name, true) }}](./{{ item.file_name }})
+  {% endfor %}
+
+fields:
+  - name: category
+    type: string
+    merge_op: immutable
+    description: |
+      实体类别。小写下划线，最多 2 个词。它是一级目录名。
+
+      常用值：people / organization / project / product / place / concept / work
+      优先复用已有类别，不要为一个实体新造类别。
+
+  - name: name
+    type: string
+    merge_op: immutable
+    description: |
+      实体名。中文原样写；英文用小写下划线，最多 3 个词。它是文件名。
+
+  - name: content
+    type: string
+    merge_op: patch
+    description: |
+      实体卡片。Markdown，结构固定：
+
+      一个 H1 写显示名，下一行是一句平实的描述（不能以 -、* 或 1. 开头）。
+      然后 2-4 个 H2 小节，每个 H2 下【必须】是无序列表，每节 1-5 条，
+      不要在 H2 下写段落。
+
+      小节标题按内容自选，常用：描述 / 关键事实 / 角色 / 关系 / 意义
+
+      总量控制在 6-14 条、约 1200 字以内。
+
+      示例：
+      # 小明
+      用户的同事，负责后端服务。
+
+      ## 关键事实
+      - 主要维护 auth 与 billing 两个服务
+      - 2026-07 起接手发布流程
+
+      ## 关系
+      - 与用户在同一个项目组

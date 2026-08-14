@@ -1,99 +1,344 @@
 """
-长期记忆模型。
+记忆系统的数据模型。
 
-## 与常见实现的关系
+## MemoryExtraction
 
-只有 实现了真正的跨会话长期记忆。`memory_agent_node.py`
-是 **0 字节空文件**，它唯一的记忆表 `shortterm_memory` 索引带
-`conversation_uid`，天然不跨会话；同类实现 走静态 `AGENTS.md` 路线，模型只读不写。
+记录每个智能体在每个会话中已提取到哪条消息（watermark）。
+用于增量提取和多智能体隔离。
 
-所以这块主要参考 ，但避开它的两个缺陷（`lru_cache` 永不失效、
-LLM 检索 O(记忆总量)）。
+## MemoryScope / MemoryItem / WriteOp / BatchResult
 
-## 为什么用数据库而不是 YAML
-
-存 `config/personas/memory.yaml`，靠 `portalocker` 文件锁保证
-并发。本项目已经有 SQLite，再引入一套文件锁没有收益 —— 而且记忆需要按
-theme 过滤、按 hit 排序、按时间范围查，这些用 SQL 一行就够，用 YAML 得
-全量加载到内存再筛。
+这些是业务模型（dataclass），不是数据库表。
+数据库表只有 MemoryExtraction 和 MemoryIndex（在 models_db.py）。
 """
 
 from __future__ import annotations
 
-from sqlalchemy import Float, Index, Integer, String, Text
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infra.db.base import Base, TimestampMixin
 
+if TYPE_CHECKING:
+    from app.modules.memory.schema import MemoryScopeKind
 
-class Memory(Base, TimestampMixin):
+
+class MemoryExtraction(Base, TimestampMixin):
     """
-    一条长期记忆。
+    记录每个智能体在每个会话中已提取到哪条消息。
 
-    ## history 是这张表最重要的字段
-
-    记忆一定会记错。排查"AI 为什么以为我喜欢 X"时，`history` 是唯一线索 ——
-    没有它只能看到当前状态，无法知道它怎么来的、要不要信。
-
-    少见实现做了这个设计，
-    而且它把 reason 做成了 update/delete/merge 三个工具的**必需参数**。
-    这条直接照抄。
+    用途:
+    - 增量提取: 只处理 seq > last_seq 的新消息
+    - 多智能体隔离: 每个智能体各自维护水位线
+    - 前端展示: 显示"已处理到第 N 条消息"
     """
 
-    __tablename__ = "memory"
+    __tablename__ = "memory_extraction"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-
-    # 记忆正文。一句话一件事 —— 一条塞多件事会让后续的更新和删除
-    # 无法精确操作（想改其中一件就得重写整条）。
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-
-    # 分类主题。用于召回时缩小候选集，避免全量注入 LLM。
-    #
-    # 不做成枚举：主题是随用户领域长出来的（写代码的人和写小说的人
-    # 需要的分类完全不同），固定枚举一定不够用。
-    theme: Mapped[str] = mapped_column(String(64), default="其他", nullable=False)
-
-    # 变更历史，JSON 数组。每条含 op / reason / before / at。
-    #
-    # 存 JSON 而不是开独立表：它只跟着这条记忆读写，从不单独查询，
-    # 独立表只会带来一次多余的 join。
-    history: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
-
-    # 引用计数。召回命中时递增，用于"宽泛查询优先给高频记忆"。
-    hit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_hit_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    # 置信度。常见实现没有这个字段。
-    #
-    # 记忆是模型提炼的，一定有错。没有置信度的话，"用户随口说过一次"和
-    # "反复确认过"在召回时权重相同 —— 而前者恰恰是记忆污染的主要来源。
-    #
-    # 用户手动添加/编辑的记为 1.0，模型自动提炼的默认 0.6，
-    # 被再次确认时提升。
-    confidence: Mapped[float] = mapped_column(Float, default=0.6, nullable=False)
-
-    # 来源：auto（模型提炼）/ manual（用户手写）/ tool（模型主动调工具记）
-    #
-    # 溯源的第一层。用户看到一条错误记忆时，首先想知道的是
-    # "这是我说的还是它自己编的"。
-    source: Mapped[str] = mapped_column(String(16), default="auto", nullable=False)
-
-    # 提炼自哪个会话。用于"这条记忆是哪次对话产生的"回溯。
-    # 会话被删除后保留这个值（不做外键级联）—— 记忆比会话活得长，
-    # 加了 CASCADE 会导致清理旧会话时记忆一起消失。
-    origin_session_id: Mapped[str] = mapped_column(String(32), default="", nullable=False)
-    agent_id: Mapped[str] = mapped_column(String(32), default="", nullable=False)
-
-    # 归档而非删除。用户"删掉"一条记忆时置位，仍可在界面里查看和恢复。
-    #
-    # 真删的问题：模型下一轮可能重新提炼出同一条，用户得反复删。
-    # 归档保留了"这条被否决过"的信息，可以据此避免重复写入。
-    archived_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
-    __table_args__ = (
-        # 召回主路径：先按 theme 过滤，未归档的，按命中数和时间排
-        Index("ix_memory_recall", "archived_at", "theme", "hit"),
-        # 列表页按更新时间倒序
-        Index("ix_memory_updated", "archived_at", "updated_at"),
+    session_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("session.id", ondelete="CASCADE"), primary_key=True
     )
+    agent_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+    # 已提取到的最大 seq(含)。下次提取时只拿 seq > last_seq 的消息。
+    last_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # 累计提取次数(方便前端显示"第 N 次提取")
+    extraction_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # 最后一次提取的元信息(JSON 文本),存 CommitReport 的序列化
+    last_report: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+
+
+@dataclass
+class MemoryScope:
+    """
+    记忆的作用域：global / agent / session / peer。
+
+    三层层级：
+    - global: 全局共享（所有智能体可见）
+    - agent: 智能体级（跨会话，但只该智能体可见）
+    - session: 会话级（该智能体在本会话的记忆）
+
+    peer 维度用于「A 眼中的 B」，与 A 自己的记忆隔离。
+    """
+
+    agent_id: str = ""
+    session_id: str = ""
+    peer_agent_id: str = ""
+
+    def __post_init__(self) -> None:
+        """验证 scope 的一致性"""
+        if self.session_id and not self.agent_id:
+            raise ValueError("session_id 必须配合 agent_id 使用")
+        if self.peer_agent_id and not self.agent_id:
+            raise ValueError("peer_agent_id 必须配合 agent_id 使用")
+        if self.agent_id and self.peer_agent_id and self.agent_id == self.peer_agent_id:
+            raise ValueError("agent_id 和 peer_agent_id 不能等于同一个值")
+
+    @property
+    def is_peer_view(self) -> bool:
+        """是否是 peer 视角（agents/A/peers/B/）"""
+        return bool(self.peer_agent_id)
+
+    def allows(self, target: MemoryScopeKind) -> bool:
+        """
+        当前 scope 能否访问 target 层级的记忆。
+
+        规则：
+        - global scope (无 agent_id) 只能访问 GLOBAL 层
+        - agent scope (有 agent_id 无 session_id) 能访问 GLOBAL + AGENT 层
+        - session scope (有 agent_id + session_id) 能访问所有三层
+
+        这是**向下兼容的层次结构**：session 能看 agent 和 global，
+        但 agent 看不到 session，global 只能看自己。
+        """
+        # 运行时导入避免循环依赖
+        from app.modules.memory.schema import MemoryScopeKind as Kind
+
+        if target is Kind.GLOBAL:
+            return True  # 所有 scope 都能访问 global
+
+        if target is Kind.AGENT:
+            return bool(self.agent_id)  # 必须有 agent_id
+
+        if target is Kind.SESSION:
+            return bool(self.agent_id and self.session_id)  # 必须两者都有
+
+        return False
+
+
+@dataclass
+class MemoryItem:
+    """
+    一条记忆的完整内容。
+
+    从文件读出来的（render.py），或准备写进去的（file_store.py）。
+    """
+
+    uri: str
+    memory_type: str
+    scope: MemoryScope
+    fields: dict[str, Any]  # 业务字段（schema 定义的那些）
+    body: str  # 渲染后的正文（去掉 frontmatter）
+    raw_content: str  # 原始文件内容（含 frontmatter）
+    version: int = 1
+    created_at: int = 0
+    updated_at: int = 0
+    agent_id: str = ""
+    session_id: str = ""
+    peer_agent_id: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)  # 系统字段但不属于上述几类的
+
+    @property
+    def title(self) -> str:
+        """
+        从 fields 里提取标题。
+
+        按优先级尝试常见的标题字段名。不同 memory_type 用不同名字：
+        - experiences: experience_name
+        - preferences: preference_name
+        - events: event_name
+        - 其他: name / title / topic
+
+        用于展示和日志（比如测试里的 {i.title for i in items}）。
+        """
+        return str(
+            self.fields.get("experience_name")
+            or self.fields.get("preference_name")
+            or self.fields.get("event_name")
+            or self.fields.get("name")
+            or self.fields.get("title")
+            or self.fields.get("topic")
+            or ""
+        )
+
+    @property
+    def merge_source(self) -> str:
+        """
+        下一次合并该拿什么当 current。
+
+        ## 为什么不能直接用 body
+
+        content_template 会在 content 外面套一层壳（tool_notes 的
+        "# 工具：xxx" + 计数行）。拿渲染结果当输入再渲染一次，
+        壳会被【重复叠加】—— 实测 run_shell.md 长出了两个标题和两组计数行，
+        version 每涨一次多一层。
+
+        所以优先返回 raw_content（渲染前的原始值），只有没有模板时
+        （raw_content 为空）才回落 body。
+
+        OpenViking 靠 MemoryFile.content 始终是原始内容来避免这件事；
+        我们把原始值单独存了一份。
+        """
+        return self.raw_content or self.body
+
+
+@dataclass
+class WriteOp:
+    """
+    一次写入操作的全部参数。
+
+    ExtractLoop 产出 page_id 形式的操作，commit.py 解析成这个结构，
+    再传给 service.write_many。
+    """
+
+    scope: MemoryScope
+    memory_type: str
+    fields: dict[str, Any]
+    extract_context: Any = None  # ExtractContext，用于填充模板变量
+    extraction_id: str = ""  # 提取批次 ID（同一批共享）
+    trace_id: str = ""  # 痕迹链 ID（多次提取属于同一次会话提交）
+
+
+@dataclass
+class WriteResult:
+    """单条记忆的写入结果"""
+
+    uri: str
+    memory_type: str
+    changed: bool  # 内容是否真的变了
+    created: bool  # 是新建的还是更新
+    version: int = 1
+    error: str = ""
+    before: str = ""  # 写入前的正文（用于 diff）
+    after: str = ""  # 写入后的正文
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+
+@dataclass
+class DeleteResult:
+    """单条记忆的删除结果"""
+
+    uri: str = ""
+    memory_type: str = ""
+    deleted_content: str = ""  # 被删除的内容（用于痕迹）
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """成功删除时为 True"""
+        return not self.error
+
+    def __bool__(self) -> bool:
+        """成功删除时为 True（兼容旧代码的 if result: 判断）"""
+        return not self.error
+
+
+@dataclass
+class BatchResult:
+    """
+    一批写入操作的汇总结果。
+
+    包含成功/失败分类、全量日志、diff 输入。
+    """
+
+    extraction_id: str
+    trace_id: str = ""  # 痕迹链 ID（多次提取属于同一次会话提交）
+    results: list[WriteResult] = field(default_factory=list)
+    deletes: list[DeleteResult] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def written(self) -> list[str]:
+        """新建的记忆的 uri 列表"""
+        return [r.uri for r in self.results if r.created and r.ok]
+
+    @property
+    def edited(self) -> list[str]:
+        """更新的记忆的 uri 列表"""
+        return [r.uri for r in self.results if r.changed and not r.created and r.ok]
+
+    @property
+    def unchanged(self) -> list[str]:
+        """内容未变的 uri 列表"""
+        return [r.uri for r in self.results if not r.changed and r.ok]
+
+    @property
+    def discarded(self) -> int:
+        """失败的条数"""
+        return sum(1 for r in self.results if not r.ok)
+
+    @property
+    def ok(self) -> bool:
+        """整批是否全部成功（没有失败项）"""
+        return all(r.ok for r in self.results) and not self.errors
+
+    @property
+    def succeeded_uris(self) -> list[str]:
+        """成功的 uri（新建+更新+未变）"""
+        return [r.uri for r in self.results if r.ok]
+
+    def to_diff(self) -> dict[str, Any]:
+        """
+        生成 diff 文件的输入。
+
+        返回格式与 OpenViking 的 _extract_memory_write_result 对齐。
+        """
+        return {
+            "extraction_id": self.extraction_id,
+            "trace_id": self.trace_id,
+            "extracted_at": int(time.time() * 1000),
+            "written": [{"uri": uri} for uri in self.written],
+            "edited": [{"uri": uri} for uri in self.edited],
+            "unchanged": [{"uri": uri} for uri in self.unchanged],
+            "failed": [{"uri": r.uri, "error": r.error} for r in self.results if not r.ok],
+            "deletes": [
+                {"uri": d.uri, "memory_type": d.memory_type, "deleted_content": d.deleted_content}
+                for d in self.deletes
+            ],
+            "errors": [r.error for r in self.results if not r.ok] + self.errors,
+            "summary": {
+                "total_adds": len(self.written),
+                "total_updates": len(self.edited),
+                "total_deletes": len([d for d in self.deletes if d]),
+                "total_unchanged": len(self.unchanged),
+                "total_errors": len([r for r in self.results if not r.ok]) + len(self.errors),
+            },
+            "operations": {
+                "adds": [
+                    {
+                        "uri": r.uri,
+                        "memory_type": r.memory_type,
+                        "after": r.after,
+                    }
+                    for r in self.results
+                    if r.created and r.ok
+                ],
+                "updates": [
+                    {
+                        "uri": r.uri,
+                        "memory_type": r.memory_type,
+                        "before": r.before,
+                        "after": r.after,
+                    }
+                    for r in self.results
+                    if r.changed and not r.created and r.ok
+                ],
+                "unchanged": [
+                    {"uri": r.uri, "memory_type": r.memory_type}
+                    for r in self.results
+                    if not r.changed and r.ok
+                ],
+                "failed": [
+                    {"uri": r.uri, "memory_type": r.memory_type, "error": r.error}
+                    for r in self.results
+                    if not r.ok
+                ],
+                "deletes": [
+                    {
+                        "uri": d.uri,
+                        "memory_type": d.memory_type,
+                        "deleted_content": d.deleted_content,
+                    }
+                    for d in self.deletes
+                ],
+            },
+        }

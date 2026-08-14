@@ -1,0 +1,86 @@
+# 工具使用心得。
+#
+# 工具是【不可变池】：用户不能新增或改写工具，只能为每个智能体勾选启用哪些。
+# 见 docs/architecture/memory.md#工具与技能不可变工具池-vs-可写技能
+#
+# 这个类型演示 sum merge_op 的用法：total_calls / fail_count 累加，
+# 用来算失败率。
+
+memory_type: tool_notes
+scope: agent
+directory: "tool_notes"
+filename_template: "{{ tool_name }}.md"
+operation_mode: upsert
+peer_enabled: true
+
+description: |
+  某个工具的使用心得。按工具名分文件。
+
+  该记：
+  - 这个工具在什么场景下有效、什么场景下不该用
+  - 参数的正确写法（尤其是踩过坑的那些）
+  - 常见的失败模式及原因
+  - 与其它工具的配合顺序
+
+  不该记：
+  - 工具的参数定义（那在工具自己的 schema 里，模型每轮都能看到）
+  - 单次调用的具体结果
+
+  规则：
+  - tool_name 必须是实际调用过的工具名，原样复制，不要臆造
+  - 计数字段（total_calls / fail_count）填【本次会话新增的次数】，
+    系统会累加到历史值上。不要填累计总数
+
+content_template: |
+  # 工具：{{ tool_name }}
+
+  - 累计调用：{{ total_calls }}
+  - 累计失败：{{ fail_count }}
+
+  {{ content }}
+
+embedding_template: |-
+  工具 {{ tool_name }}
+
+  {{ content }}
+
+overview_template: |-
+  # 工具心得索引
+
+  {% for item in items %}
+  - [{{ item.file_content.tool_name|default(item.file_name, true) }}](./{{ item.file_name }})：调用 {{ item.file_content.total_calls|default(0, true) }} 次
+  {% endfor %}
+
+fields:
+  - name: tool_name
+    type: string
+    merge_op: immutable
+    description: |
+      工具名。必须原样复制自实际的工具调用记录（如 read_file、run_command）。
+      拿不到确切的工具名时不要生成这条记忆。
+
+  - name: total_calls
+    type: int
+    merge_op: sum
+    init_value: 0
+    description: 本次新增的调用次数。系统会累加到历史值上。
+
+  - name: fail_count
+    type: int
+    merge_op: sum
+    init_value: 0
+    description: 本次新增的失败次数。系统会累加到历史值上。
+
+  - name: content
+    type: string
+    merge_op: patch
+    description: |
+      使用心得。Markdown，2-4 个 H2 小节，每节下是无序列表。
+      建议的小节：适用场景 / 参数要点 / 常见失败 / 配合用法
+
+      示例：
+      ## 参数要点
+      - path 必须用相对工作区的相对路径，绝对路径会被白名单拒绝
+
+      ## 常见失败
+      - 对二进制文件调用会返回乱码，先用 glob 确认扩展名

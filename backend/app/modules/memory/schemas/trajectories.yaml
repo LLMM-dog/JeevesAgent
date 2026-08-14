@@ -1,0 +1,173 @@
+# 执行轨迹 —— 从一次任务中提炼出的【可复用操作契约】。
+#
+# add_only 因为轨迹是历史，不该被改写。它是 experiences 的原料：
+# trajectories（这类任务该怎么执行）→ experiences（踩过的坑）。
+#
+# ## 为什么这个类型的定义这么长
+#
+# OpenViking 的 trajectories.yaml 有 10784 字符，是它十个类型里最长的
+# （第二名 events 只有 7265）。原因是这个类型的失败模式最隐蔽：
+# LLM 会写出一份"看起来完整"的流水账，而那份流水账对未来的执行毫无指导价值 ——
+# 它记的是"这次发生了什么"，不是"下次遇到同类任务该怎么做"。
+#
+# 所以它用大量篇幅规定【格式】和【泛化要求】。我照搬其中在本项目成立的部分，
+# 去掉了为多租户业务系统设计的那些（Family 的九个枚举值对应它的 CRUD 场景，
+# 而 Jeeves 的任务是"改代码/查问题"，套不上）。
+#
+# ## 三个字段的分工（照抄它的设计）
+#
+# - task_query      —— 可复制重跑的任务描述。让"这类任务"可被重现
+# - retrieval_anchor —— 专为向量检索写的锚文本，不给人看
+# - content          —— 给未来的 agent 看的操作契约
+#
+# 分开的理由：检索用的文本和执行用的文本，最优写法完全不同。
+# 混成一个字段的话，要么检索命中率差，要么执行指导性差。
+
+memory_type: trajectories
+scope: agent
+directory: "trajectories"
+filename_template: "{{ trajectory_name }}.md"
+operation_mode: add_only
+peer_enabled: true
+
+description: |
+  从一次任务执行中提炼出的可复用操作契约。
+
+  什么时候提取：
+  - agent 完成了一个有决策、有工具调用、有多步动作的任务
+  - 纯闲聊、单轮问答、没有执行痕迹的对话【不提取】
+
+  核心要求：写给【未来的 agent】看，不是写给人看的日志。
+  判据是："下次遇到同类任务，照着这条记忆能不能少踩坑？"
+  如果答案是"不能，它只是说了这次发生了什么"，那就不该写成轨迹。
+
+  一个任务一条轨迹。同一个会话里的多个独立任务要拆开 ——
+  【不要】再额外写一条总结整个会话的伞状轨迹。
+
+# 时间行用 if 保护：extract_context 只在提取流程里存在。
+# 存储层被直接调用时（测试、手工修复、导入）没有它，
+# 不保护的话整个模板渲染失败，正文回落成裸 content —— 那会丢掉标题和任务描述。
+content_template: |
+  # {{ trajectory_name }}
+
+  - 结果：{{ outcome }}
+  {% if extract_context %}- 时间：{{ extract_context.get_timestamp(ranges) }}
+  {% endif %}
+  ## 可重跑的任务
+  {{ task_query }}
+
+  ## 操作契约
+  {{ content }}
+
+embedding_template: |-
+  {{ trajectory_name }}
+
+  {{ retrieval_anchor }}
+
+overview_template: |-
+  # 轨迹索引
+
+  {% for item in items %}
+  - [{{ item.file_content.trajectory_name|default(item.file_name, true) }}](./{{ item.file_name }})（{{ item.file_content.outcome|default('unknown', true) }}）
+  {% endfor %}
+
+fields:
+  - name: trajectory_name
+    type: string
+    merge_op: immutable
+    description: |
+      任务名。小写下划线，最多 5 个词。不带日期和序号 —— 重名时系统自动加后缀。
+
+      用【可复用的操作边界】命名，不要抄用户开场那句话的原词。
+      好：`async_test_hang_fix`、`sqlite_migration_batch_mode`
+      坏：`help_me_look_at_this_file`、`fix_the_bug`（说了等于没说）
+
+      同一类任务不要起近似但不同的名字（`test_fix` 和 `fix_tests` 并存）。
+
+  - name: outcome
+    type: string
+    merge_op: immutable
+    description: |
+      结果。只能取以下之一：success / failure / partial / unfinished / unknown
+
+  - name: task_query
+    type: string
+    merge_op: immutable
+    description: |
+      一段【可以直接复制去重跑】的任务描述，用用户的口吻写。
+
+      规则：
+      - 从对话上下文里重建【完整】的任务，不要照抄某一轮或整段会话
+      - 保留独立执行所必需的：目标、对象、约束、期望产出、验收标准
+      - 保留重跑必需的具体输入（文件路径、模块名、报错信息）。
+        【绝不】包含密钥、token、密码
+      - 把"上面那个"、"继续"、"为什么停了"这类指代解析成明确的上下文 ——
+        带指代的任务描述无法独立重跑
+      - 【不要】写助手的解法、工具结果、执行结论（那些属于 content）
+
+      示例：
+      在 backend/app/modules/agent/loop.py 里给工具调用加超时控制，
+      超时后要返回可读的错误文本而不是抛异常。改完跑 backend/tests 确认全绿。
+
+  - name: retrieval_anchor
+    type: string
+    merge_op: immutable
+    description: |
+      专为【向量检索】写的锚文本。不给人看，所以不必通顺。
+
+      格式：
+      场景：<什么情况下该召回这条>；边界：<已验证成立的复用条件>；
+      能力：<这条能指导什么操作>；对象：<主要作用对象>
+
+      规则：
+      - 比 content 短，只写"什么时候适用"
+      - 【只写正面适用条件】。不适用的场景写在 content 的「不适用于」里 ——
+        把反例写进锚文本会让它被错误的查询命中
+      - 泛化掉具体的标识符、数字、日期、路径。检索要匹配的是【同类任务】，
+        而不是这一次的具体实例
+
+      示例：
+      场景：异步测试挂住不返回；边界：已确认是 await 被异常吞掉而非死锁；
+      能力：定位并修复被裸 except 拦截的 CancelledError；对象：异步测试用例
+
+  - name: content
+    type: string
+    merge_op: patch
+    description: |
+      操作契约。严格按下面的格式和顺序，不要加别的标题或结尾语。
+
+      - 领域：<任务所属的领域或系统区域>
+      - 触发条件：<可复用的任务情境，一句话>
+      - 前置条件：
+        1. <必须先确认的状态、事实或前提>
+        2. <...>
+      - 不可推断的事实：
+        - <必须实际读取/验证、不许凭猜测的东西：文件当前内容、接口签名、
+          配置实际值>
+      - 步骤：
+        1. <给未来 agent 的第一步指令，带上关键工具名>
+        2. <下一步>
+        3. <直到写入/确认边界清晰为止>
+      - 反模式：
+        - <该避免的错误、漏掉的检查、错误的顺序、失败的尝试>
+      - 适用于：
+        - <这条记忆在什么情况下适用>
+      - 不适用于：
+        - <邻近但不该套用这条的情境 —— 这一项能防止错误复用>
+      - 结果：<最终结果和重要副作用，一句话>
+
+      规则：
+      - 写给未来的 agent 执行，不是写流水账。捕捉可复用的契约：
+        触发 → 前置检查 → 读取验证 → 执行 → 确认结果
+      - 【泛化】掉这一次的具体值：把 `loop.py:342` 写成"工具调用的入口函数"，
+        把 `3 passed` 写成"测试全绿"。留下具体值会让下次匹配不上
+      - 工具名可以保留 —— 那是可复用路径的一部分
+      - 失败的尝试写进「反模式」，不要写成正面步骤
+      - 会话里没有验证过的做法【不要】写进步骤（不要凭想象补一个正确解法）
+      - 触发条件、结果各一句话
+
+  - name: ranges
+    type: string
+    merge_op: immutable
+    description: |
+      这次任务对应的消息下标区间，如 "3-18"。用于推导时间。
