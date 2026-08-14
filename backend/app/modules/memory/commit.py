@@ -40,28 +40,6 @@ from app.modules.session import repo
 log = structlog.get_logger(__name__)
 
 
-async def find_agents_in_session(db: AsyncSession, session_id: str) -> list[str]:
-    """
-    识别会话中参与过的所有智能体（按首次出现顺序）。
-
-    ## 为什么从消息扫而不是从 session 表读
-
-    `session.agent_id` 只是【主智能体】（创建会话时绑定的那个）。
-    多智能体对话里 `message.agent_name` 可以是任意智能体，而且
-    智能体可以在会话中途加入或退出 —— 维护一份"当前活跃列表"需要
-    额外字段加同步逻辑，而消息本身就是唯一可靠的事实来源。
-
-    ## 只统计【发过言】的
-
-    只在旁观察但没发过消息的智能体不会出现在结果里 —— 那是对的：
-    没有它的消息，就没有它的行为可提取，跑一次提取只会白烧 token。
-
-    实现走 `repo.get_participating_agents`，SQL 层 GROUP BY 去重，
-    只传输 agent_name 列不加载正文。
-    """
-    return await repo.get_participating_agents(db, session_id)
-
-
 @dataclass
 class AgentReport:
     """
@@ -189,64 +167,55 @@ async def commit_session(
     db: AsyncSession,
     *,
     session_id: str,
-    agent_id: str | None = None,
     llm_call: Any,
     keep_recent_turns: int | None = None,
 ) -> CommitReport:
     """
     对会话中的所有智能体各提取一次。
 
-    ## 单智能体兼容模式
+    ## 统一流程
 
-    如果传了 `agent_id`，退化为单智能体模式：只给这个智能体提取，
-    返回的 CommitReport 保持旧版格式（`batch`/`messages_loaded` 等字段
-    有值，`agents` 为空）。这是为了让旧测试无需改动。
+    无论会话中有 1 个还是 N 个智能体，都走同样的流程：
+    1. 从会话表读取 agent_ids
+    2. 两阶段预取（共享记忆 + 私有记忆）
+    3. 并行提取所有智能体
 
-    ## 多智能体提取
+    ## 智能体列表
 
-    不传 `agent_id` 时（或传 None），识别会话中参与过的所有智能体
-    （按 agent_name 去重），给每个智能体各调用一次 `commit_session_agent`。
-    每个智能体看到的是:
-    - 全部消息（包括用户和其他智能体的）
-    - 只自己的记忆（预取和写入都隔离）
-    - 只自己的 watermark（增量提取）
+    从 Session.agent_ids 读取，支持动态添加/移除智能体。
+    如果列表为空，返回 "会话中没有智能体"。
+
+    ## 返回值
+
+    CommitReport.agents 包含每个智能体的提取结果（AgentReport）。
 
     llm_call 是 `async (messages) -> str`。注入而非内部构造：
     提取模型的解析走 endpoint.resolve('memory')，那属于调用方的关注点，
     而注入让测试能用一个假实现跑通整条管线。
     """
+    import asyncio
+
+    from sqlalchemy import select
+
+    from app.modules.memory.prefetch import prefetch_multi_agent
+    from app.modules.session.models import Session
+
     report = CommitReport(extraction_id=new_id("ext"), session_id=session_id)
 
     if not settings.memory.enabled:
         report.skipped = "记忆系统已关闭（memory.enabled=false）"
         return report
 
-    # ── 单智能体兼容模式 ──
-    if agent_id is not None:
-        agent_report = await commit_session_agent(
-            db,
-            session_id=session_id,
-            agent_id=agent_id,
-            llm_call=llm_call,
-            keep_recent_turns=keep_recent_turns,
-            use_watermark=False,  # 旧测试期待每次全量读
-        )
-        # 直接把 AgentReport 的字段映射回 CommitReport
-        report.messages_loaded = agent_report.messages_new
-        report.messages_used = agent_report.messages_new
-        report.prefetched_items = agent_report.prefetched_items
-        report.outcome = agent_report.outcome
-        report.batch = agent_report.batch  # 完整的 batch，包含真实 uri
-        report.diff_path = agent_report.diff_path
-        report.warnings.extend(agent_report.warnings)
-        if agent_report.warnings and not agent_report.written:
-            report.skipped = agent_report.warnings[0] if agent_report.warnings else ""
+    # ── 读取会话的智能体列表 ──
+    stmt = select(Session).where(Session.id == session_id)
+    session = (await db.execute(stmt)).scalar_one_or_none()
+    if not session:
+        report.skipped = "会话不存在"
         return report
 
-    # ── 多智能体模式 ──
-    agent_ids = await find_agents_in_session(db, session_id)
+    agent_ids = session.get_agent_ids()
     if not agent_ids:
-        report.skipped = "会话中没有智能体参与过"
+        report.skipped = "会话中没有智能体"
         return report
 
     # ── 两阶段预取 ──
@@ -255,8 +224,6 @@ async def commit_session(
     # 2. 并行提取每个智能体的私有记忆（agent scope）
     #
     # 这样避免重复搜索，同时隔离私有记忆。
-    import asyncio
-    from app.modules.memory.prefetch import prefetch_multi_agent
 
     # 读取消息（用于构建搜索查询）
     messages, timestamps = await _load_messages_for_extract(
@@ -478,6 +445,11 @@ async def commit_session_agent(
     # - 读取预取中被截断的记忆全文
     # - 搜索预取范围之外的记忆
     # - 读取预取列表中它认为需要的其他记忆
+
+    # 定义 scope（用于工具和写入）
+    scope_agent = MemoryScope(agent_id=agent_id)
+    scope_session = MemoryScope(agent_id=agent_id, session_id=session_id)
+
     schemas = memory_service.visible_types(prefetch_scope)
     tool_runner = ToolRunner(scope=prefetch_scope, pages=pre.pages, read_uris=set(pre.read_uris))
 
@@ -510,7 +482,6 @@ async def commit_session_agent(
         scope_session=scope_session,
         extract_context=ctx,
         warnings=agent_report.warnings,
-        agent_only=agent_only,
     )
 
     # ── 6. 合并写入 ──
