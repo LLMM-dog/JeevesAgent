@@ -199,6 +199,160 @@ class SandboxConfig(BaseModel):
         return self.timeout_default
 
 
+class MemoryConfig(BaseModel):
+    # 总开关。关掉时不提取、不召回，但已有的记忆文件保留 ——
+    # 删记忆要显式操作，不能因为关个开关就丢数据。
+    enabled: bool = True
+
+    # 提取时保留最近几轮不归档。
+    #
+    # 正在进行的对话还没结束，不该被总结。按 user 消息分轮
+    # （一轮 = 一个 user query + 后续 assistant/tool）。
+    #
+    # 3 而非 OpenViking 的 10：它按【条】数，我们按【轮】数。
+    # 一轮在本项目里可能有十几条消息（一次代码修改任务的工具调用很多），
+    # 3 轮已经比它的 10 条多。
+    keep_recent_turns: int = 3
+
+    # 单条记忆的正文上限（字符）。
+    #
+    # 超过就截断。理由是记忆会被整段注入提示词，一条失控的记忆
+    # （模型偶尔会把整个文件内容写进 content）能把窗口占满。
+    max_item_chars: int = 8_000
+
+    # 一次提取最多写多少条记忆。
+    #
+    # 防的是模型把一段对话拆成 50 个"事件"。真实的一轮对话产出
+    # 3~8 条记忆是正常的，超过 20 条说明它在拆碎片。
+    max_items_per_extraction: int = 20
+
+    # 提取的 ReAct 循环上限。与 OpenViking 的 max_iterations=3 一致。
+    #
+    # 这是【基础预算】。工具调用、格式重试、patch 修复、refetch
+    # 每次各 +1，所以实际轮数可能更多 —— 那三种情况不是"模型不听话"，
+    # 是信息不足，不该占用正常预算。
+    extract_max_iterations: int = 3
+
+    # 预取策略。对齐 OpenViking 的 eager_prefetch（memory_config.py:58）。
+    #
+    # true  = 一次性预取全部可改的记忆，不给模型工具
+    # false = 只预取轻量索引，给 list/read/search 让模型按需拉取
+    #
+    # 默认 true：记忆少时全预取省一轮 LLM 调用，且不会出现
+    # "模型没搜到于是新建重复记忆"。记忆多到装不下窗口时应该改成 false ——
+    # 那时全预取会挤掉对话内容，而对话才是提取的原料。
+    eager_prefetch: bool = True
+
+    # eager_prefetch=false 时，预取阶段仍然读取的记忆条数上限。
+    # 超出的部分靠模型自己 search/read。
+    #
+    # 5 与 OpenViking 的 prefetch_search_topn 一致（memory_config.py:64）。
+    prefetch_topn: int = 5
+
+    # 向量搜索查询文本的截断上限（字符）。
+    #
+    # 用于构建搜索查询的摘要：从对话消息中提取关键内容，截断到该长度。
+    # 查询太长会影响搜索性能，且嵌入模型通常有输入长度限制。
+    #
+    # 5000 与 OpenViking 的 _PREFETCH_SEARCH_QUERY_MAX_CHARS 一致。
+    prefetch_search_query_max_chars: int = 5_000
+
+    # 向量搜索返回的候选记忆数量上限。
+    #
+    # 搜索会返回按相关性排序的 URI 列表，取前 N 个。
+    # 实际加载多少由预算决定（prefetch_max_chars），但搜索结果数量
+    # 不应该太大，避免后续处理开销。
+    #
+    # 20 是合理值：相关性排第 20 之后的记忆基本不会被用到。
+    prefetch_search_limit: int = 20
+
+    # 构建搜索查询时，单条用户消息的截断上限（字符）。
+    # 1000 与 OpenViking 的 _PREFETCH_SEARCH_TEXT_PART_MAX_CHARS 一致。
+    prefetch_search_user_msg_max_chars: int = 1_000
+
+    # 构建搜索查询时，单条助手消息的截断上限（字符）。
+    # 500 与 OpenViking 的 _PREFETCH_SEARCH_ASSISTANT_TEXT_PART_MAX_CHARS 一致。
+    # 助手回复通常比用户输入长，但对召回的信号价值较低，截更短。
+    prefetch_search_assistant_msg_max_chars: int = 500
+
+    # ── 截断相关（都可以在前端调） ──
+    #
+    # 这几个原来硬编码在代码里。抽出来的理由：不同模型的窗口差异很大
+    # （8K 到 200K），而窗口小的模型需要更狠的截断。写死值意味着
+    # 换个小窗口模型就只能改代码。
+
+    # 提取时单条消息的正文上限（字符）。超过则截头尾，保留结论。
+    max_msg_chars: int = 1_200
+
+    # 一次提取的对话总量上限（字符）。超了从最早的轮次开始丢。
+    max_conversation_chars: int = 60_000
+
+    # 预取时单条记忆正文的展示上限（字符）。
+    #
+    # 比 max_msg_chars 宽松：预取内容是 patch 的 SEARCH 依据，
+    # 截太狠会让模型拿不到可匹配的原文，只能新建。
+    prefetch_preview_chars: int = 1_500
+
+    # 预取的【总字符预算】。超了从尾部类型开始丢条目。
+    #
+    # 必须有这个上限：原来 eager 模式不限量，实测一个有 120 条偏好的
+    # 智能体（用半年就会有）让预取吃掉 13572 token。而记忆预取和对话内容
+    # 抢同一个窗口 —— 预取吃太多就没地方放对话，而对话才是提取的原料。
+    #
+    # 24000 字符 ≈ 8000 token，给 128K 窗口的模型留足余量。
+    # 窗口小的模型要调低。
+    prefetch_max_chars: int = 24_000
+
+    # read_memory 工具单次返回的正文上限（字符）。
+    #
+    # 比预取更宽松：模型主动 read 说明它确实要看全文来构造 SEARCH。
+    tool_read_max_chars: int = 4_000
+
+    # search_memories 返回的条数上限。
+    # 与 OpenViking 的 search_files(limit=5) 一致。
+    tool_search_limit: int = 5
+
+    # ── 向量化 ──
+
+    # 单条文本的字节上限。按字节而非字符 —— 中文一个字符 3 字节。
+    embedding_max_bytes: int = 24_000
+
+    # 一次嵌入请求塞多少条文本。
+    #
+    # 32 是保守值：供应商限制差异很大（OpenAI 2048、部分自建 16），
+    # 超限的表现是 400 而不是自动截断。
+    embedding_batch_size: int = 32
+
+    # 语义搜索的最低相似度。低于它的结果不返回。
+    #
+    # 0 表示不过滤 —— 默认不过滤是因为合适的阈值【强依赖嵌入模型】：
+    # bge-m3 的 0.4 和另一个模型的 0.4 不是一回事。让用户按自己的
+    # 模型调，比我猜一个值更可靠。
+    search_min_score: float = 0.0
+
+    # 召回时注入提示词的记忆总字符上限。
+    #
+    # OpenViking 用 6500。本项目的窗口预算已经被系统提示词 + 工具定义
+    # 占了不少（18 个工具就 4300 token），所以取更保守的值。
+    recall_max_chars: int = 5_000
+
+    # 分类型召回配额。混在一起搜会让某一类占满名额 ——
+    # 三种类型语义完全不同，事件的相似度普遍比偏好高，
+    # 不分桶时偏好永远排不进前 10。
+    recall_limit_events: int = 8
+    recall_limit_entities: int = 8
+    recall_limit_preferences: int = 3
+    recall_limit_experiences: int = 5
+
+    # 热度在最终分里的权重。0 = 纯语义相似度。
+    #
+    # 0.15 而非更高：热度是辅助信号。给太高会让"经常被召回的记忆"
+    # 持续霸榜，形成正反馈 —— 越被召回越容易被召回，新记忆永远出不来。
+    hotness_weight: float = 0.15
+    # 热度的时间衰减半衰期（天）。与 OpenViking 的 DEFAULT_HALF_LIFE_DAYS 一致。
+    hotness_half_life_days: float = 7.0
+
+
 class WebSearchConfig(BaseModel):
     backend: str = "none"
     tavily_api_key: str = ""
@@ -229,6 +383,7 @@ class Settings(BaseSettings):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     websearch: WebSearchConfig = Field(default_factory=WebSearchConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     api_prefix: str = "/api"
 
@@ -273,6 +428,10 @@ class Settings(BaseSettings):
     @property
     def workspace_dir(self) -> Path:
         return PROJECT_ROOT / "workspace"
+
+    @property
+    def memory_dir(self) -> Path:
+        return self.data_dir / "memory"
 
     @property
     def skills_dir(self) -> Path:

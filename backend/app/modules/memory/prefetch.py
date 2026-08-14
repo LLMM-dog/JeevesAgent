@@ -28,6 +28,7 @@ events / trajectories 是只增不改的。既然不会去改已有的，回顾�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import structlog
 
@@ -204,29 +205,242 @@ def _scope_label(memory_type: str) -> str:
     return "本智能体，跨会话长期有效"
 
 
-async def prefetch(scope: MemoryScope, *, eager: bool | None = None, topn: int | None = None) -> PrefetchResult:
+def build_search_query(messages: list[Any], timestamps: list[Any] | None = None) -> str:
     """
-    读出这个 scope 下【可能被修改】的记忆。
+    从对话消息中构建紧凑的向量搜索查询。
 
-    只读 upsert / update_only 的类型 —— add_only 的不会被改，读它没用。
+    ## 设计原则（参考 OpenViking session_extract_context_provider.py:347）
+
+    - LLM 已经通过 ExtractContext 看到完整对话，搜索查询不需要重复全文
+    - 查询只需要**主题召回信号**：用户在谈什么、关键实体、上下文线索
+    - 用户消息权重更高（截断更宽松），助手消息次之
+
+    ## 截断策略
+
+    - 单条用户消息：最多 user_msg_max_chars 字符
+    - 单条助手消息：最多 assistant_msg_max_chars 字符
+    - 整个查询：最多 query_max_chars 字符
+
+    ## 返回格式
+
+    紧凑文本，空格分隔。嵌入模型会处理语义，不需要结构化格式。
+    """
+    from app.modules.agent.messages import Msg
+
+    cfg = settings.memory
+    user_max = cfg.prefetch_search_user_msg_max_chars
+    assistant_max = cfg.prefetch_search_assistant_msg_max_chars
+    query_max = cfg.prefetch_search_query_max_chars
+
+    sections: list[str] = []
+
+    for msg in messages:
+        if not isinstance(msg, Msg):
+            continue
+
+        role = msg.role
+        content = msg.content or ""
+
+        # 跳过系统消息和工具消息（对召回无信号价值）
+        if role in ("system", "tool"):
+            continue
+
+        # 规范化：去掉多余空白
+        normalized = " ".join(content.split())
+        if not normalized:
+            continue
+
+        # 按角色截断
+        max_chars = user_max if role == "user" else assistant_max
+        if len(normalized) > max_chars:
+            normalized = normalized[:max_chars].rstrip() + "..."
+
+        sections.append(normalized)
+
+    # 拼接并截断到总长度上限
+    query = " ".join(sections)
+    if len(query) > query_max:
+        query = query[: query_max - 3].rstrip() + "..."
+
+    return query if query else "conversation"  # 空查询时的 fallback
+
+
+async def prefetch(
+    scope: MemoryScope,
+    *,
+    messages: list[Any] | None = None,
+    db: Any = None,
+    model: Any = None,
+    eager: bool | None = None,
+    topn: int | None = None,
+) -> PrefetchResult:
+    """
+    预取这个 scope 下【可能被修改】的记忆。
+
+    ## 新增参数（向量搜索需要）
+
+    - messages: 对话消息列表，用于构建搜索查询
+    - db: 数据库连接，用于向量搜索
+    - model: 嵌入模型，用于查询向量化
+
+    ## 流程
+
+    1. **构建查询**：从消息中提取主题摘要
+    2. **向量搜索**：在 scope 范围内搜索相关记忆（如果有 messages + db + model）
+    3. **预算感知加载**：
+       - 高相关（top）：读全文，消耗预算
+       - 预算不足：只给 URI + 标题，LLM 按需用 read_memory 工具读取
+    4. **回退策略**：没有向量搜索时按 updated_at 倒序取前 N 条
 
     ## eager 与 lazy 的差别
 
-    - eager（默认）：全部读出来，正文完整给模型 → 不需要工具
+    - eager（默认）：尽可能读全文（受预算限制）→ 不需要工具
     - lazy：只给标题和 page_id 的索引，正文留空 → 模型用 read 按需拉取
 
     lazy 模式下 `read_uris` 保持为空 —— 那个集合的语义是"模型已经看过正文"，
-    而 lazy 只给了标题。填进去会让 refetch 检查失效，模型就能在没读正文的
-    情况下 patch 一条记忆，而那必然匹配失败。
-
-    对齐 OpenViking 的 eager_prefetch（session_extract_context_provider.py:549）。
+    而 lazy 只给了标题。填进去会让 refetch 检查失效。
     """
+    from app.modules.memory import vectorize
+
     eager = settings.memory.eager_prefetch if eager is None else eager
     limit = settings.memory.prefetch_topn if topn is None else topn
 
     result = PrefetchResult(eager=eager)
     budget = settings.memory.prefetch_max_chars
 
+    # ── 1. 向量搜索（如果可用） ──
+    search_hits: list[Any] = []
+    if messages and db and model:
+        query = build_search_query(messages)
+        if query:
+            try:
+                search_hits = await vectorize.search(
+                    db,
+                    scope,
+                    query,
+                    model=model,
+                    limit=settings.memory.prefetch_search_limit,
+                )
+                log.debug("memory_search_done", query_len=len(query), hits=len(search_hits))
+            except Exception as e:
+                log.warning("memory_search_failed", error=str(e))
+                search_hits = []
+
+    # ── 2. 按相关性加载（或回退到时间排序） ──
+    if search_hits:
+        # 向量搜索成功：按相关性顺序加载
+        await _load_from_search(scope, search_hits, result, budget, eager)
+    else:
+        # 回退：按 updated_at 倒序取前 N 条
+        await _load_fallback(scope, result, budget, eager, limit)
+
+    log.info(
+        "memory_prefetch_done",
+        eager=eager,
+        search_used=bool(search_hits),
+        types=len(result.by_type),
+        items=result.total,
+        pages=len(result.pages),
+        chars=len(result.render()),
+        dropped=result.dropped,
+    )
+    return result
+
+
+async def _load_from_search(
+    scope: MemoryScope,
+    hits: list[Any],
+    result: PrefetchResult,
+    budget: int,
+    eager: bool,
+) -> None:
+    """
+    从搜索结果按相关性顺序加载记忆。
+
+    ## 预算感知策略
+
+    - 按相关性顺序（hits 已排序）逐条加载
+    - 每条先读元数据（标题、字段），判断正文长度
+    - 预算够：读全文，消耗预算
+    - 预算不足：只给 URI + 标题（page_id），不读正文
+    - **至少加载 1 条全文**：即使第一条就超预算
+
+    ## 为什么不分类型
+
+    向量搜索已经按相关性排序了，人为分类型会破坏这个顺序。
+    而且不同类型的记忆可能相关性差异很大，强行每类取 N 条会浪费预算。
+    """
+    budget_remaining = budget
+    loaded_full_count = 0
+
+    for hit in hits:
+        uri = hit.uri
+        score = getattr(hit, "score", 0.0)
+
+        # 读取这条记忆
+        item = await memory_service.read_item(uri, scope)
+        if not item:
+            continue
+
+        memory_type = item.memory_type
+        if memory_type not in result.by_type:
+            result.by_type[memory_type] = []
+
+        # 分配 page_id
+        page_id = result.pages.assign(uri)
+
+        # 判断是否加载全文
+        content_len = len(item.merge_source)
+        load_full = False
+
+        if eager:
+            # eager 模式：尽可能加载全文
+            if budget_remaining > content_len or loaded_full_count == 0:
+                # 预算够，或者这是第一条（保证至少 1 条全文）
+                load_full = True
+                budget_remaining -= content_len
+                loaded_full_count += 1
+                result.read_uris.add(uri)
+
+        if load_full:
+            # 加载全文
+            result.by_type[memory_type].append(item)
+        else:
+            # 只给标题（lazy item）
+            lazy_item = MemoryItem(
+                uri=uri,
+                memory_type=memory_type,
+                title=item.title,
+                fields=item.fields,
+                version=item.version,
+                merge_source="",  # 空正文
+                updated_at=item.updated_at,
+            )
+            result.by_type[memory_type].append(lazy_item)
+            result.pages.assign(uri)
+
+        log.debug(
+            "memory_item_loaded",
+            uri=uri,
+            page_id=page_id,
+            score=score,
+            full=load_full,
+            chars=content_len if load_full else 0,
+        )
+
+
+async def _load_fallback(
+    scope: MemoryScope,
+    result: PrefetchResult,
+    budget: int,
+    eager: bool,
+    limit: int,
+) -> None:
+    """
+    回退策略：没有向量搜索时，按 updated_at 倒序取前 N 条。
+
+    分类型限量，保证每个类型都有机会被看到。
+    """
     for schema in memory_service.visible_types(scope):
         if schema.operation_mode is OperationMode.ADD_ONLY:
             continue
@@ -235,16 +449,6 @@ async def prefetch(scope: MemoryScope, *, eager: bool | None = None, topn: int |
         if not items:
             continue
 
-        # 【每个类型都要有条数上限】，eager 也不例外。
-        #
-        # 原来 eager 不限量 —— 实测一个有 120 条偏好的智能体（用半年就会有）
-        # 让预取吃掉 13572 token。而 OpenViking 的 eager 模式只读
-        # 搜索结果的 top-N（session_extract_context_provider.py:571），
-        # 它从来不是"读全部"。
-        #
-        # 我们没有它那套向量搜索排序，用 list_items 的顺序
-        # （按 updated_at 倒序）—— 最近改过的最可能与当前对话相关。
-        # 这比随机截断合理，也不需要在提取路径上引入一次嵌入调用。
         items = items[: max(1, limit)]
 
         result.by_type[schema.memory_type] = items
@@ -253,20 +457,6 @@ async def prefetch(scope: MemoryScope, *, eager: bool | None = None, topn: int |
             if eager:
                 result.read_uris.add(item.uri)
 
-    # 总字符预算。分类型限量之后仍可能超 —— 十个类型各 5 条、
-    # 每条 1500 字符就是 75000。超了从【最后一个类型】开始丢，
-    # 因为 by_type 是按类型名排序的，而排序无关重要性，
-    # 丢尾部至少是确定行为（不会这次丢 A、下次丢 B）。
+    # 总字符预算截断
     if eager and budget > 0:
         result.trim_to_budget(budget)
-
-    log.info(
-        "memory_prefetch_done",
-        eager=eager,
-        types=len(result.by_type),
-        items=result.total,
-        pages=len(result.pages),
-        chars=len(result.render()),
-        dropped=result.dropped,
-    )
-    return result

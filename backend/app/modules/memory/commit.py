@@ -372,10 +372,15 @@ async def commit_session_agent(
         return agent_report
 
     ctx = from_messages(prepared.messages, prepared.timestamps)
-    scope_agent = MemoryScope(agent_id=agent_id)
-    scope_session = MemoryScope(agent_id=agent_id, session_id=session_id)
 
-    # ── 3. 预取 ──
+    # ── 3. 预取（用截断后的消息构建搜索查询） ──
+    #
+    # ## 为什么用截断后的消息
+    #
+    # 截断是为了不提取"正在进行的对话"（最近 N 轮）。
+    # 向量搜索也应该基于"可以提取的部分"：
+    # - 最近 N 轮还在进行中，不应该被提取
+    # - 搜索也不应该基于这些"临时上下文"召回记忆
     #
     # ## agent_only 模式
     #
@@ -385,8 +390,22 @@ async def commit_session_agent(
     #
     # `agent_only=False` 时用 scope_session（读 global + session + agent），
     # 这是多智能体场景下的"第一个智能体"，或单智能体模式。
+    scope_agent = MemoryScope(agent_id=agent_id)
+    scope_session = MemoryScope(agent_id=agent_id, session_id=session_id)
     prefetch_scope = scope_agent if agent_only else scope_session
-    pre = await prefetch_mod.prefetch(prefetch_scope)
+
+    # 获取嵌入模型（用于向量搜索）
+    embed_model = await memory_service.resolve_embedding_model(db)
+    if not embed_model:
+        log.debug("memory_prefetch_no_embedding", reason="未配置嵌入模型")
+
+    # 预取：向量搜索 + 预算感知加载
+    pre = await prefetch_mod.prefetch(
+        prefetch_scope,
+        messages=prepared.messages,  # 截断后的消息
+        db=db,
+        model=embed_model,
+    )
     agent_report.prefetched_items = pre.total
 
     # ── 4. ReAct 循环 ──
