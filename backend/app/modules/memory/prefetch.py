@@ -139,7 +139,7 @@ class PrefetchResult:
 
     def render(self) -> str:
         """
-        渲染成给模型看的文本。
+        渲染成给模型看的文本（纯文本格式，向后兼容）。
 
         ## 为什么 eager 模式要带完整正文
 
@@ -187,6 +187,120 @@ class PrefetchResult:
                 lines.append(f"```\n{body}\n```")
             blocks.append("\n".join(lines))
         return "\n\n".join(blocks)
+
+    def render_as_tool_calls(self) -> list[dict[str, Any]]:
+        """
+        渲染成 tool call/result 对的格式（参考 OpenViking）。
+
+        ## 为什么改用 tool call/result 格式
+
+        参考 OpenViking session_extract_context_provider.py:552-576:
+        - 预取内容通过 `list_memories` 和 `read_memory` 的 tool call/result 注入
+        - 更符合 LLM 的训练模式（Claude/GPT 都见过大量 tool use 数据）
+        - 与 lazy 模式的工具调用风格一致
+        - 更容易扩展（添加 search 结果等）
+
+        ## 格式
+
+        每个 dict 包含两个键：
+        - "tool_call": {"id": "call_N", "name": "list_memories" | "read_memory", "arguments": {...}}
+        - "tool_result": {"call_id": "call_N", "content": ...}
+        """
+        messages: list[dict[str, Any]] = []
+        call_id = 1
+
+        if not self.by_type:
+            # 空的情况也要返回一个 list 结果
+            messages.append(
+                {
+                    "tool_call": {
+                        "id": f"call_{call_id}",
+                        "name": "list_memories",
+                        "arguments": {},
+                    },
+                    "tool_result": {
+                        "call_id": f"call_{call_id}",
+                        "content": "当前还没有任何记忆，所有内容都是新建。",
+                    },
+                }
+            )
+            return messages
+
+        # 按类型组织 list_memories 结果
+        for mtype in sorted(self.by_type):
+            items = self.by_type[mtype]
+            if not items:
+                continue
+
+            # list_memories 返回该类型的索引
+            list_result = self._render_list_result(mtype, items)
+            messages.append(
+                {
+                    "tool_call": {
+                        "id": f"call_{call_id}",
+                        "name": "list_memories",
+                        "arguments": {"memory_type": mtype},
+                    },
+                    "tool_result": {
+                        "call_id": f"call_{call_id}",
+                        "content": list_result,
+                    },
+                }
+            )
+            call_id += 1
+
+            # eager 模式：为每条记忆生成 read_memory call/result
+            if self.eager:
+                for item in items:
+                    pid = self.pages.assign(item.uri)
+                    read_result = self._render_read_result(item)
+                    messages.append(
+                        {
+                            "tool_call": {
+                                "id": f"call_{call_id}",
+                                "name": "read_memory",
+                                "arguments": {"page_id": pid},
+                            },
+                            "tool_result": {
+                                "call_id": f"call_{call_id}",
+                                "content": read_result,
+                            },
+                        }
+                    )
+                    call_id += 1
+
+        return messages
+
+    def _render_list_result(self, mtype: str, items: list[MemoryItem]) -> str:
+        """渲染 list_memories 的结果。"""
+        scope_label = _scope_label(mtype)
+        lines = [f"类型：{mtype}（{scope_label}）", f"数量：{len(items)} 条", ""]
+
+        for item in items:
+            pid = self.pages.assign(item.uri)
+            size_hint = f"{len(item.merge_source)} 字符"
+            if not self.eager:
+                size_hint += "（需要用 read_memory 读取正文）"
+            lines.append(f"- page_id={pid} | {item.title} | v{item.version} | {size_hint}")
+
+        return "\n".join(lines)
+
+    def _render_read_result(self, item: MemoryItem) -> str:
+        """渲染 read_memory 的结果。"""
+        body = item.merge_source
+        cap = settings.memory.prefetch_preview_chars
+        truncated = ""
+        if len(body) > cap:
+            truncated = f"\n\n（省略 {len(body) - cap} 字符，用 read_memory 可读全文）"
+            body = body[:cap]
+
+        return f"""\
+标题：{item.title}
+版本：v{item.version}
+内容：
+```
+{body}
+```{truncated}"""
 
 
 def _scope_label(memory_type: str) -> str:

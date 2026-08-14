@@ -56,7 +56,24 @@ class FakeLLM:
         return len(self.calls)
 
     def last_prompt(self) -> str:
-        return "\n".join(m.get("content", "") for m in self.calls[-1])
+        """提取最后一次调用的文本内容（支持 content 为 str 或 list）。"""
+        parts = []
+        for m in self.calls[-1]:
+            content = m.get("content", "")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                # Tool call/result 格式
+                for item in content:
+                    if isinstance(item, dict):
+                        if "content" in item:
+                            parts.append(str(item["content"]))
+                        elif "input" in item:
+                            # tool_use
+                            parts.append(f"Tool: {item.get('name', '')} {item.get('input', '')}")
+            else:
+                parts.append(str(content))
+        return "\n".join(parts)
 
 
 @pytest.fixture
@@ -719,7 +736,9 @@ async def test_commit_second_run_updates_instead_of_duplicating(
     assert report.ok, report.warnings
     # 预取把已有偏好给了模型
     assert report.prefetched_items >= 1
-    assert "- 用 pytest -x 跑测试" in second.calls[0][1]["content"]
+    # 预取内容现在通过 tool call/result 注入，可能在任意消息中
+    prompt_text = second.last_prompt()
+    assert "- 用 pytest -x 跑测试" in prompt_text, "预取必须包含已有记忆的内容"
 
     items = await memory.list_items(MemoryScope(agent_id=AGENT), "preferences")
     assert len(items) == 1, "必须是改写，不能新建出第二条"

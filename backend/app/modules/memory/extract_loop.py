@@ -141,10 +141,56 @@ class ExtractLoop:
 
     async def run(self) -> ExtractOutcome:
         outcome = ExtractOutcome()
+
+        # System prompt
         messages = [
             {"role": "system", "content": self._system_prompt()},
-            {"role": "user", "content": self._user_prompt()},
         ]
+
+        # User prompt: 对话历史
+        session_time = self._ctx.get_session_time_display()
+        day_of_week = self._ctx.get_session_day_of_week()
+        convo = self._render_conversation()
+
+        messages.append({
+            "role": "user",
+            "content": f"""\
+## 对话历史
+
+**会话时间：** {session_time} ({day_of_week})
+相对时间（如"上周"、"下个月"）基于会话时间，而非今天。
+
+{convo}
+
+分析对话并探索已有记忆，然后输出所有记忆操作的 JSON。"""
+        })
+
+        # 预取结果：tool call/result 形式注入
+        prefetch_tool_calls = self._pre.render_as_tool_calls()
+        for tc in prefetch_tool_calls:
+            # Assistant 的 tool call
+            messages.append({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tc["tool_call"]["id"],
+                        "name": tc["tool_call"]["name"],
+                        "input": tc["tool_call"]["arguments"],
+                    }
+                ]
+            })
+            # Tool result
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tc["tool_result"]["call_id"],
+                        "content": tc["tool_result"]["content"],
+                    }
+                ]
+            })
 
         iteration = 0
         max_iterations = self._max
@@ -358,28 +404,24 @@ class ExtractLoop:
 「已有记忆」部分给出的正文可能被截断，不足以构造 SEARCH 时就 read 一次。
 探索完成后，直接输出最终 JSON，不要再调工具。"""
 
-    def _user_prompt(self) -> str:
-        convo = self._render_conversation()
-        return f"""\
-# 已有记忆
-{self._pre.render()}
-
-# 本次对话
-{convo}
-
-请提取记忆。先在 reasoning 里说明判断，再填各类型的数组。"""
-
     def _render_conversation(self) -> str:
         """
-        渲染对话，【带消息下标】。
+        渲染对话，【带消息下标和 speaker】。
+
+        格式参考 OpenViking session_extract_context_provider.py:330:
+        [idx][role][speaker]: content
 
         下标是 events 的 ranges 字段的依据 —— 模型要能指出"这个事件对应
         第几到第几条消息"。不编号的话它只能猜。
+
+        speaker 是稳定的身份标识（agent_name 或 role），帮助区分多智能体场景。
         """
         lines: list[str] = []
         for i, msg in enumerate(self._ctx.messages):
+            # speaker: agent_name 优先，否则用 role
+            speaker = msg.agent_name if msg.agent_name else msg.role
             for line in ExtractContext._render_msg(msg):
-                lines.append(f"[{i}] {line}")
+                lines.append(f"[{i}][{msg.role}][{speaker}]: {line}")
         return "\n".join(lines) if lines else "（无对话）"
 
     def _final_instruction(self) -> str:

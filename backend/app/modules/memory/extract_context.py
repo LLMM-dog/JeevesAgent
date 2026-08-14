@@ -88,6 +88,38 @@ class ExtractContext:
         dt = self._dt(ranges)
         return f"{dt.strftime('%Y-%m-%d %H:%M')} {weekday_cn(dt)}"
 
+    def get_session_time_display(self) -> str:
+        """
+        获取会话时间范围显示（用于提示词）。
+
+        参考 OpenViking session_extract_context_provider.py:256-266。
+        如果首尾消息时间不同，显示范围；否则只显示单个时间点。
+        """
+        if not self.timestamps or len(self.timestamps) == 0:
+            dt = to_local(self.session_started_at or None)
+            return dt.strftime("%Y-%m-%d %H:%M")
+
+        first_ts = self.timestamps[0]
+        last_ts = self.timestamps[-1]
+
+        first_dt = to_local(first_ts)
+        time_str = first_dt.strftime("%Y-%m-%d %H:%M")
+
+        # 如果首尾时间不同，显示范围
+        if last_ts != first_ts:
+            last_dt = to_local(last_ts)
+            time_str = f"{time_str} - {last_dt.strftime('%H:%M')}"
+
+        return time_str
+
+    def get_session_day_of_week(self) -> str:
+        """获取会话的星期几（英文）。"""
+        if not self.timestamps or len(self.timestamps) == 0:
+            dt = to_local(self.session_started_at or None)
+        else:
+            dt = to_local(self.timestamps[0])
+        return dt.strftime("%A")
+
     # ── 对话原文，供 content_template 用 ───────────
 
     def get_chat_log(self, ranges: str = "", max_chars: int = MAX_CHAT_LOG_CHARS) -> str:
