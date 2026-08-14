@@ -409,11 +409,20 @@ async def commit_session_agent(
     agent_report.prefetched_items = pre.total
 
     # ── 4. ReAct 循环 ──
+    #
+    # ## 工具永远可用
+    #
+    # 参考 OpenViking session_extract_context_provider.py:604：
+    # - eager_prefetch 只控制"预取时是否自动读 top-N"
+    # - 工具（read/search）永远可用，LLM 自己决定是否需要读更多
+    #
+    # 之前我们的实现把 eager 和工具可用性绑定，这是错误的。
+    # 即使预取了全文，LLM 也可能需要：
+    # - 读取预取中被截断的记忆全文
+    # - 搜索预取范围之外的记忆
+    # - 读取预取列表中它认为需要的其他记忆
     schemas = memory_service.visible_types(prefetch_scope)
-    tool_runner: ToolRunner | None = None
-    if not pre.eager:
-        # lazy 模式需要工具。eager 模式传 None 表示"不给工具"。
-        tool_runner = ToolRunner(scope=prefetch_scope, pages=pre.pages, read_uris=set(pre.read_uris))
+    tool_runner = ToolRunner(scope=prefetch_scope, pages=pre.pages, read_uris=set(pre.read_uris))
 
     loop = ExtractLoop(
         llm_call=llm_call,

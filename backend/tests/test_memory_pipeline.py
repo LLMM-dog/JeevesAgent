@@ -429,11 +429,21 @@ def test_operations_schema_groups_by_type() -> None:
 
 async def _run_loop(llm: FakeLLM, pre: Any = None, **kw: Any) -> Any:
     from app.modules.memory.prefetch import PrefetchResult
+    from app.modules.memory.extract_tools import ToolRunner
+    from app.modules.memory.layout import MemoryScope
+
+    prefetched = pre or PrefetchResult()
+    # 如果没有显式传 tool_runner，创建一个默认的
+    if "tool_runner" not in kw:
+        kw["tool_runner"] = ToolRunner(
+            scope=MemoryScope(agent_id="test_agent"),
+            pages=prefetched.pages,
+        )
 
     loop = ExtractLoop(
         llm_call=llm,
         schemas=registry.get_schemas().enabled(),
-        prefetched=pre or PrefetchResult(),
+        prefetched=prefetched,
         extract_context=from_messages(_msgs(("user", "改一下配置")), [1786608000000]),
         **kw,
     )

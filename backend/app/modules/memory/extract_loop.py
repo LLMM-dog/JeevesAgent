@@ -13,18 +13,21 @@
 extract_loop.py:247-364，但去掉了工具调用 —— 它允许模型在循环里调
 search/read 自己找记忆，我们改成一次性预取。
 
-## 工具调用：两种模式
+## 工具调用
 
-对齐 OpenViking 的 `eager_prefetch` 开关（memory_config.py:58）：
+参考 OpenViking 的 `eager_prefetch` 开关（memory_config.py:58）：
 
-- `eager_prefetch=true` → 预取全部可改的记忆，**不给工具**
-  （它的 `get_tools()` 在这个模式下返回 `[]`，
-  session_extract_context_provider.py:603）
-- `eager_prefetch=false` → 只预取轻量索引，给 `list` / `read` / `search`
-  让模型自己按需拉取
+- `eager_prefetch=true` → 预取时自动读取 top-N 搜索结果的全文
+- `eager_prefetch=false` → 预取时只返回 URI 列表，不读内容
 
-两种都要支持，因为它们的适用条件不同：记忆少时全预取省一轮调用；
-记忆多到装不下窗口时，全预取会挤掉对话内容 —— 而对话才是提取的原料。
+**关键点**：无论哪种模式，**工具永远可用**。
+- 即使 eager 模式预取了全文，LLM 也可能需要：
+  - 读取预取中被截断的记忆全文
+  - 搜索预取范围之外的记忆
+  - 读取预取列表中它认为需要的其他记忆
+
+OpenViking 的实现：工具永远可用（session_extract_context_provider.py:604 的注释
+说明 eager_prefetch 不提供工具是错误的，实际代码中工具始终注册）。
 
 ## 工具调用的三个连带处理
 
@@ -114,7 +117,7 @@ class ExtractLoop:
         prefetched: PrefetchResult,
         extract_context: ExtractContext,
         max_iterations: int | None = None,
-        tool_runner: ToolRunner | None = None,
+        tool_runner: ToolRunner,
     ):
         self._call = llm_call
         self._schemas = [s for s in schemas if s.llm_fields()]
@@ -122,7 +125,7 @@ class ExtractLoop:
         self._ctx = extract_context
         self._max = max_iterations or settings.memory.extract_max_iterations
 
-        # tool_runner 为 None → eager_prefetch 模式（不给工具）
+        # 工具永远可用（参考 OpenViking）
         self._tools = tool_runner
         self._disable_tools_this_round = False
 
@@ -132,8 +135,8 @@ class ExtractLoop:
 
     @property
     def _tool_schemas(self) -> list[dict[str, Any]] | None:
-        """本轮发给模型的工具定义。None 表示不给工具。"""
-        if self._tools is None or self._disable_tools_this_round:
+        """本轮发给模型的工具定义。None 表示本轮禁用工具。"""
+        if self._disable_tools_this_round:
             return None
         return tool_schemas()
 
@@ -212,7 +215,7 @@ class ExtractLoop:
             raw, tool_calls = _split_reply(reply)
 
             # 分支 A：模型要调工具 → 执行、把结果拼回消息、继续
-            if tool_calls and self._tools is not None:
+            if tool_calls:
                 results = await self._run_tools(messages, tool_calls)
                 outcome.tools_used.extend(results)
                 outcome.steps.append(
@@ -329,8 +332,6 @@ class ExtractLoop:
         tool 消息。缺一条的话下一轮请求会被上游拒绝（400），
         而错误信息只说"messages 格式不对"，看不出是少了哪条。
         """
-        assert self._tools is not None
-
         results = await asyncio.gather(*(self._tools.execute(c) for c in calls))
 
         messages.append(
@@ -388,11 +389,11 @@ class ExtractLoop:
 
     def _tools_section(self) -> str:
         """
-        工具说明。eager_prefetch 模式下为空 —— 那时没有工具可用，
-        提到它们只会让模型尝试调用一个不存在的东西。
+        工具说明。工具永远可用，即使预取了全文，LLM 也可能需要：
+        - 读取预取中被截断的记忆全文
+        - 搜索预取范围之外的记忆
+        - 读取预取列表中它认为需要的其他记忆
         """
-        if self._tools is None:
-            return ""
         return """
 # 工具
 你可以先调用工具查看已有记忆，再决定怎么写：
@@ -599,8 +600,7 @@ def _split_reply(reply: Any) -> tuple[str, list[ToolCall]]:
     - `str` —— 不支持/不需要工具的调用方（含测试里的假 LLM）
     - `(text, tool_calls)` —— 支持工具的调用方
 
-    兼容两种让 eager_prefetch 模式的调用方不必构造一个空列表，
-    也让只测解析逻辑的测试能直接返回字符串。
+    兼容两种返回格式，让只测解析逻辑的测试能直接返回字符串。
     """
     if isinstance(reply, tuple) and len(reply) == 2:
         text, calls = reply
