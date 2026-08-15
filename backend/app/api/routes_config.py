@@ -4,7 +4,6 @@
 
 import base64
 from pathlib import Path
-from typing import Any
 
 import structlog
 from app.api import deps
@@ -14,8 +13,6 @@ from app.api.schemas import (
     CreateEndpointRequest,
     EndpointListResponse,
     EndpointOut,
-    MacroDetail,
-    MacroUpsert,
     McpServerCreate,
     McpServerUpdate,
     McpToggle,
@@ -30,6 +27,7 @@ from app.api.schemas import (
     SkillToggle,
     TodoListResponse,
     TodoOut,
+    UpdateEndpointRequest,
 )
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
@@ -43,11 +41,8 @@ from app.modules.agent.tools.todo import _serialize, _stats, load_active
 from app.modules.endpoint import service as ps
 from app.modules.endpoint.models import Endpoint
 from app.modules.mcp.tools import build_tools
-from app.modules.memory import service as memory_service
 from app.modules.session import repo
 from app.modules.session.models import Session
-from app.modules.skill import authoring
-from app.modules.skill import macros as macro_registry
 from app.modules.skill import package as skill_package
 from app.modules.skill import registry as skill_registry
 from app.modules.skill import state as skill_state
@@ -77,12 +72,14 @@ async def probe(body: ProbeRequest) -> ProbeResponse:
     normalized, models = await ps.probe_models(get_llm(), body.base_url, body.api_key)
     return ProbeResponse(
         normalized_base_url=normalized,
+        suggested_name=ps.guess_endpoint_name(normalized),
         models=[
             ProbedModelOut(
                 model_id=m.model_id,
                 context_window=m.context_window,
                 window_source=m.window_source,
                 looks_non_chat=m.looks_non_chat,
+                model_type=m.model_type,
             )
             for m in models
         ],
@@ -147,6 +144,41 @@ async def delete_endpoint(endpoint_id: str, db: AsyncSession = Depends(get_db)) 
     return {"ok": True}
 
 
+@router.patch("/endpoints/{endpoint_id}", response_model=EndpointOut, summary="修改模型组")
+async def update_endpoint(
+    endpoint_id: str,
+    body: UpdateEndpointRequest,
+    db: AsyncSession = Depends(get_db),
+) -> EndpointOut:
+    """
+    改分组的名字 / 地址 / Key。
+
+    ## 为什么 Key 是可选且空串等于不改
+
+    Key 永远只回显尾 4 位（key_hint），编辑界面里的 Key 输入框是空的。
+    空串表示"保持原 Key"，只有用户重新填了才更新 —— 否则每次改个名字
+    都会把 Key 清空，端点立刻失效。
+    """
+    p = await ps.update_endpoint(
+        db,
+        endpoint_id,
+        name=body.name,
+        base_url=body.base_url,
+        api_key=body.api_key,
+    )
+    models = await ps.list_models(db, p.id)
+    return EndpointOut(
+        id=p.id,
+        name=p.name,
+        base_url=p.base_url,
+        key_hint=p.key_hint,
+        enabled=bool(p.enabled),
+        model_count=len(models),
+        last_probe_at=p.last_probe_at,
+        created_at=p.created_at,
+    )
+
+
 @router.get("/models", response_model=ModelListResponse, summary="模型列表")
 async def list_models(
     endpoint_id: str | None = Query(None),
@@ -181,6 +213,7 @@ async def list_models(
                 window_source=m.window_source,
                 supports_vision=m.supports_vision,
                 supports_tools=m.supports_tools,
+                model_type=m.model_type,
                 enabled=bool(m.enabled),
                 price_in_per_1m=m.price_in_per_1m,
                 price_out_per_1m=m.price_out_per_1m,
@@ -336,7 +369,6 @@ async def meta(
         # 两者会长期不一致 —— 前端列出来的技能和模型实际看到的可能不是
         # 同一批，而这种不一致没有任何提示。
         skill_count=len(skill_registry.get_index().skills),
-        macro_count=len(macro_registry.get_index().macros),
         mcp_tool_count=0,
         tool_names=registry.names(),
     )
@@ -615,7 +647,7 @@ def _reregister_mcp_tools(reg: "ToolRegistry") -> int:
 @router.get("/ref-candidates", summary="引用候选（@ 提词器用）")
 async def ref_candidates(
     q: str = Query("", description="模糊查询"),
-    kind: str = Query("file", description="file | skill | tool | macro"),
+    kind: str = Query("file", description="file | skill | tool"),
     session_id: str | None = Query(None, description="文件搜索的范围来自该会话的工作目录"),
     limit: int = Query(20, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
@@ -626,7 +658,7 @@ async def ref_candidates(
 
     ## 为什么文件候选必须在后端搜
 
-    技能/工具/宏是几十个量级，前端拉全量本地过滤就够。但文件可能上万个 ——
+    技能/工具是几十个量级，前端拉全量本地过滤就够。但文件可能上万个 ——
     全量传给前端不现实，必须后端搜。
 
     ## 必须排除忽略目录
@@ -643,15 +675,6 @@ async def ref_candidates(
             {"name": n, "detail": _one_line_desc(d)}
             for n, d in idx.l1()
             if not query or query in n.lower() or query in d.lower()
-        ]
-        return {"items": items[:limit]}
-
-    if kind == "macro":
-        midx = macro_registry.get_index()
-        items = [
-            {"name": n, "detail": ""}
-            for n in midx.names()
-            if not query or query in n.lower()
         ]
         return {"items": items[:limit]}
 
@@ -877,52 +900,6 @@ async def delete_skill(name: str) -> dict[str, object]:
     shutil.rmtree(target, ignore_errors=True)
     new_idx = skill_registry.reload()
     return {"deleted": name, "skill_count": len(new_idx.skills)}
-
-
-@router.post("/macros", summary="新建或更新宏", status_code=201)
-async def upsert_macro(body: MacroUpsert) -> dict[str, object]:
-    """
-    建宏。
-
-    ## 为什么之前没有这个接口
-
-    MacroPicker 的空态文案写着"对我说'把这个流程存成宏'，我会帮你建"，
-    而 macros/ 不在文件工具的白名单里 —— 模型实际写不进去。
-    那句承诺一直落不了地。
-
-    现在两条路都通：用户在设置页建，模型用 manage_asset 工具建。
-    两者走同一个 authoring.upsert，所以格式和校验完全一致。
-    """
-    r = authoring.upsert(
-        kind="macro",
-        name=body.name,
-        description=body.description,
-        body=body.body,
-        keywords=body.keywords,
-        overwrite=body.overwrite,
-    )
-    return {"name": r.name, "created": r.created}
-
-
-@router.get("/macros/{name}/source", summary="取宏的可编辑字段")
-async def get_macro_source(name: str) -> MacroDetail:
-    """
-    拆好的字段，供编辑界面用。
-
-    ## 为什么不复用 GET /macros/{name}
-
-    那个返回渲染后的正文（${MACRO_DIR} 已替换成真实路径），是给模型用的。
-    编辑界面要【原始】内容 —— 把替换后的路径写回去，
-    宏就跟当前机器绑死了，换台机器不能用。
-    """
-    desc, mbody, kw, _raw = authoring.read_source(kind="macro", name=name)
-    return MacroDetail(name=name, description=desc, body=mbody, keywords=kw)
-
-
-@router.delete("/macros/{name}", summary="删除宏")
-async def delete_macro(name: str) -> dict[str, bool]:
-    authoring.remove(kind="macro", name=name)
-    return {"ok": True}
 
 
 @router.patch("/skills/{name}/enabled", summary="开关一个技能")
@@ -1159,174 +1136,6 @@ async def mcp_server_delete(
         _reregister_mcp_tools(request.app.state.registry)
 
     return {"ok": True}
-
-
-@router.get("/macros", summary="宏列表（前端提词器用）")
-async def list_macros() -> dict[str, object]:
-    """
-    列出所有宏。
-
-    宏【不进系统提示词】—— 它是用户按 `!` 主动触发的，模型不需要知道
-    它存在。所以这个端点是给前端提词器用的，不是给模型用的。
-
-    虽然在文档里区分了 Skill 和 Macro，但运行时两者毫无差异
-    （宏照样占常驻上下文位）。这里让这个区分真的成立。
-    """
-    idx = macro_registry.get_index()
-    return {
-        "items": [
-            {
-                "name": m.name,
-                "description": m.description,
-                "keywords": m.keywords,
-            }
-            for m in sorted(idx.macros.values(), key=lambda x: x.name)
-        ],
-        "diagnostics": [
-            {"level": d.level, "message": d.message, "path": d.path}
-            for d in idx.diagnostics
-        ],
-    }
-
-
-@router.get("/macros/{name}", summary="取宏正文")
-async def get_macro(name: str) -> dict[str, str]:
-    """
-    取正文。前端在用户选中宏后调用，把正文以 user 角色注入本轮消息前部。
-
-    走 user 角色而不是 system：宏是用户自己写的流程，它代表用户的意图，
-    放 user 位语义正确。技能不同 —— 技能可能来自第三方，所以走 role=tool。
-    """
-    meta = macro_registry.get_index().get(name)
-    if meta is None:
-        raise NotFoundError("宏不存在", code="macro_not_found")
-    return {"name": meta.name, "body": macro_registry.read_macro_body(meta)}
-
-
-@router.post("/macros/reload", summary="重扫宏目录")
-async def reload_macros() -> dict[str, object]:
-    idx = macro_registry.reload()
-    return {"count": len(idx.macros), "names": idx.names()}
-
-
-def _memory_out(m: Any) -> dict[str, object]:
-    return {
-        "id": m.id,
-        "content": m.content,
-        "theme": m.theme,
-        "hit": m.hit,
-        "confidence": m.confidence,
-        "source": m.source,
-        "origin_session_id": m.origin_session_id,
-        "archived": m.archived_at is not None,
-        "updated_at": m.updated_at,
-        # 变更历史。用户看到一条错误记忆时，首先要能查"它怎么变成这样的"。
-        # 这一步容易被漏掉。
-        "history": memory_service.parse_history(m),
-    }
-
-
-@router.get("/memories", summary="记忆列表")
-async def list_memories(
-    include_archived: bool = Query(False),
-    theme: str | None = Query(None),
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, object]:
-    rows = await memory_service.list_all(
-        db, include_archived=include_archived, theme=theme
-    )
-    return {
-        "items": [_memory_out(m) for m in rows],
-        "themes": [{"theme": t, "count": c} for t, c in await memory_service.themes(db)],
-    }
-
-
-@router.post("/memories", summary="手动添加记忆", status_code=201)
-async def create_memory(
-    body: dict[str, str],
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, object]:
-    """
-    用户手写的记忆。
-
-    confidence 直接给 1.0 —— 用户自己写的不需要打折。
-    模型自动提炼的是 0.6，主动调工具记的是 0.8。
-    """
-    m = await memory_service.create(
-        db,
-        content=body.get("content", ""),
-        theme=body.get("theme", "其他"),
-        source="manual",
-        confidence=1.0,
-    )
-    await db.commit()
-    return _memory_out(m)
-
-
-@router.patch("/memories/{memory_id}", summary="修改记忆")
-async def update_memory(
-    memory_id: str,
-    body: dict[str, str],
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, object]:
-    m = await memory_service.update(
-        db,
-        memory_id,
-        # 用户在界面上改的，reason 可以自动填 —— 但仍然要写进 history，
-        # 因为"是用户改的还是模型改的"本身就是重要信息
-        reason=body.get("reason") or "用户在界面上修改",
-        content=body.get("content"),
-        theme=body.get("theme"),
-        # 用户改过的记忆置信度拉满
-        confidence=1.0,
-    )
-    await db.commit()
-    return _memory_out(m)
-
-
-@router.delete("/memories/{memory_id}", summary="归档记忆")
-async def archive_memory(
-    memory_id: str,
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, object]:
-    """
-    归档而非真删。
-
-    真删的问题：模型下一轮可能重新提炼出同一条，用户得反复删。
-    归档保留了"这条被否决过"的信息，而且用户能恢复。
-    """
-    m = await memory_service.archive(db, memory_id, reason="用户删除")
-    await db.commit()
-    return _memory_out(m)
-
-
-@router.post("/memories/{memory_id}/restore", summary="恢复归档的记忆")
-async def restore_memory(
-    memory_id: str,
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, object]:
-    m = await memory_service.restore(db, memory_id)
-    await db.commit()
-    return _memory_out(m)
-
-
-@router.get("/memories-search", summary="按关键词召回（调试用）")
-async def search_memories(
-    q: str = Query(..., min_length=1),
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, object]:
-    """
-    暴露召回结果和打分，用来验证"为什么这条被召回了/为什么没被召回"。
-
-    没有这个接口的话，召回质量只能靠猜。
-    """
-    hits = await memory_service.recall(db, q)
-    return {
-        "items": [
-            {**_memory_out(h.memory), "score": h.score} for h in hits
-        ],
-        "injection_preview": memory_service.format_for_injection(hits),
-    }
 
 
 @router.get("/traces-sessions", summary="按会话汇总的执行记录")

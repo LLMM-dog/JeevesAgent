@@ -282,13 +282,12 @@ class TestSkillIsADirectory:
 
     def test_skills_dir_is_writable_whitelist(self) -> None:
         """
-        skills/ 和 macros/ 要在可写白名单里，
+        skills/ 要在可写白名单里，
         这样模型能用已经熟练的 write_file / edit_file 组织附件 ——
         不需要为"写技能附件"再造一套 API。
         """
         src = (APP / "main.py").read_text(encoding="utf-8")
         assert "settings.skills_dir.resolve()" in src
-        assert "settings.macros_dir.resolve()" in src
 
     def test_builtins_upsert_not_all_or_nothing(self) -> None:
         """

@@ -1,22 +1,22 @@
 """
-写宏和技能的公共逻辑。
+技能的增删改查公共逻辑。
 
 ## 为什么要单独一个模块
 
-宏的增删改查有两个入口：用户在设置页操作（HTTP API），和模型自己动手
+技能的增删改查有两个入口：用户在设置页操作（HTTP API），和模型自己动手
 （manage_skill 工具）。两条路必须落到同样的校验和同样的文件格式上 ——
-否则会出现"界面建的宏模型读不了"或者反过来。
+否则会出现"界面建的技能模型读不了"或者反过来。
 
 ## 为什么不让模型直接用 write_file
 
-把 macros/ 加进白名单让模型自己写文件是最省事的做法，但有三个问题：
+把 skills/ 加进白名单让模型自己写文件是最省事的做法，但有三个问题：
 
-  1. frontmatter 要模型自己拼。少一个 description 字段，宏会被静默跳过
+  1. frontmatter 要模型自己拼。少一个 description 字段，技能会被静默跳过
      （只留一条 warning 诊断），而模型以为建好了。
-  2. 建完不会 reload。索引是进程内单例，不重扫的话新宏要等重启才出现，
+  2. 建完不会 reload。索引是进程内单例，不重扫的话新技能要等重启才出现，
      模型和用户都会以为失败了。
-  3. 白名单是会话级的可写目录 —— 给了写 macros/ 的权限，模型也就能
-     覆盖任何已有的宏和技能。而它只是想新建一个。
+  3. 白名单是会话级的可写目录 —— 给了写 skills/ 的权限，模型也就能
+     覆盖任何已有的技能。而它只是想新建一个。
 
 所以走一个受控的写入口：名字校验、必填字段校验、写完自动 reload。
 """
@@ -33,9 +33,6 @@ from app.core.config import settings
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.modules.skill import registry as skill_registry
 from app.modules.skill.loader import parse_frontmatter
-from app.modules.skill.macros import MACRO_FILE
-from app.modules.skill.macros import get_index as get_macro_index
-from app.modules.skill.macros import reload as reload_macros
 
 log = structlog.get_logger(__name__)
 
@@ -132,7 +129,9 @@ def build_document(
 
 
 def _target_dir(kind: str, name: str) -> Path:
-    base = settings.macros_dir if kind == "macro" else settings.skills_dir
+    if kind != "skill":
+        raise BadRequestError(f"kind 只能是 skill，收到 {kind!r}")
+    base = settings.skills_dir
     d = (base / name).resolve()
     # 【必须验证解析后仍在 base 下】。
     #
@@ -145,7 +144,9 @@ def _target_dir(kind: str, name: str) -> Path:
 
 
 def _file_name(kind: str) -> str:
-    return MACRO_FILE if kind == "macro" else SKILL_FILE
+    if kind != "skill":
+        raise BadRequestError(f"kind 只能是 skill，收到 {kind!r}")
+    return SKILL_FILE
 
 
 def upsert(
@@ -202,7 +203,7 @@ def remove(*, kind: str, name: str) -> None:
     """
     删除整个目录。
 
-    ## 为什么删目录而不是只删 MACRO.md
+    ## 为什么删目录而不是只删 SKILL.md
 
     技能可以带附件（meta.files）。只删 SKILL.md 会留下一堆孤儿文件，
     而目录仍然存在 —— 下次 reload 时它既不是有效技能也不会被清理，
@@ -210,8 +211,8 @@ def remove(*, kind: str, name: str) -> None:
     """
     import shutil
 
-    if kind not in ("macro", "skill"):
-        raise BadRequestError(f"kind 只能是 macro 或 skill，收到 {kind!r}")
+    if kind != "skill":
+        raise BadRequestError(f"kind 只能是 skill，收到 {kind!r}")
 
     safe = validate_name(name)
     d = _target_dir(kind, safe)
@@ -248,14 +249,10 @@ def read_source(*, kind: str, name: str) -> tuple[str, str, list[str], str]:
 
 
 def _reload(kind: str) -> None:
-    if kind == "macro":
-        reload_macros()
-    else:
-        skill_registry.reload()
+    if kind != "skill":
+        raise BadRequestError(f"kind 只能是 skill，收到 {kind!r}")
+    skill_registry.reload()
 
-
-def macro_names() -> list[str]:
-    return get_macro_index().names()
 
 def asset_dir(*, kind: str, name: str) -> Path:
     """
@@ -278,7 +275,7 @@ def asset_dir(*, kind: str, name: str) -> Path:
 
 def list_extra_files(*, kind: str, name: str) -> list[str]:
     """
-    除 SKILL.md / MACRO.md 之外的文件，POSIX 相对路径。
+    除 SKILL.md 之外的文件，POSIX 相对路径。
 
     给模型看"这个技能现在有哪些附件"，它才知道该加什么、
     以及有没有重名。

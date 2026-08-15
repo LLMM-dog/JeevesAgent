@@ -51,17 +51,13 @@ from app.modules.agent.tools.file import (
     ReadFileTool,
     WriteFileTool,
 )
-from app.modules.agent.tools.memory import (
-    ForgetMemoryTool,
-    RecallTool,
-    RememberTool,
-    UpdateMemoryTool,
-)
 from app.modules.agent.tools.skill import LoadSkillFileTool, LoadSkillTool
 from app.modules.agent.tools.subagent import SubAgentTool
 from app.modules.agent.tools.todo import TodoReadTool, TodoWriteTool
 from app.modules.endpoint.models import PathWhitelist  # noqa: F401
+from app.modules.memory.memory_router import router as memory_router
 from app.modules.session import repo
+from app.modules.settings import service as settings_service
 from app.modules.todo.models import Todo  # noqa: F401
 from app.modules.trace.writer import init_writer as init_trace_writer
 from app.modules.trace.writer import shutdown_writer as shutdown_trace_writer
@@ -116,17 +112,11 @@ def build_registry() -> ToolRegistry:
         LoadSkillTool(),
         LoadSkillFileTool(),
         SubAgentTool(),
-        RememberTool(),
-        RecallTool(),
-        UpdateMemoryTool(),
-        ForgetMemoryTool(),
         TodoWriteTool(),
         TodoReadTool(),
-        # 宏和技能的增删改查。
+        # 技能的增删改查。
         #
-        # MacroPicker 的空态一直写着"对我说'把这个流程存成宏'，我会帮你建"，
-        # 但 macros/ 不在白名单里，模型写不进去 —— 那句承诺落不了地。
-        # 这个工具让它真的能建。
+        # 让模型可以通过工具创建和管理技能。
         ManageAssetTool(),
         # 主动压缩。原来只有被动压缩（涨到窗口 75% 才触发）——
         # 那个时机不由模型决定，它只看总量，不知道"调研阶段已经结束、
@@ -221,7 +211,6 @@ async def init_runtime() -> None:
         settings.workspace_dir,
         settings.workspace_dir / ".jeeves" / "tmp",
         settings.skills_dir,
-        settings.macros_dir,
         settings.config_dir,
         settings.personas_dir,
         # 被截断的命令输出落在这里，read_file 要能读到
@@ -252,6 +241,11 @@ async def init_runtime() -> None:
     await _run_migrations()
 
     async with get_sessionmaker()() as db:
+        # 用户设置【必须在其他初始化之前应用】—— 后面的步骤
+        # （记忆初始化、工具注册）会读 settings 里的值，
+        # 晚于它们加载的话第一次启动用的是默认值而不是用户设置。
+        await settings_service.reload(db)
+
         ws = await repo.ensure_default_workspace(db, str(settings.workspace_dir))
 
         # 路径白名单的内置项。
@@ -262,7 +256,7 @@ async def init_runtime() -> None:
         # 【已经在用的用户永远拿不到】—— 他们表里有数据，整个分支被跳过。
         # 而症状是"文档说能写 skills/，我这儿报路径不在白名单内"。
         #
-        # ## 为什么 skills/ 和 macros/ 要可写
+        # ## 为什么 skills/ 要可写
         #
         # 技能不是单个 md 文件，它是一个目录：SKILL.md + references/ +
         # 可能还有脚本和模板。manage_asset 只能写 SKILL.md，
@@ -282,7 +276,6 @@ async def init_runtime() -> None:
                 1,
                 "技能目录（模型可增删改技能及其附件）",
             ),
-            (settings.macros_dir.resolve(), 1, "宏目录（模型可增删改宏）"),
         ]
         existing_paths = {
             r.path for r in (await db.execute(select(PathWhitelist))).scalars()
@@ -493,6 +486,9 @@ def create_app() -> FastAPI:
         routes_models.router, prefix=settings.api_prefix, tags=["models"]
     )
     app.include_router(agent_router)
+    # memory_router 自带 /api/memory 前缀（与 agent_router 一致），
+    # 不再叠加 api_prefix —— 叠加会变成 /api/api/memory。
+    app.include_router(memory_router)
 
     # 静态文件【必须最后挂载】，在所有 API 路由注册之后 ——
     # 否则 "/" 的通配会吃掉 /api/*

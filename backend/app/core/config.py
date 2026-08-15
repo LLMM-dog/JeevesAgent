@@ -344,6 +344,174 @@ class MemoryConfig(BaseModel):
     recall_limit_preferences: int = 3
     recall_limit_experiences: int = 5
 
+    # ── 递归搜索配置（OpenViking hierarchical_retriever）──
+
+    # 是否启用递归搜索。
+    #
+    # true  = 从向量搜索结果出发，递归查找相关记忆（标签、实体、时间）
+    # false = 只用向量搜索结果，不递归扩展
+    #
+    # 递归搜索是 OpenViking 的核心优势，能显著提升召回质量。
+    # 默认启用，但会增加一些延迟（通常 <500ms）。
+    recall_enable_recursive_search: bool = True
+
+    # 递归搜索最大深度。
+    #
+    # depth=0: 只看初始向量搜索结果
+    # depth=1: 从初始结果出发，查找一层相关记忆
+    # depth=2: 从一层结果继续查找二层相关记忆
+    # depth=3: 三层递归
+    #
+    # OpenViking 默认 3，我们沿用。深度越大召回越全面，但也越慢。
+    recall_recursive_max_depth: int = 3
+
+    # 分数传播系数（alpha）。
+    #
+    # 子节点最终分数 = alpha * 子节点原始分数 + (1 - alpha) * 父节点分数
+    #
+    # - 1.0: 完全不传播，子节点分数独立
+    # - 0.7: 子节点主要靠自己分数，父节点贡献 30%（OpenViking 默认）
+    # - 0.5: 父子平均
+    # - 0.0: 完全继承父节点分数
+    #
+    # 0.7 是经验最佳值：既保留了子节点的语义相关性，又受益于父节点的高分。
+    recall_recursive_alpha: float = 0.7
+
+    # 每个节点扩展多少个相关记忆。
+    #
+    # 5 表示从每个高分记忆出发，最多找 5 个相关记忆（标签、实体、时间）。
+    # 太大会导致搜索空间爆炸，太小会漏掉相关内容。
+    recall_recursive_expansion: int = 5
+
+    # 递归搜索的最低分数阈值。
+    #
+    # 传播后的分数低于此值，不再继续递归。
+    # 0.3 表示只保留中等以上相关的记忆，过滤噪音。
+    recall_recursive_min_score: float = 0.3
+
+    # ── Rerank 重排序配置（OpenViking RerankClient）──
+
+    # 是否启用 rerank 重排序。
+    #
+    # true  = 向量搜索后，用专门的 rerank 模型重新打分
+    # false = 只用向量搜索分数
+    #
+    # Rerank 是精筛：能捕捉更细粒度的相关性（词序、逻辑关系）。
+    # OpenViking 默认启用，但需要额外的 API 调用和成本。
+    recall_enable_rerank: bool = False
+
+    # Rerank 提供商。
+    #
+    # 支持的提供商：
+    # - "cohere": Cohere Rerank v3.5（推荐，最先进）
+    # - "jina": Jina Reranker v2（开源友好）
+    # - "voyage": Voyage Rerank 1（专注检索）
+    #
+    # 默认 "cohere"，但需要设置 JEEVES_RERANK__API_KEY。
+    rerank_provider: str = "cohere"
+
+    # Rerank 模型名称。
+    #
+    # 各提供商的默认模型：
+    # - cohere: "rerank-v3.5"
+    # - jina: "jina-reranker-v2-base-multilingual"
+    # - voyage: "rerank-1"
+    #
+    # 留空使用提供商的默认模型。
+    rerank_model: str = ""
+
+    # Rerank API 密钥。
+    #
+    # 必须设置才能使用 rerank 功能。
+    # 通过环境变量设置：JEEVES_RERANK__API_KEY=sk-xxx
+    rerank_api_key: str = ""
+
+    # Rerank API 基础 URL（可选）。
+    #
+    # 用于自定义 API 端点或使用代理。
+    # 留空使用提供商的默认 URL。
+    rerank_api_base: str = ""
+
+    # Rerank 超时时间（秒）。
+    #
+    # Rerank 调用比 embedding 慢，需要更长的超时。
+    # 30 秒是合理的默认值。
+    rerank_timeout: float = 30.0
+
+    # 向量分数和 rerank 分数的混合权重。
+    #
+    # 最终分数 = vector_weight * vector_score + rerank_weight * rerank_score
+    #
+    # - (0.5, 0.5): 平均权重
+    # - (0.3, 0.7): 更信任 rerank（推荐）
+    # - (0.2, 0.8): 几乎完全依赖 rerank
+    #
+    # OpenViking 倾向于信任 rerank，因为它是精筛。
+    rerank_vector_weight: float = 0.3
+    rerank_rerank_weight: float = 0.7
+
+    # ── 混合搜索配置（密集向量 + BM25 稀疏向量）──
+
+    # 是否启用混合搜索。
+    #
+    # true  = 向量搜索 + BM25 关键词搜索混合
+    # false = 只用向量搜索
+    #
+    # 混合搜索结合语义理解和关键词匹配，对精确查询（版本号、代码片段）效果更好。
+    # OpenViking 通过 sparse_query_vector 实现，我们用 BM25 自己实现。
+    recall_enable_hybrid_search: bool = False
+
+    # BM25 参数 k1。
+    #
+    # 控制词频饱和度：
+    # - k1 = 0: 忽略词频（只看是否出现）
+    # - k1 = 1.5: 平衡词频影响（推荐，OpenSearch 默认）
+    # - k1 = ∞: 词频线性增长
+    #
+    # 1.5 是经验最佳值。
+    bm25_k1: float = 1.5
+
+    # BM25 参数 b。
+    #
+    # 文档长度归一化：
+    # - b = 0: 完全忽略长度
+    # - b = 0.75: 平衡归一化（标准值）
+    # - b = 1: 完全按长度归一化
+    #
+    # 防止长文档仅因包含更多词就得高分。
+    bm25_b: float = 0.75
+
+    # 混合搜索权重策略。
+    #
+    # 支持的策略：
+    # - "adaptive": 自适应权重（根据结果重叠率调整）
+    # - "query_based": 基于查询类型（版本号/代码 → 关键词优先）
+    # - "balanced": 固定平衡权重（0.7 密集 / 0.3 稀疏）
+    #
+    # 推荐 "query_based"，对齐 OpenViking 的智能查询理解。
+    hybrid_search_strategy: str = "query_based"
+
+    # 默认密集向量权重（平衡查询）。
+    #
+    # 混合分数 = dense_weight * dense_score + sparse_weight * sparse_score
+    #
+    # 0.7 表示更信任语义搜索（密集向量），但保留关键词搜索的贡献。
+    hybrid_default_dense_weight: float = 0.7
+    hybrid_default_sparse_weight: float = 0.3
+
+    # 关键词查询的权重（检测到版本号/代码片段时）。
+    #
+    # 平衡权重，因为关键词匹配很重要。
+    hybrid_keyword_dense_weight: float = 0.5
+    hybrid_keyword_sparse_weight: float = 0.5
+
+    # 语义查询的权重（检测到问句/抽象概念时）。
+    #
+    # 更信任密集向量，因为 BM25 不理解语义。
+    hybrid_semantic_dense_weight: float = 0.8
+    hybrid_semantic_sparse_weight: float = 0.2
+
+
     # 热度在最终分里的权重。0 = 纯语义相似度。
     #
     # 0.15 而非更高：热度是辅助信号。给太高会让"经常被召回的记忆"
@@ -351,6 +519,30 @@ class MemoryConfig(BaseModel):
     hotness_weight: float = 0.15
     # 热度的时间衰减半衰期（天）。与 OpenViking 的 DEFAULT_HALF_LIFE_DAYS 一致。
     hotness_half_life_days: float = 7.0
+
+    # ── 自动提交策略 ──────────────────────────────────────
+    #
+    # 自动触发记忆提取的条件。满足任一条件即触发。
+    # 参考 OpenViking 的 auto_commit_policy.py。
+
+    # 待处理 token 数阈值。默认 10,000 (OpenViking 的 DEFAULT_PENDING_TOKEN_THRESHOLD)。
+    auto_commit_pending_token_threshold: int = 10_000
+
+    # 是否启用上下文窗口百分比策略。
+    auto_commit_use_context_percentage: bool = True
+
+    # 上下文窗口使用率阈值（0.0 - 1.0）。默认 0.80 (80%)。
+    # 多智能体时取最小窗口。
+    auto_commit_context_usage_percentage: float = 0.80
+
+    # 待处理消息数量阈值。默认 50 (OpenViking 的 DEFAULT_MESSAGE_COUNT_THRESHOLD)。
+    auto_commit_message_count_threshold: int = 50
+
+    # 提取时保留最近消息数（不提取）。默认 2 (OpenViking 的 DEFAULT_KEEP_RECENT_COUNT)。
+    auto_commit_keep_recent_count: int = 2
+
+    # 最小提取间隔（秒）。防止频繁提交。默认 300 (5 分钟)。
+    auto_commit_min_interval_seconds: int = 300
 
 
 class WebSearchConfig(BaseModel):
@@ -436,10 +628,6 @@ class Settings(BaseSettings):
     @property
     def skills_dir(self) -> Path:
         return PROJECT_ROOT / "skills"
-
-    @property
-    def macros_dir(self) -> Path:
-        return PROJECT_ROOT / "macros"
 
     @property
     def agents_dir(self) -> Path:

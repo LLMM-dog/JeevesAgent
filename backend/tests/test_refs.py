@@ -232,37 +232,6 @@ class TestSkillRef:
         assert "不存在" in res.failures[0]["reason"]
 
 
-class TestMacroRef:
-    async def test_body_injected(self, tmp_path: Path) -> None:
-        """
-        宏引用必须展开正文。
-
-        这是 漏得最狠的地方 —— 它的宏引用只传名字，
-        而宏的【全部价值就是那段正文】。不展开等于功能完全不存在，
-        但用户看到 chip 会以为生效了。
-        """
-        from app.modules.skill import macros as mr
-
-        # 布局是 macros/<名字>/MACRO.md，不是扁平的 .md
-        d = tmp_path / "macros"
-        (d / "daily").mkdir(parents=True)
-        (d / "daily" / "MACRO.md").write_text(
-            "---\nname: daily\ndescription: 日报\n---\n\n请按以下步骤整理日报：先看 git log。",
-            encoding="utf-8",
-        )
-        # macros 模块没有 set_index，直接置模块全局（reset() 会清掉）
-        mr._index = mr.load_macros(d)
-        try:
-            res = await refmod.expand([{"type": "macro", "name": "daily"}], workspace=tmp_path)
-            assert "先看 git log" in res.text
-            assert "<macro name=" in res.text
-        finally:
-            mr.reset()
-
-    async def test_unknown_macro_reported(self, tmp_path: Path) -> None:
-        res = await refmod.expand([{"type": "macro", "name": "nope"}], workspace=tmp_path)
-        assert len(res.failures) == 1
-
 
 class TestToolRef:
     async def test_hint_only_not_forced(self, tmp_path: Path) -> None:
@@ -396,15 +365,15 @@ class TestNoDeadTypes:
 
     async def test_all_documented_types_handled(self, tmp_path: Path) -> None:
         """
-        文档里写的七种类型必须全部有分支。
+        文档里写的六种类型必须全部有分支。
 
         docs/03-api/endpoints-chat.md 的表格列了 file/dir/url/text/
-        skill/tool/macro 七种。少一种就是死引用。
+        skill/tool 六种。少一种就是死引用。
         """
         import inspect
 
         src = inspect.getsource(refmod.expand)
-        for kind in ("file", "dir", "url", "text", "skill", "tool", "macro"):
+        for kind in ("file", "dir", "url", "text", "skill", "tool"):
             assert f'== "{kind}"' in src, f"{kind} 类型没有展开分支"
 
     async def test_empty_refs_noop(self, tmp_path: Path) -> None:
@@ -463,7 +432,7 @@ class TestCandidatesEndpoint:
     """
 
     async def test_all_kinds_return_200(self, client: Any) -> None:
-        for kind in ("file", "skill", "tool", "macro"):
+        for kind in ("file", "skill", "tool"):
             r = await client.get(f"/api/ref-candidates?kind={kind}&q=")
             assert r.status_code == 200, f"kind={kind} 返回 {r.status_code}：{r.text[:200]}"
             assert "items" in r.json()

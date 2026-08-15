@@ -37,14 +37,13 @@ from app.core.exceptions import AppError
 from app.modules.agent.tools.base import ToolContext, ToolResult
 from app.modules.skill import authoring
 from app.modules.skill import registry as skill_registry
-from app.modules.skill.macros import get_index as get_macro_index
 
 log = structlog.get_logger(__name__)
 
 
 class ManageAssetTool:
     """
-    宏和技能的增删改查。
+    技能的增删改查。
 
     ## 为什么需要审批
 
@@ -58,17 +57,15 @@ class ManageAssetTool:
 
     name = "manage_asset"
     description = (
-        "管理宏（macro）和技能（skill）：新建、修改、删除、查看、重新扫描。"
-        "\n\n宏是可复用的流程模板，用户用 ! 引用它。"
-        "技能是按需加载的知识包，你用 load_skill 读它。"
+        "管理技能（skill）：新建、修改、删除、查看、重新扫描。"
+        "\n\n技能是按需加载的知识包，你用 load_skill 读它。"
         "\n\n什么时候用："
-        "\n- 用户说「把这个流程存成宏」「记住这个步骤」"
         "\n- 用户说「学一下这个」并给了一段规范或文档"
-        "\n- 用户要改或删已有的宏/技能"
+        "\n- 用户要改或删已有的技能"
         "\n\n【技能是一个目录，不止一个文件】。"
         "用这个工具建出 SKILL.md 之后，可以用 write_file 往那个目录里"
         "加 references/xxx.md、脚本、模板之类的附件 —— "
-        "skills/ 和 macros/ 都在可写白名单里。"
+        "skills/ 在可写白名单里。"
         "\n加附件时有两件事必须做对："
         "\n1. 用 create/read 返回的【绝对路径】。相对路径的基准是工作区，"
         "会把文件写到 workspace/ 下面去 —— 那里也可写，所以不会报错，"
@@ -77,7 +74,7 @@ class ManageAssetTool:
         "load_skill_file 读不到它。"
         "\n\n注意 description 字段决定了它【什么时候会被想起来】——"
         "写「当用户要 X 时使用」这种触发条件，不要只写「关于 X 的说明」。"
-        "写不好的话这个宏建了也没人用。"
+        "写不好的话这个技能建了也没人用。"
     )
     requires_approval = True
     destructive = True
@@ -103,8 +100,8 @@ class ManageAssetTool:
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["macro", "skill"],
-                    "description": "宏还是技能",
+                    "enum": ["skill"],
+                    "description": "只支持技能（skill）",
                 },
                 "name": {
                     "type": "string",
@@ -139,9 +136,9 @@ class ManageAssetTool:
         kind = str(kw.get("kind", "")).strip()
         name = str(kw.get("name", "")).strip()
 
-        if kind not in ("macro", "skill"):
+        if kind != "skill":
             return ToolResult(
-                content=f"kind 只能是 macro 或 skill，收到 {kind!r}", is_error=True
+                content=f"kind 只能是 skill，收到 {kind!r}", is_error=True
             )
 
         try:
@@ -277,18 +274,11 @@ class ManageAssetTool:
         而这个错误完全不指向"你需要 reload"：模型刚刚才写了那个文件，
         它会以为是路径写错了，然后反复试不同的写法。
         """
-        if kind == "macro":
-            from app.modules.skill.macros import reload as reload_macros
+        idx = skill_registry.reload()
+        names = sorted(idx.skills)
+        diags = idx.diagnostics
 
-            idx = reload_macros()
-            names = idx.names()
-            diags = idx.diagnostics
-        else:
-            idx2 = skill_registry.reload()
-            names = sorted(idx2.skills)
-            diags = idx2.diagnostics
-
-        lines = [f"已重新扫描，现有 {len(names)} 个 {kind}：{', '.join(names) or '（无）'}"]
+        lines = [f"已重新扫描，现有 {len(names)} 个技能：{', '.join(names) or '（无）'}"]
         if diags:
             # 【诊断必须报出来】。缺 description 的条目会被静默跳过，
             # 模型以为建好了而它根本没被加载。
@@ -307,17 +297,10 @@ class ManageAssetTool:
         )
 
     def _list(self, kind: str) -> ToolResult:
-        if kind == "macro":
-            idx = get_macro_index()
-            items = [
-                {"name": m.name, "description": m.description}
-                for m in sorted(idx.macros.values(), key=lambda x: x.name)
-            ]
-        else:
-            idx2 = skill_registry.get_index()
-            items = [
-                {"name": n, "description": d} for n, d in idx2.l1()
-            ]
+        idx = skill_registry.get_index()
+        items = [
+            {"name": n, "description": d} for n, d in idx.l1()
+        ]
         if not items:
             return ToolResult(
                 content=f"还没有任何 {kind}", display={"kind": kind, "items": []}

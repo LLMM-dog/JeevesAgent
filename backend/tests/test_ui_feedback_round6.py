@@ -80,7 +80,7 @@ class TestNameValidation:
     @pytest.mark.parametrize("bad", ["con", "CON", "nul", "com1", "LPT9"])
     def test_rejects_windows_reserved(self, bad: str) -> None:
         """
-        单独报这一类 —— 用户看到"my-macro 不行"会以为是字符问题，
+        单独报这一类 —— 用户看到"my-skill 不行"会以为是字符问题，
         而实际原因是撞了系统保留名。
         """
         with pytest.raises(BadRequestError) as ei:
@@ -88,7 +88,7 @@ class TestNameValidation:
         assert ei.value.code == "reserved_name"
 
     @pytest.mark.parametrize(
-        "ok", ["部署流程", "deploy-prod", "my_macro", "a1", "混合name-2"]
+        "ok", ["部署流程", "deploy-prod", "my_skill", "a1", "混合name-2"]
     )
     def test_accepts_reasonable(self, ok: str) -> None:
         assert authoring.validate_name(ok) == ok
@@ -149,14 +149,14 @@ class TestBuildDocument:
 
 
 class TestAuthoringCrud:
-    """在临时目录上跑，不碰真实的 macros/。"""
+    """在临时目录上跑，不碰真实的 skills/。"""
 
     @pytest.fixture(autouse=True)
     def _tmp_dirs(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         """
-        改 PROJECT_ROOT 而不是 settings.macros_dir。
+        改 PROJECT_ROOT 而不是 settings.skills_dir。
 
-        那两个是 @property（`PROJECT_ROOT / "macros"`），没有 setter ——
+        那个是 @property（`PROJECT_ROOT / "skills"`），没有 setter ——
         monkeypatch.setattr 会报 "property has no setter"。
         真正的接缝是 PROJECT_ROOT。
         """
@@ -170,14 +170,14 @@ class TestAuthoringCrud:
 
     def test_create_then_read(self) -> None:
         r = authoring.upsert(
-            kind="macro",
+            kind="skill",
             name="流程A",
             description="当用户说 A 时使用",
             body="# A\n\n步骤",
             keywords=["a"],
         )
         assert r.created is True
-        desc, body, kw, _raw = authoring.read_source(kind="macro", name="流程A")
+        desc, body, kw, _raw = authoring.read_source(kind="skill", name="流程A")
         assert desc == "当用户说 A 时使用"
         assert "步骤" in body
         assert kw == ["a"]
@@ -188,25 +188,25 @@ class TestAuthoringCrud:
         而他不会收到任何提示。
         """
         authoring.upsert(
-            kind="macro", name="撞名", description="第一次", body="1"
+            kind="skill", name="撞名", description="第一次", body="1"
         )
         with pytest.raises(ConflictError) as ei:
             authoring.upsert(
-                kind="macro", name="撞名", description="第二次", body="2"
+                kind="skill", name="撞名", description="第二次", body="2"
             )
         assert ei.value.code == "already_exists"
 
     def test_overwrite_works(self) -> None:
-        authoring.upsert(kind="macro", name="改", description="旧", body="旧")
+        authoring.upsert(kind="skill", name="改", description="旧", body="旧")
         r = authoring.upsert(
-            kind="macro",
+            kind="skill",
             name="改",
             description="新描述",
             body="新正文",
             overwrite=True,
         )
         assert r.created is False
-        desc, body, _kw, _raw = authoring.read_source(kind="macro", name="改")
+        desc, body, _kw, _raw = authoring.read_source(kind="skill", name="改")
         assert desc == "新描述"
         assert "新正文" in body
 
@@ -226,7 +226,7 @@ class TestAuthoringCrud:
 
     def test_delete_missing_raises(self) -> None:
         with pytest.raises(NotFoundError):
-            authoring.remove(kind="macro", name="不存在")
+            authoring.remove(kind="skill", name="不存在")
 
     def test_bad_kind_rejected(self) -> None:
         with pytest.raises(BadRequestError):
@@ -280,7 +280,7 @@ class TestManageAssetTool:
         r = await t.run(
             _ctx(),
             action="create",
-            kind="macro",
+            kind="skill",
             name="模型建的",
             description="当用户说 X 时使用",
             body="# X",
@@ -288,7 +288,7 @@ class TestManageAssetTool:
         assert r.is_error is False
         assert "已新建" in r.content
 
-        r2 = await t.run(_ctx(), action="read", kind="macro", name="模型建的")
+        r2 = await t.run(_ctx(), action="read", kind="skill", name="模型建的")
         assert r2.is_error is False
         assert "当用户说 X 时使用" in r2.content
 
@@ -301,7 +301,7 @@ class TestManageAssetTool:
         await t.run(
             _ctx(),
             action="create",
-            kind="macro",
+            kind="skill",
             name="撞",
             description="d",
             body="b",
@@ -309,7 +309,7 @@ class TestManageAssetTool:
         r = await t.run(
             _ctx(),
             action="create",
-            kind="macro",
+            kind="skill",
             name="撞",
             description="d2",
             body="b2",
@@ -320,12 +320,12 @@ class TestManageAssetTool:
     async def test_update_overwrites(self) -> None:
         t = ManageAssetTool()
         await t.run(
-            _ctx(), action="create", kind="macro", name="u", description="旧", body="b"
+            _ctx(), action="create", kind="skill", name="u", description="旧", body="b"
         )
         r = await t.run(
             _ctx(),
             action="update",
-            kind="macro",
+            kind="skill",
             name="u",
             description="新",
             body="b2",
@@ -335,7 +335,7 @@ class TestManageAssetTool:
 
     async def test_empty_description_rejected_with_reason(self) -> None:
         r = await ManageAssetTool().run(
-            _ctx(), action="create", kind="macro", name="无描述", description="", body="b"
+            _ctx(), action="create", kind="skill", name="无描述", description="", body="b"
         )
         assert r.is_error is True
         # 要说清后果，不能只说"不能为空"
@@ -344,7 +344,7 @@ class TestManageAssetTool:
     @pytest.mark.parametrize("bad", ["../x", "a/b", "con"])
     async def test_path_escape_blocked(self, bad: str) -> None:
         r = await ManageAssetTool().run(
-            _ctx(), action="create", kind="macro", name=bad, description="d", body="b"
+            _ctx(), action="create", kind="skill", name=bad, description="d", body="b"
         )
         assert r.is_error is True
 
@@ -353,69 +353,18 @@ class TestManageAssetTool:
         assert r.is_error is True
 
     async def test_list_empty(self) -> None:
-        r = await ManageAssetTool().run(_ctx(), action="list", kind="macro")
+        r = await ManageAssetTool().run(_ctx(), action="list", kind="skill")
         assert r.is_error is False
 
     async def test_delete(self) -> None:
         t = ManageAssetTool()
         await t.run(
-            _ctx(), action="create", kind="macro", name="删我", description="d", body="b"
+            _ctx(), action="create", kind="skill", name="删我", description="d", body="b"
         )
-        r = await t.run(_ctx(), action="delete", kind="macro", name="删我")
+        r = await t.run(_ctx(), action="delete", kind="skill", name="删我")
         assert r.is_error is False
         assert "已删除" in r.content
 
-
-class TestMacroApi:
-    async def test_upsert_and_delete(self, client: AsyncClient) -> None:
-        r = await client.post(
-            "/api/macros",
-            json={
-                "name": "接口建的宏",
-                "description": "当用户说接口测试时使用",
-                "body": "# 内容",
-                "keywords": ["接口"],
-            },
-        )
-        assert r.status_code == 201, r.text
-        assert r.json()["created"] is True
-
-        src = await client.get("/api/macros/接口建的宏/source")
-        assert src.status_code == 200
-        assert src.json()["description"] == "当用户说接口测试时使用"
-
-        d = await client.delete("/api/macros/接口建的宏")
-        assert d.status_code == 200
-
-    async def test_collision_is_409(self, client: AsyncClient) -> None:
-        body = {
-            "name": "撞名接口",
-            "description": "d",
-            "body": "b",
-        }
-        await client.post("/api/macros", json=body)
-        r2 = await client.post("/api/macros", json=body)
-        assert r2.status_code == 409
-        await client.delete("/api/macros/撞名接口")
-
-    async def test_missing_description_rejected(self, client: AsyncClient) -> None:
-        r = await client.post(
-            "/api/macros", json={"name": "无描述接口", "description": "", "body": "b"}
-        )
-        # pydantic 的 min_length=1 会先拦下来
-        assert r.status_code == 422
-
-    async def test_source_differs_from_rendered(self) -> None:
-        """
-        编辑界面必须拿【原始】正文。
-
-        GET /macros/{name} 返回渲染后的（${MACRO_DIR} 已替换成真实路径），
-        保存时写回去宏就跟当前机器绑死了，换台机器不能用。
-        """
-        src = (APP / "api" / "routes_config.py").read_text(encoding="utf-8")
-        i = src.index("async def get_macro_source")
-        body = src[i : i + 800]
-        assert "authoring.read_source" in body
 
 
 class TestSkillToggle:
