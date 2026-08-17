@@ -161,3 +161,35 @@ def _load_one(path: Path, out: SchemaSet, *, source_label: str) -> MemoryTypeSch
     except SchemaError as e:
         out.diagnostics.append(Diagnostic(level="error", message=f"{path.name}: {e}", source=str(path)))
         return None
+
+
+def get_visible_schemas(is_first_agent: bool) -> list[MemoryTypeSchema]:
+    """
+    获取智能体可见的记忆类型。
+
+    ## 多智能体记忆隔离
+
+    - **第一个智能体**：可以看到和修改所有类型（global + session + agent）
+    - **其他智能体**：只能看到和修改自己的 agent 类型
+
+    这确保：
+    - 全局记忆（profile）和会话记忆（events）只被第一个智能体修改
+    - 每个智能体的私有记忆（experiences, tool_notes）相互隔离
+    - 预取时所有智能体都能看到全局/session记忆（用于参考）
+
+    参数:
+        is_first_agent: 是否是本次提取的第一个智能体
+
+    返回:
+        该智能体可见的记忆类型列表
+    """
+    from app.modules.memory.schema import MemoryScopeKind
+
+    schemas = get_schemas()
+
+    if is_first_agent:
+        # 第一个智能体：所有类型都可见
+        return list(schemas.enabled())
+    else:
+        # 其他智能体：只能看到 agent 类型
+        return [s for s in schemas.enabled() if s.scope == MemoryScopeKind.AGENT]

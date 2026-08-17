@@ -31,8 +31,6 @@ class TestAgentService:
         assert agent.permission_shell == 0
         assert agent.permission_network == 0
         assert agent.permission_subagent == 0
-        assert agent.verification_enabled == 0
-        assert agent.strict_mode == 0
         assert agent.hidden == 0
         assert agent.skill_names == "[]"
 

@@ -39,6 +39,8 @@ export interface SessionDetail extends SessionBrief {
   private_mode: boolean;
   amnesia_mode: boolean;
   vision_mode: boolean;
+  /** 会话级流式开关（LLM stream 参数） */
+  stream_enabled: boolean;
 }
 
 export interface SessionListResponse {
@@ -116,7 +118,6 @@ export type SseEventName =
   | "compacting"
   | "compacted"
   | "artifact_updated"
-  | "memory_recalled"
   | "refs_expanded"
   | "interact_required"
   | "sandbox_fallback"
@@ -314,7 +315,6 @@ export interface SseEventMap {
     skills?: string[];
   } & EventCommon;
 
-  memory_recalled: MemoryRecalledEvent;
   /**
    * 下面两个枚举里有定义但后端目前不 emit —— 降级提示最后改成走
    * /api/meta 的字段（前端轮询读）。留着声明是为了将来启用时
@@ -347,15 +347,19 @@ export interface ProbedModel {
   window_source: "matched" | "manual" | "default";
   /** 名字看起来不是对话模型（嵌入/TTS/重排等），默认不勾选 */
   looks_non_chat: boolean;
+  /** 模型类型：chat / reasoning / embedding / ...，探测时按名字推断 */
+  model_type: string;
 }
 
 export interface ProbeResponse {
   /** 规范化后的地址。要回显 —— 用户填的可能被改过（补了 /v1） */
   normalized_base_url: string;
+  /** 从地址推断的分组名，用于"添加模型"自动分组 */
+  suggested_name: string;
   models: ProbedModel[];
 }
 
-export interface ProviderOut {
+export interface EndpointOut {
   id: string;
   name: string;
   base_url: string;
@@ -367,19 +371,42 @@ export interface ProviderOut {
   created_at: number;
 }
 
+/** 模型类型。chat 之外的都是按名字启发式判定，用户可改。 */
+export type ModelType =
+  | "chat"
+  | "reasoning"
+  | "embedding"
+  | "rerank"
+  | "tts"
+  | "audio"
+  | "image";
+
 export interface ModelOut {
   id: string;
-  provider_id: string;
+  endpoint_id: string;
+  endpoint_name: string;
   model_id: string;
   display_name: string;
   context_window: number;
   window_source: string;
   supports_vision: "true" | "false" | "unknown";
   supports_tools: "true" | "false" | "unknown";
+  model_type: ModelType;
   enabled: boolean;
+  price_in_per_1m: number | null;
+  price_out_per_1m: number | null;
+  /** 被绑定到的功能位（purpose）列表，如 ["chat", "memory"] */
+  bindings: string[];
 }
 
-export type Purpose = "chat" | "vision" | "title" | "compact" | "embedding";
+export type Purpose =
+  | "chat"
+  | "vision"
+  | "title"
+  | "compact"
+  | "embedding"
+  | "memory"
+  | "memory_rerank";
 
 export interface BindingOut {
   id: string;
@@ -387,7 +414,7 @@ export interface BindingOut {
   purpose: Purpose;
   model_pk: string;
   model_id: string;
-  provider_name: string;
+  endpoint_name: string;
 }
 
 // ─────────────────────────── 元信息 ───────────────────────────
@@ -411,7 +438,6 @@ export interface MetaResponse {
   /** false 时显示无鉴权警示条 */
   host_is_localhost: boolean;
   skill_count: number;
-  macro_count: number;
   mcp_tool_count: number;
   tool_names: string[];
 }
@@ -440,42 +466,6 @@ export interface TraceSpan {
   output_bytes: number;
   error: string;
   children: TraceSpan[];
-}
-
-/** 一条长期记忆 */
-export interface MemoryOut {
-  id: string;
-  content: string;
-  theme: string;
-  hit: number;
-  /** 置信度。用户手写 1.0，模型调工具记 0.8，后台自动提炼 0.6 */
-  confidence: number;
-  /** manual（用户手写）/ tool（模型主动记）/ auto（自动提炼） */
-  source: string;
-  origin_session_id: string;
-  archived: boolean;
-  updated_at: number;
-  /**
-   * 变更历史。排查"AI 为什么以为我喜欢 X"时这是唯一线索 ——
-   * 少见实现做了这个设计
-   */
-  history: {
-    op: string;
-    reason: string;
-    before: Record<string, unknown>;
-    at: number;
-  }[];
-}
-
-/** 记忆被召回的事件 */
-export interface MemoryRecalledEvent extends EventCommon {
-  count: number;
-  items: {
-    memory_id: string;
-    theme: string;
-    content: string;
-    score: number;
-  }[];
 }
 
 /** 定时任务。 */
@@ -558,19 +548,23 @@ export interface BrowseResult {
 
 export interface ModelItem {
   id: string;
-  provider_id: string;
+  endpoint_id: string;
   /** 端点名，用于菜单里显示"端点 / 模型" */
-  provider_name: string;
+  endpoint_name: string;
   model_id: string;
   display_name: string;
   context_window: number;
   window_source: string;
-  supports_vision: string;
-  supports_tools: string;
+  supports_vision: "true" | "false" | "unknown";
+  supports_tools: "true" | "false" | "unknown";
+  /** 模型类型，前端用图标显示 */
+  model_type: ModelType;
   /** 禁用的不出现在对话页切换菜单里，但配置保留 */
   enabled: boolean;
   price_in_per_1m: number | null;
   price_out_per_1m: number | null;
+  /** 被绑定到的功能位（purpose）列表，如 ["chat", "memory"] */
+  bindings: string[];
 }
 
 // ── 智能体 ──
@@ -587,12 +581,174 @@ export interface AgentItem {
   permission_shell: boolean;
   permission_network: boolean;
   permission_subagent: boolean;
-  verification_enabled: boolean;
-  strict_mode: boolean;
   system_prompt: string;
   model_id: string | null;
   skill_names: string[];
   mcp_servers: string[];
+  /** 额外 LLM 参数（如 thinking: {"type": "disabled"}），解析后透传给上游 */
+  extra_llm_params: string;
   created_at: number;
   updated_at: number;
+}
+
+// ── 记忆 ──
+
+/**
+ * 一个可调设置项。类型/范围/说明都由后端给 ——
+ * 前端硬编码这份列表的话，后端加一项两边就不同步了。
+ */
+export interface MemorySettingItem {
+  key: string;
+  type: "int" | "float" | "bool" | "str";
+  label: string;
+  hint: string;
+  min: number | null;
+  max: number | null;
+  value: number | boolean | string;
+  /** 归属的设置页：memory / websearch。记忆页只渲染 memory 项 */
+  section: string;
+}
+
+/** 向量新鲜度。三种失效原因分开，因为用户的处理方式不同。 */
+export interface MemoryVectorStatus {
+  total: number;
+  /** 从没算过（新记忆，或刚配上嵌入模型） */
+  never: number;
+  /** 换了嵌入模型，旧向量已停止参与召回 */
+  model: number;
+  /** 记忆改过但向量没跟上 */
+  content: number;
+  fresh: number;
+  embedding_configured: boolean;
+  embedding_model: string;
+}
+
+export interface MemoryRebuildResult {
+  attempted: number;
+  succeeded: number;
+  skipped: number;
+  model: string;
+  dim: number;
+  errors: string[];
+}
+
+export interface MemorySearchHit {
+  uri: string;
+  memory_type: string;
+  title: string;
+  score: number;
+  scope: string;
+}
+
+export interface MemorySearchResult {
+  query: string;
+  hits: MemorySearchHit[];
+  /** 空结果有两种原因，前端要能区分：没配模型 vs 确实没有相关记忆 */
+  embedding_configured: boolean;
+}
+
+/** 记忆列表项（/memory/list 返回的元数据，不含正文） */
+export interface MemoryListItem {
+  uri: string;
+  scope: string;
+  memory_type: string;
+  agent_id: string;
+  session_id: string;
+  peer_agent_id: string;
+  title: string;
+  version: number;
+  /** 召回命中次数，热度分的一部分 */
+  active_count: number;
+  updated_at: number;
+}
+
+/** 记忆完整内容（/memory/read 返回） */
+export interface MemoryItem {
+  uri: string;
+  memory_type: string;
+  /** 渲染后的正文（去掉 frontmatter） */
+  body: string;
+  /** 原始文件内容（含 frontmatter） */
+  raw_content: string;
+  /** 业务字段（由 schema 定义） */
+  fields: Record<string, unknown>;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 记忆列表响应 */
+export interface MemoryListResponse {
+  items: MemoryListItem[];
+  total: number;
+}
+
+/** 记忆写入请求 */
+export interface MemoryWriteRequest {
+  agent_id?: string;
+  session_id?: string;
+  memory_type: string;
+  fields: Record<string, unknown>;
+}
+
+/** 记忆写入响应 */
+export interface MemoryWriteResponse {
+  uri: string;
+  version: number;
+  /** true = 新建，false = 更新 */
+  created: boolean;
+}
+
+/** 向量化请求 */
+export interface MemoryVectorizeRequest {
+  uris: string[];
+}
+
+/** 向量化响应 */
+export interface MemoryVectorizeResponse {
+  attempted: number;
+  succeeded: number;
+  skipped: number;
+  model: string;
+  dim: number;
+  errors: string[];
+}
+
+// ── 记忆痕迹 ──
+
+/** 一次记忆提取的痕迹（.trace/ 下的 JSON 文件） */
+export interface MemoryTrace {
+  extraction_id: string;
+  /** 痕迹链 ID（多次提取属于同一次会话提交） */
+  trace_id: string;
+  /** 提取时间戳（毫秒） */
+  extracted_at: number;
+  /** 文件名（列表接口附带） */
+  file?: string;
+  written: { uri: string }[];
+  edited: { uri: string }[];
+  unchanged: { uri: string }[];
+  failed: { uri: string; error: string }[];
+  deletes: { uri: string; memory_type: string; deleted_content: string }[];
+  errors: string[];
+  summary: {
+    total_adds: number;
+    total_updates: number;
+    total_deletes: number;
+    total_unchanged: number;
+    total_errors: number;
+  };
+  /** 详情里的完整操作记录（含 before/after 正文） */
+  operations?: {
+    adds: { uri: string; memory_type: string; after: string }[];
+    updates: { uri: string; memory_type: string; before: string; after: string }[];
+    unchanged: { uri: string; memory_type: string }[];
+    failed: { uri: string; memory_type: string; error: string }[];
+    deletes: { uri: string; memory_type: string; deleted_content: string }[];
+  };
+}
+
+export interface MemoryTraceListResponse {
+  traces: MemoryTrace[];
+  total: number;
 }

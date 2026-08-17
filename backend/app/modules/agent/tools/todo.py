@@ -66,14 +66,7 @@ async def emit_updated(db: Any, session_id: str) -> None:
 
 class TodoWriteTool:
     name = "todo_write"
-    description = (
-        "写入任务清单（全量替换：传入的列表会覆盖当前会话的全部任务）。\n"
-        "在开始一个需要 3 步以上的任务时，先用本工具列出计划。\n"
-        "每完成一步立即更新状态——不要等全部做完才一次性标记，"
-        "否则用户看到的进度会一直是 0% 然后突然 100%，等于没有。\n"
-        "只列用户关心的步骤，不要把每个文件读写都列成一条。单条不超过 20 字。\n"
-        "同一时刻只能有一个 in_progress。"
-    )
+    description = "写入任务清单（全量替换）。3 步以上任务先列计划，每完成一步立即更新。同一时刻只能一个 in_progress。"
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:

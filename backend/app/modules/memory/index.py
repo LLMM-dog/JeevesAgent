@@ -108,10 +108,14 @@ async def set_embedding(
     model: str,
     dim: int,
     content_hash: str,
+    level: int = 2,
     commit: bool = False,
 ) -> bool:
     """
     存一条记忆的向量。行不存在返回 False（索引与文件不一致，调用方决定怎么办）。
+
+    Args:
+        level: 记忆层级（0=L0/Abstract, 1=L1/Overview, 2=L2/Details）
 
     ## 为什么默认 commit=False
 
@@ -122,18 +126,19 @@ async def set_embedding(
 
     它记的是"向量算的是哪一版内容"。与行上的 content_hash 比较能发现
     "记忆改过但向量没重算"——那时召回用的是旧语义，是个必须能被
-    发现的状态，而不是静默的错误。
+    发现的状态，而不是静默的错误结果。
     """
-    from app.modules.memory.vectorize import pack
-
-    row = await get(db, uri)
+    row = await db.get(MemoryIndex, uri)
     if row is None:
         return False
+
+    from app.modules.memory.vectorize import pack
 
     row.embedding = pack(vector)
     row.embedding_model = model
     row.embedding_dim = dim
     row.embedded_hash = content_hash
+    row.level = level
 
     if commit:
         await db.commit()
@@ -146,11 +151,9 @@ async def remove(db: AsyncSession, uri: str, *, commit: bool = True) -> None:
         await db.commit()
 
 
-async def remove_session(db: AsyncSession, agent_id: str, session_id: str) -> int:
+async def remove_session(db: AsyncSession, session_id: str) -> int:
     result = await db.execute(
-        delete(MemoryIndex).where(
-            MemoryIndex.agent_id == agent_id, MemoryIndex.session_id == session_id
-        )
+        delete(MemoryIndex).where(MemoryIndex.session_id == session_id)
     )
     await db.commit()
     return result.rowcount or 0

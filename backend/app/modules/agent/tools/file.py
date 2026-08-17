@@ -74,11 +74,7 @@ def _skip(p: Path) -> bool:
 
 class ReadFileTool:
     name = "read_file"
-    description = (
-        "读取文本文件内容，返回带行号的文本。"
-        "修改任何文件之前必须先用本工具读一遍——不要凭猜测写。"
-        "二进制文件会被拒绝。文件很大时可用 offset/limit 分段读。"
-    )
+    description = "读取文件，返回带行号全文。二进制文件会被拒绝。修改前必须先读。"
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:
@@ -150,11 +146,7 @@ class ReadFileTool:
 
 class WriteFileTool:
     name = "write_file"
-    description = (
-        "把内容写入文件（整体覆盖），父目录不存在会自动创建。"
-        "修改已有文件应优先用 edit_file 做精确替换——"
-        "整体覆盖会丢掉你没读到的部分。本工具主要用于新建文件。"
-    )
+    description = "写文件，整体覆盖。主要用于新建文件。修改已有文件优先用 edit_file。"
     requires_approval = True
 
     def parameters(self) -> dict[str, Any]:
@@ -278,12 +270,7 @@ def _no_match_hint(text: str, old: str, *, context: int = 2) -> str:
 
 class EditFileTool:
     name = "edit_file"
-    description = (
-        "在文件中做精确字符串替换。这是修改已有文件的首选方式。"
-        "old_string 必须在文件中【唯一命中】——命中 0 次或多次都会失败并告诉你实际次数。"
-        "所以 old_string 要带足够的上下文（前后各多带几行）来保证唯一。"
-        "调用前必须先用 read_file 读过该文件。"
-    )
+    description = "精确字符串替换。old_string 必须唯一命中，带足够上下文保证唯一性。"
     requires_approval = True
 
     def parameters(self) -> dict[str, Any]:
@@ -363,7 +350,7 @@ class EditFileTool:
 
 class ListDirTool:
     name = "list_dir"
-    description = "列出目录内容。子目录带 / 后缀。不递归——需要递归查找用 glob。"
+    description = "列出目录内容。子目录带 / 后缀。"
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:
@@ -418,10 +405,7 @@ class ListDirTool:
 
 class GlobTool:
     name = "glob"
-    description = (
-        "按 glob 模式递归查找文件，返回相对路径列表。"
-        "自动跳过 .git/node_modules/__pycache__/.venv 等目录。"
-    )
+    description = "按 glob 模式查找文件，返回相对路径列表。跳过 .git/node_modules 等忽略目录。"
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:
@@ -471,10 +455,7 @@ class GlobTool:
 
 class GrepTool:
     name = "grep"
-    description = (
-        "用正则在文件内容中搜索，返回 路径:行号: 内容 的列表。"
-        "用 include 限定文件类型可大幅提速，如 include=\"*.py\"。"
-    )
+    description = "按正则搜索文件内容，返回 path:行号:文本。include 可限定文件类型。"
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:

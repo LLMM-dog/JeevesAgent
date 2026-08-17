@@ -45,6 +45,7 @@ class SessionDetail(SessionBrief):
     private_mode: bool
     amnesia_mode: bool
     vision_mode: bool
+    stream_enabled: bool = True
     agent_id: str = ""
 
 
@@ -75,6 +76,7 @@ class PatchSessionRequest(BaseModel):
     private_mode: bool | None = None
     amnesia_mode: bool | None = None
     vision_mode: bool | None = None
+    stream_enabled: bool | None = None
     agent_id: str | None = None
 
 
@@ -103,6 +105,9 @@ class MessageOut(BaseModel):
 
 class MessageListResponse(BaseModel):
     items: list[MessageOut]
+    # 归档水位线：seq <= watermark 的消息已被记忆归档，不再发回 LLM。
+    # -1 表示无归档。前端据此跳过已归档消息，恢复"归档后的上下文占用"。
+    watermark: int = -1
 
 
 # ─────────────────────────── chat ───────────────────────────
@@ -169,6 +174,8 @@ class CreateEndpointModel(BaseModel):
     display_name: str = ""
     context_window: int | None = None
     model_type: str = ""
+    supports_vision: str = "unknown"  # "true" | "false" | "unknown"
+    supports_tools: str = "unknown"   # "true" | "false" | "unknown"
 
 
 class CreateEndpointRequest(BaseModel):
@@ -211,6 +218,9 @@ class ModelOut(BaseModel):
     model_type: str = "chat"
     # 禁用的模型不出现在对话页快捷切换菜单里，但配置保留
     enabled: bool
+    # 被绑定到的功能位（purpose），如 ["chat", "memory"]。前端据此显示
+    # "这个模型被配置为对话、记忆提取"，并在禁用时弹提醒。
+    bindings: list[str] = []
     price_in_per_1m: float | None = None
     price_out_per_1m: float | None = None
 
@@ -234,6 +244,8 @@ class ModelPatch(BaseModel):
     model_type: str | None = None
     price_in_per_1m: float | None = None
     price_out_per_1m: float | None = None
+    supports_vision: str | None = None  # "true" | "false" | "unknown"
+    supports_tools: str | None = None   # "true" | "false" | "unknown"
 
 
 class UpdateEndpointRequest(BaseModel):
@@ -269,7 +281,7 @@ class BindingListResponse(BaseModel):
 
 class SetBindingRequest(BaseModel):
     agent_name: str = ""
-    purpose: Literal["chat", "vision", "title", "compact", "embedding"]
+    purpose: Literal["chat", "vision", "title", "compact", "embedding", "memory", "memory_rerank"]
     model_pk: str
 
 

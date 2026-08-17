@@ -50,6 +50,9 @@ class Model(Base, TimestampMixin):
     # unknown 必须存在：核验有成本（要发真实请求），不能对每个模型都跑一遍。
     supports_vision: Mapped[str] = mapped_column(String(8), default="unknown", nullable=False)
     supports_tools: Mapped[str] = mapped_column(String(8), default="unknown", nullable=False)
+    # chat | reasoning | embedding | rerank | tts | audio | image
+    # 探测/添加时按名字启发式判定一次，前端用图标显示，用户可改。
+    model_type: Mapped[str] = mapped_column(String(16), default="chat", nullable=False)
     vision_checked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 

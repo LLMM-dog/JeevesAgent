@@ -35,7 +35,6 @@ from app.modules.agent.messages import Msg
 from app.modules.agent.pathguard import load_session_allowed, scoped_guard
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.endpoint import service as provider_service
-from app.modules.memory import service as memory_service
 from app.modules.session import repo
 from app.modules.skill import registry as skill_registry
 from app.modules.skill import state as skill_state
@@ -64,6 +63,7 @@ class PreparedChat:
     # 必须真的展开，不能像 那样把 JSON 原样丢给模型
     refs: list[dict[str, Any]] = field(default_factory=list)
     agent_id: str = ""  # 选择的智能体，空串=默认
+    stream_enabled: bool = True  # 会话级流式开关
 
 
 # ── 权限过滤 ──
@@ -85,6 +85,78 @@ def _filter_tools_by_permissions(registry: "ToolRegistry", permissions: dict[str
             continue  # 不在映射表中的工具（如 todo_write、skill_manage）不受限制
         if not permissions.get(category, True):
             registry.unregister(tool_name)
+
+
+def parse_extra_llm_params(text: str) -> dict[str, Any]:
+    """
+    解析智能体的额外 LLM 参数字符串。
+
+    支持两种格式：
+    - 完整 JSON 对象：{"thinking": {"type": "disabled"}, "temperature": 0.7}
+    - key: value 多行（value 尝试按 JSON 解析，失败当纯字符串）：
+          thinking: {"type": "disabled"}
+          temperature: 0.7
+
+    解析失败整段抛 ValueError —— 静默忽略会让"看起来发了其实没生效"。
+    各模型的思考/采样字段不统一，这里不做抽象映射，原样交给上游。
+    """
+    text = (text or "").strip()
+    if not text:
+        return {}
+
+    # 先试整体 JSON 对象
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    out: dict[str, Any] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            raise ValueError(f"无法解析的额外参数行（缺冒号）：{line!r}")
+        key, _, raw_value = line.partition(":")
+        key = key.strip()
+        raw_value = raw_value.strip()
+        if not key:
+            raise ValueError(f"额外参数缺少 key：{line!r}")
+        if not raw_value:
+            raise ValueError(f"额外参数缺少 value：{line!r}")
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            value = raw_value
+        out[key] = value
+    return out
+
+
+async def _try_resolve_vision(db: AsyncSession) -> "Any | None":
+    """
+    解析视觉功能位（purpose="vision"）的模型。没显式配置返回 None，
+    不回落 chat。
+
+    视觉识别要么用专门配的视觉模型（识别图片 → 文本描述），要么走 chat
+    模型的多模态（图片直接进请求），两者语义不同，不能混在一个回落链里。
+    """
+    from sqlalchemy import select
+
+    from app.modules.endpoint import service as endpoint_service
+    from app.modules.endpoint.models import ModelBinding
+
+    b = (
+        await db.execute(
+            select(ModelBinding).where(
+                ModelBinding.agent_name == "", ModelBinding.purpose == "vision"
+            )
+        )
+    ).scalar_one_or_none()
+    if b is None:
+        return None
+    return await endpoint_service.resolve(db, purpose="vision")
 
 
 _COMMON_FIELDS = ("ts", "span_id", "parent_span_id", "depth")
@@ -169,6 +241,13 @@ class ChatService:
         async with self._sessionmaker() as db:
             session = await repo.get_session(db, session_id)
 
+            # 审批模式从 DB 恢复到 runtime_state。get_session 路由也会做，
+            # 但发消息不一定先走那个路由（比如前端缓存了会话详情），
+            # 这里兜底一次，保证审批检查读到的是用户设过的模式而非默认 manual。
+            from app.core import runtime_state
+
+            runtime_state.restore_approval_mode(session_id, session.approval_mode)
+
             # 预检 chat 位能否解析出模型，结果丢弃。
             # 目的是让"未配置模型"返回 400 而不是流中途的 error 事件。
             await provider_service.resolve(
@@ -199,6 +278,24 @@ class ChatService:
             # "peer closed connection"，完全不指向"图片太大"或"格式不对"。
             checked = self._check_images(images or [], session)
 
+            # 图片策略检查：有图但既没配视觉模型、chat 模型又不支持图片 → 报错。
+            # 报错放在发消息前（这里能变成 400），不放流里 —— 流里只能走 error
+            # 事件，且响应头已发出，报错会变成"连接中断"。
+            if checked and await _try_resolve_vision(db) is None:
+                chat_model = await provider_service.resolve(
+                    db, purpose="chat", override_pk=session.model_pk or ""
+                )
+                if not chat_model.supports_vision:
+                    raise BadRequestError(
+                        "当前对话模型不支持图片，且未配置视觉模型",
+                        code="vision_unavailable",
+                        hint=(
+                            f"模型 {chat_model.model_id} 的图片能力未核验或核验为不支持，"
+                            "且未在设置页绑定视觉功能位。去「功能位绑定」配一个视觉模型，"
+                            "或对当前模型点「核验视觉」"
+                        ),
+                    )
+
             # 用户消息立即落库。之后的任何失败（包括流开始后的）
             # 都不会让用户的输入丢失。
             user_msg = Msg(role="user", content=content, images=checked)
@@ -222,6 +319,7 @@ class ChatService:
             title_empty=not session.title,
             images=checked,
             refs=refs or [],
+            stream_enabled=bool(session.stream_enabled),
         )
 
     @staticmethod
@@ -310,6 +408,7 @@ class ChatService:
                                 refs=prep.refs,
                                 model_pk=prep.model_pk,
                                 agent_id=prep.agent_id,
+                                stream_enabled=prep.stream_enabled,
                             )
             except asyncio.CancelledError:
                 await emit(Ev.CANCELLED, run_id=run_id, partial_saved=True)
@@ -405,11 +504,13 @@ class ChatService:
         refs: list[dict[str, Any]] | None = None,
         model_pk: str = "",
         agent_id: str = "",
+        stream_enabled: bool = True,
     ) -> None:
         # 解析智能体定义
         agent_system_prompt = ""
         agent_permissions: dict[str, bool] = {}
         agent_model: str | None = None
+        extra_params: dict[str, Any] = {}
         if agent_id:
             from app.modules.agent.agent_service import get as get_agent
 
@@ -424,6 +525,15 @@ class ChatService:
                     "network": bool(agent_def.permission_network),
                     "subagent": bool(agent_def.permission_subagent),
                 }
+                # 智能体级额外 LLM 参数。解析失败不阻断对话，只记日志 ——
+                # 不能让一个手滑的格式错误让整个对话发不出去。
+                if agent_def.extra_llm_params:
+                    try:
+                        extra_params = parse_extra_llm_params(agent_def.extra_llm_params)
+                    except ValueError as e:
+                        log.warning(
+                            "extra_llm_params_invalid", agent_id=agent_id, error=str(e)
+                        )
 
         # 模型：智能体绑定 > 会话选择 > 默认
         model = await provider_service.resolve(
@@ -443,6 +553,52 @@ class ChatService:
         # 智能体的 system_prompt 追加在系统提示词后面
         if agent_system_prompt:
             system_prompt = system_prompt + "\n\n" + agent_system_prompt
+
+        # ── 记忆召回 ──
+        # 在对话开始前召回相关记忆，注入到系统提示词
+        if settings.memory.enabled and agent_id:
+            try:
+                from app.modules.memory.recall import recall_memories
+                from app.modules.session import repo as session_repo
+
+                # 获取最后一条用户消息作为查询
+                recent_messages = await session_repo.load_messages(
+                    db, session_id, agent_name=None, limit=10
+                )
+                user_query = ""
+                for msg in reversed(recent_messages):
+                    if msg.role == "user":
+                        user_query = msg.content
+                        break
+
+                if user_query:
+                    # 获取嵌入模型
+                    try:
+                        from app.modules.llm import get_embedding_model
+                        embed_model = await get_embedding_model(db)
+                    except Exception:
+                        embed_model = None
+
+                    # 召回记忆
+                    recall_result = await recall_memories(
+                        db=db,
+                        session_id=session_id,
+                        query=user_query,
+                        agent_id=agent_id,
+                        embedding_model=embed_model,
+                    )
+
+                    # 将召回的记忆注入到系统提示词
+                    if recall_result.rendered:
+                        system_prompt = (
+                            system_prompt
+                            + "\n\n# 相关记忆\n\n"
+                            + recall_result.rendered
+                            + "\n\n---\n\n请基于以上记忆回答用户问题。"
+                        )
+            except Exception as e:
+                # 召回失败不影响对话，记录日志
+                log.warning("memory_recall_failed", session_id=session_id, error=str(e))
 
         run_started = now_ms()
         # run 行先写"running"，跑完再更新。
@@ -476,22 +632,41 @@ class ChatService:
                 # 否则多工作区静默失效
                 workspace=Path(workspace_path),
                 system_prompt=system_prompt,
+                # 会话级流式开关 + 智能体级额外 LLM 参数
+                stream_enabled=stream_enabled,
+                extra_params=extra_params,
             )
             await loop.load_context()
 
-            # 把本轮图片挂到最后一条 user 消息上。
+            # 图片策略：配置了视觉功能位 → 用视觉模型识别，文本描述替代图片；
+            # 否则用 chat 模型直接多模态（supports_vision 已在 prepare 检查过）。
             #
             # 必须在 load_context 之后做 —— row_to_msg 故意不还原 images
             #（避免历史里的图每轮重发），所以刚落库的那条读回来也是没图的。
             # 这里补上，让它只在这一轮生效。
             if images:
-                for m in reversed(loop.messages):
-                    if m.role == "user":
-                        m.images = images
-                        break
+                vision_model = await _try_resolve_vision(db)
+                if vision_model is not None:
+                    # 视觉模型识别图片 → 文本描述 → 塞回 user 消息。
+                    # chat 模型看不到原图，只看到这段文字（省 token 且不依赖 chat 的多模态）。
+                    from app.modules.endpoint import vision as vision_mod
+
+                    description = await vision_mod.describe_images(
+                        get_llm(), vision_model, images
+                    )
+                    if description:
+                        for m in reversed(loop.messages):
+                            if m.role == "user":
+                                suffix = f"\n\n[附图的视觉识别结果]\n{description}"
+                                m.content = (m.content or "") + suffix
+                                break
+                else:
+                    for m in reversed(loop.messages):
+                        if m.role == "user":
+                            m.images = images
+                            break
 
             await self._expand_refs(loop, refs, workspace_path)
-            await self._inject_memories(loop, db, session_id, agent_id)
             result = await loop.run()
 
             await emit(
@@ -502,6 +677,32 @@ class ChatService:
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
             )
+
+            # ── 检查是否需要自动提取记忆 ──
+            # 对话完成后检查，不阻塞响应返回。
+            #
+            # 【必须用独立会话】。这里的 db 是 produce() 内部的 pdb，
+            # 主 run 结束后 `async with self._sessionmaker() as pdb` 会
+            # 关闭它。若后台任务继续用这个已关闭的会话做查询，会触发
+            # IllegalStateChangeError（close() 与 _connection_for_bind()
+            # 竞争）。后台任务必须开自己的会话。
+            if settings.memory.enabled and agent_id:
+                try:
+                    from app.modules.memory import auto_commit
+
+                    sessionmaker = self._sessionmaker
+
+                    async def _auto_commit_later(sm: Any, sid: str) -> None:
+                        try:
+                            async with sm() as commit_db:
+                                await auto_commit.check_and_trigger(commit_db, sid)
+                        except Exception as e:
+                            log.warning("auto_commit_later_failed", session_id=sid, error=str(e))
+
+                    # 创建后台任务，不等待完成
+                    asyncio.create_task(_auto_commit_later(sessionmaker, session_id))
+                except Exception as e:
+                    log.debug("auto_commit_check_failed", session_id=session_id, error=str(e))
 
         run_ended = now_ms()
         trace_writer.submit(
@@ -551,8 +752,8 @@ class ChatService:
 
         这里有个坑。把 refs 序列化成
         `__refs__[JSON]__/refs__` 拼在消息尾部，后端零解析 —— 模型看到的是
-        一段它没被教过的私有 JSON。它的 `macro` 引用因此完全失效
-        （宏的全部价值就在正文，而正文根本没进上下文）。
+        一段它没被教过的私有 JSON。它的技能引用因此完全失效
+        （技能的全部价值就在正文，而正文根本没进上下文）。
 
         ## 为什么附加到 user 消息而不是单独一条
 
@@ -614,94 +815,6 @@ class ChatService:
             bytes_used=res.used_bytes,
             skills=res.skills,
         )
-
-    async def _inject_memories(
-        self, loop: AgentLoop, db: AsyncSession, session_id: str, agent_id: str = ""
-    ) -> None:
-        """
-        召回相关记忆，注入本轮上下文。
-
-        ## 三个关键决定
-
-        **1. 走 user 位，不走 system 位**
-
-        记忆是【观察到的事实】，不是指令。放 system 位会让"用户上次用了
-        Python"升格成"必须用 Python"。而且记忆是自动写入的，可信度天然低于
-        人写的系统提示词 —— 把低可信内容放最高权威位置是错的。
-
-        这和技能正文不进 system 位是同一条规则。也是这么做的
-        （相关实现 用 HumanMessage 注入）。
-
-        **2. 不落库**（persist=False）
-
-        召回结果是每轮现算的。落库的话下一轮 load_context 会把它读回来，
-        与新召回的内容并存 —— 同一条记忆在上下文里出现两次三次。
-
-        **3. 查询只用最后一条真实用户输入**
-
-        不用全部历史：历史里包含上一轮注入的记忆文本，拿它去检索会
-        召回同一批记忆并逐轮强化。见下面的 INJECTION_MARKER 过滤。
-        """
-        session = await repo.get_session(db, session_id)
-        # amnesia_mode：这轮不读记忆（失忆模式）。
-        #
-        # 与 private_mode（这轮不写）分开 —— 合成一个开关会丢掉
-        # "让它记但这轮别提"这类需求。
-        if session.amnesia_mode:
-            log.info("memory_recall_skipped", session_id=session_id)
-            return
-
-        # 取最后一条 user 消息作为查询。
-        #
-        # 【必须过滤掉自己注入的那条】。不过滤会形成自反馈：注入的记忆
-        # 被当成用户输入去检索，召回同一批记忆，措辞逐轮漂移。
-        # 也做了这个过滤。
-        query = ""
-        for m in reversed(loop.messages):
-            if m.role != "user":
-                continue
-            if m.content.startswith(memory_service.INJECTION_MARKER):
-                continue
-            query = m.content
-            break
-        if not query:
-            return
-
-        try:
-            hits = await memory_service.recall(db, query, agent_id=agent_id)
-        except Exception as e:  # noqa: BLE001
-            # 召回失败不该让对话失败。记忆是增强，不是必需品。
-            log.warning("memory_recall_failed", err=str(e))
-            return
-        if not hits:
-            return
-
-        text = memory_service.format_for_injection(hits)
-        if not text:
-            return
-
-        loop.messages.append(
-            Msg(role="user", content=text, agent_name=loop.agent_name)
-        )
-        await emit(
-            Ev.MEMORY_RECALLED,
-            count=len(hits),
-            items=[
-                {
-                    "memory_id": h.memory.id,
-                    "theme": h.memory.theme,
-                    "content": h.memory.content,
-                    "score": h.score,
-                }
-                for h in hits
-            ],
-        )
-        # 命中计数。失败只记日志 —— 它是统计，不是功能。
-        try:
-            await memory_service.touch_hits(db, [h.memory.id for h in hits])
-            await db.commit()
-        except Exception as e:  # noqa: BLE001
-            log.warning("memory_touch_failed", err=str(e))
 
     async def _generate_title(
         self, db: AsyncSession, session_id: str, *, fallback_text: str = ""

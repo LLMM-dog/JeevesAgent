@@ -62,7 +62,7 @@ class MemoryScope:
     三层层级：
     - global: 全局共享（所有智能体可见）
     - agent: 智能体级（跨会话，但只该智能体可见）
-    - session: 会话级（该智能体在本会话的记忆）
+    - session: 会话级（属于会话本身，只被第一个智能体代表会话修改，不按智能体隔离）
 
     peer 维度用于「A 眼中的 B」，与 A 自己的记忆隔离。
     """
@@ -342,3 +342,38 @@ class BatchResult:
                 ],
             },
         }
+
+
+@dataclass
+class ArchiveSummary:
+    """
+    会话归档摘要。
+
+    参考 OpenViking 的归档机制：每次记忆提取后生成一个归档，
+    包含工作记忆摘要和已处理到的消息位置。
+
+    用途：
+    - 增量提取的 watermark（last_seq）
+    - 注入上次摘要到提取上下文（overview）
+    - 提供给前端展示提取历史
+    """
+
+    archive_id: str  # "archive_003"
+    archive_index: int  # 3
+    session_id: str
+    overview: str = ""  # .overview.md 的内容（工作记忆摘要）
+    abstract: str = ""  # .abstract.md 的内容（摘要的抽象）
+    last_seq: int = -1  # 归档中最后一条消息的 seq（用作 watermark）
+    last_message_id: str = ""  # 归档中最后一条消息的 ID
+    message_count: int = 0  # 归档的消息数
+    created_at: int = 0  # 归档创建时间（毫秒时间戳）
+    overview_tokens: int = 0  # 摘要的 token 数估算
+
+    @property
+    def archive_uri(self) -> str:
+        """归档目录的 URI 路径。"""
+        return f"sessions/{self.session_id}/history/{self.archive_id}"
+
+    def is_valid(self) -> bool:
+        """检查归档是否有效（有摘要且有消息）。"""
+        return bool(self.overview.strip() and self.message_count > 0)

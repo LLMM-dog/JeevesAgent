@@ -1,10 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { AgentSwitcher } from "@/components/AgentSwitcher";
 import { ModelSwitcher } from "@/components/ModelSwitcher";
-import { ApprovalDialog } from "@/components/ApprovalDialog";
+import { MemoryStatusIndicator } from "@/components/MemoryStatusIndicator";
 import Banner from "@/components/Banner";
 import Composer from "@/components/Composer";
 import MessageList from "@/components/MessageList";
@@ -19,20 +19,38 @@ export default function ChatPage() {
   const title = useChatStore((s) => s.title);
   const agentId = useChatStore((s) => s.agentId);
   const modelPk = useChatStore((s) => s.modelPk);
+  const hasTriedCreate = useRef(false);
 
   const { data: meta } = useQuery({ queryKey: ["meta"], queryFn: api.meta });
 
-  // 直接访问 /chat 时自动建一个会话，省掉一次点击
+  // 直接访问 /chat 时：有历史会话就进最近的一个，没有才新建。
+  // 不能每次都新建 —— 否则每次打开应用都会多出一个空会话。
   const create = useMutation({
     mutationFn: () => api.createSession(),
     onSuccess: (s) => nav(`/chat/${s.id}`, { replace: true }),
   });
 
+  // 最近的会话（列表按 last_message_at 倒序，items[0] 即上次会话）
+  const { data: recentSessions } = useQuery({
+    queryKey: ["sessions", "recent"],
+    queryFn: () => api.listSessions({ size: 1 }),
+  });
+
   useEffect(() => {
-    if (!sessionId && !create.isPending && !create.isSuccess) {
-      create.mutate();
+    // 只在首次渲染且没有 sessionId 时处理一次，防止无限循环
+    if (!sessionId && !hasTriedCreate.current && recentSessions) {
+      hasTriedCreate.current = true;
+      if (recentSessions.items.length > 0) {
+        nav(`/chat/${recentSessions.items[0].id}`, { replace: true });
+      } else {
+        create.mutate();
+      }
     }
-  }, [sessionId, create]);
+    // 当有 sessionId 时重置标记，允许下次再处理
+    if (sessionId) {
+      hasTriedCreate.current = false;
+    }
+  }, [sessionId, recentSessions]);
 
   useEffect(() => {
     if (sessionId) void openSession(sessionId);
@@ -41,7 +59,7 @@ export default function ChatPage() {
   if (!sessionId) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-[var(--color-muted)]">
-        正在创建会话…
+        加载中…
       </div>
     );
   }
@@ -57,6 +75,8 @@ export default function ChatPage() {
           </h1>
           <AgentSwitcher sessionId={sessionId} agentId={agentId} />
           <ModelSwitcher sessionId={sessionId} modelPk={modelPk} />
+          <div className="ml-auto" />
+          <MemoryStatusIndicator sessionId={sessionId} />
         </header>
 
         {noModel && (
@@ -77,8 +97,6 @@ export default function ChatPage() {
         <Composer disabled={noModel} />
       </div>
       <TodoPanel />
-      {/* 审批框是模态的，放在最外层 —— 嵌在消息列表里会被滚动裁掉 */}
-      <ApprovalDialog />
     </div>
   );
 }

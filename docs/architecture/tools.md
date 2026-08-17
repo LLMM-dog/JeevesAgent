@@ -47,7 +47,7 @@ class ToolContext:
 
 ### extra 是给单个工具的逃生口
 
-`compact_context` 需要回调进 loop 请求压缩。给 ToolContext 加一个只有它用的字段，会让其它 19 个工具都带上这个无关依赖 —— 所以走 `extra`。
+`compact_context` 需要回调进 loop 请求压缩。给 ToolContext 加一个只有它用的字段，会让其它 15 个工具都带上这个无关依赖 —— 所以走 `extra`。
 
 只在主 agent 注入（`depth == 0`）：子 agent 的上下文独立且短暂，压缩它等于白花一次 LLM 调用。
 
@@ -161,7 +161,7 @@ registry.hooks.on(HookPoint.AFTER_TOOL, observe)
 
 ## 内置工具清单
 
-20 个（配了搜索后端是 21 个）。按模块归类，`审批` 列指 manual 模式下是否需人工确认。
+16 个（配了搜索后端是 17 个）。按模块归类，`审批` 列指 manual 模式下是否需人工确认。
 
 ### 文件（`tools/file.py`）
 
@@ -200,21 +200,6 @@ registry.hooks.on(HookPoint.AFTER_TOOL, observe)
 | `load_skill_file` | 否 | 读技能内附属文件（L3） |
 
 见 [skills.md](skills.md)。
-
-### 记忆（`tools/memory.py`）
-
-| 工具 | 审批 | 说明 |
-| --- | --- | --- |
-| `remember` | 否 | 写一条长期记忆，必须给 reason |
-| `recall` | 否 | 按关键词召回，零 LLM 调用 |
-| `update_memory` | 否 | 改已有条目，变更进 history |
-| `forget_memory` | 否 | 归档而非真删 |
-
-**私密模式在三个写工具里分别拦**（`remember` / `update_memory` / `forget_memory`），返回 `display={"skipped": True, "reason": "private_mode"}` 而不报错。
-
-只在召回侧拦是不够的 —— 这是实测抓到的 bug：模型看不到会话开关，照样调 `remember`，而那时它真写进去了。查不到会话时**默认按禁止写处理**。
-
-失忆模式拦在召回入口（`chat_service`），不在工具里 —— 那一层根本不会把记忆注进上下文。见 [memory 相关章节](context.md)。
 
 ### 上下文（`tools/context.py`）
 

@@ -81,11 +81,14 @@ class LLMPort(Protocol):
         model: ResolvedModel,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        stream: bool = True,
         **kwargs: Any,
     ) -> AsyncIterator[LLMChunk]:
         """
-        始终用流式请求 —— 非流式在长推理时更容易被中间层掐断。
-        非流式的调用方只是不订阅事件，代码路径完全相同。
+        默认流式请求。stream=False 时让上游一次性返回完整回复 ——
+        会话级流式开关走这个参数，非流式只是不逐 chunk 吐，代码路径相同。
+
+        kwargs 里的额外字段会原样进请求 body（智能体自定义参数）。
         """
         ...
 
@@ -114,5 +117,16 @@ class LLMPort(Protocol):
 
         探测发生在【模型入库之前】—— 用户刚填完端点信息，还没有
         model 行，也就构造不出 ResolvedModel。所以直接收三个原始参数。
+        """
+        ...
+
+    async def complete_chat(
+        self, model: ResolvedModel, messages: list[dict[str, Any]]
+    ) -> str:
+        """
+        非流式完整回复。用于视觉识别等【一次性、非对话】的调用。
+
+        与 probe_chat 的区别：收 ResolvedModel（模型已入库）、不限制
+        max_tokens（识别图片需要完整描述，不是探测用的一句话）。
         """
         ...

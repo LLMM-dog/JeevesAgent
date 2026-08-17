@@ -10,7 +10,6 @@ from app.core.ids import (
     cron_run_id,
     cron_task_id,
     endpoint_id,
-    memory_id,
     message_id,
     model_id,
     new_id,
@@ -48,9 +47,6 @@ class TestIDPrefixes:
     def test_binding_id_prefix(self) -> None:
         assert binding_id().startswith("bnd_")
 
-    def test_memory_id_prefix(self) -> None:
-        assert memory_id().startswith("mem_")
-
     def test_attachment_id_prefix(self) -> None:
         assert attachment_id().startswith("att_")
 
@@ -87,7 +83,6 @@ class TestIDFormat:
             endpoint_id(),
             model_id(),
             binding_id(),
-            memory_id(),
             attachment_id(),
             workspace_id(),
             path_id(),

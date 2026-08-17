@@ -163,15 +163,12 @@ class TestRunShell:
         assert "标准输入" in desc or "stdin" in desc.lower()
         assert "-y" in desc or "非交互" in desc
 
-    async def test_description_explains_cd_not_persisted(self) -> None:
+    async def test_description_mentions_cwd(self) -> None:
         """
-        必须说明每次调用是独立进程。
-
-        不说的话模型会先 `cd src` 再单独调一次 `ls`，然后困惑为什么
-        看到的还是根目录。
+        必须提到 cwd 参数 —— 模型需要知道可以指定工作目录。
         """
         desc = RunShellTool.description
-        assert "cd" in desc
+        assert "cwd" in desc.lower()
 
 
 class TestRunPython:

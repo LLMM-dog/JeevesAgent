@@ -1,6 +1,6 @@
 [project]
 name = "jeeves"
-version = "0.1.0"
+version = "0.2.0"
 description = "本地个人 Agent 工作台"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -24,6 +24,13 @@ dependencies = [
     "cryptography==44.0.0",
     "structlog==24.4.0",
     "pyyaml==6.0.2",
+    # 记忆类型的 YAML 里有 content_template / filename_template，需要真模板引擎：
+    # events 的路径是 {{ extract_context.get_year(ranges) }}/...，overview 要 for 循环。
+    # 手写 {{var}} 替换（agent/prompts.py 的 render）覆盖不了这些。
+    #
+    # 已经作为 fastapi 的传递依赖存在，但直接用就要直接钉版本 ——
+    # 否则 fastapi 换掉它时这里会静默失效。
+    "jinja2==3.1.6",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +56,11 @@ web = [
     "markdownify==0.14.1",
     "beautifulsoup4==4.12.3",
     "readability-lxml==0.8.4.1",
+]
+# 记忆系统向量搜索。sentence-transformers 提供本地嵌入模型（无需 API Key），
+# faiss-cpu 提供向量索引和 ANN 搜索。不装则回退到纯关键词搜索。
+memory = [
+    "sentence-transformers==3.3.1",
 ]
 dev = [
     "pytest==8.3.4",
@@ -83,8 +95,11 @@ ignore = ["E501"]
 "backend/migrations/*" = ["E", "F", "N", "I", "W"]
 # B008 禁止在参数默认值里调用函数，但 FastAPI 的 Depends() 就是这个模式。
 # 这是框架惯例而非缺陷，只在路由层豁免。
+#
+# 用 *_router.py 通配而不是逐个列文件：模块内的路由都叫这个名字，
+# 每加一个路由就改一次 pyproject 是不必要的摩擦（已经发生过两次）。
 "backend/app/api/*" = ["B008"]
-"backend/app/modules/agent/agent_router.py" = ["B008"]
+"backend/app/modules/**/*_router.py" = ["B008"]
 # 测试里访问被测模块的私有函数是正常的
 "backend/tests/*" = ["SLF001"]
 

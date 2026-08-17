@@ -437,7 +437,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Jeeves",
-        version="0.1.0",
+        version="0.2.0",
         description="本地个人 Agent 工作台",
         lifespan=lifespan,
     )

@@ -36,9 +36,10 @@ jeeves/
 ├── personas/                     # 人设
 │   ├── SOUL.example.md           # 提交
 │   ├── USER.example.md           # 提交
-│   ├── AGENTS.md                 # 提交（行为规则，属于项目资产）
+│   ├── AGENTS.example.md         # 提交（行为规则模板，首次启动复制成 AGENTS.md）
 │   ├── SOUL.md                   # gitignore
-│   └── USER.md                   # gitignore
+│   ├── USER.md                   # gitignore
+│   └── AGENTS.md                 # gitignore（用户私有的行为规则）
 │
 ├── config/                       # 运行时配置，全部 gitignore
 │   ├── mcp_servers.yaml
@@ -53,6 +54,11 @@ jeeves/
 │   ├── jeeves.db-wal
 │   ├── jeeves.db-shm
 │   ├── uploads/<YYYYMM>/
+│   ├── memory/                   # 文件记忆（见 architecture/memory.md）
+│   │   ├── global/               # profile（用户画像，所有智能体共享）
+│   │   ├── agents/<agent_id>/    # 智能体级：soul/preferences/experiences/tool_notes/peers/
+│   │   ├── sessions/<session_id>/ # 会话级（与 agents 平级）：events/entities + history/archive_NNN
+│   │   └── .index/               # 向量索引（SQLite，可重建缓存）
 │   └── logs/
 │
 ├── .env                          # gitignore
@@ -70,7 +76,7 @@ jeeves/
 | --- | --- | --- |
 | `skills/` | 进 | 技能是项目资产。下载的第三方技能可自行决定是否提交 |
 | `macros/` | 进 | 个人工作流，想同步就提交 |
-| `personas/AGENTS.md` | 进 | 行为规则是项目设计的一部分 |
+| `personas/AGENTS.md` | **不进** | 用户私有的行为规则，gitignore。仓库只有 `*.example.md` 模板 |
 | `personas/SOUL.md` `USER.md` | **不进** | 含个人信息 |
 | `personas/*.example.md` | 进 | 新环境的初始模板 |
 | `config/mcp_servers.yaml` | **不进** | 含 token |
@@ -190,7 +196,7 @@ structlog + 标准 logging 的 `TimedRotatingFileHandler`。
 3. skills/ macros/ config/ 目录
 4. 跑 alembic upgrade head
 5. 若 workspace 表为空 → 建默认工作区记录
-6. 若 path_whitelist 表为空 → 插入两条 builtin 记录
+6. 若 path_whitelist 表为空 → 插入三条 builtin 记录
 7. 若 personas/SOUL.md 不存在 → 从 SOUL.example.md 复制
 8. 若 config/mcp_servers.yaml 不存在 → 从 example 复制
 9. 清理 workspace/.jeeves/tmp/ 下超过 24h 的文件

@@ -9,6 +9,14 @@ config/*.yaml
 # 判据：换一台机器 clone 下来能不能跑起来 + 会不会泄露隐私
 data/
 workspace/
+# 【例外】测试数据必须进仓库 —— 它是 clone 下来能跑测试的前提。
+#
+# 不加这条会静默丢数据：`data/` 匹配【任意层级】的 data 目录，
+# 所以 backend/tests/data/ 也被吞掉。实测踩过：一份对话 fixture
+# 写好后 git status 里看不见，重建工作区时消失，而对应的测试
+# 报的是 FileNotFoundError，完全不指向 gitignore。
+!backend/tests/data/
+!backend/tests/data/**
 # 人格文件：用户会在设置页里改，跟踪它们会让 git pull 直接失败
 # （error: Your local changes would be overwritten by merge）。
 # 只跟踪 .example.md，首次启动时复制过来。
@@ -61,3 +69,4 @@ config/mcp_servers.yaml
 # ── 子智能体调研产生的 clone 残留 ──
 *_src/
 *_repo/
+research_repos/

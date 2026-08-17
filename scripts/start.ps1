@@ -1,4 +1,4 @@
-# jeeves 启动脚本（Windows）。
+﻿# jeeves 启动脚本（Windows）。
 #
 # 默认起开发模式：后端 --reload + 前端 vite dev server。
 # 加 -Prod 则先构建前端再只起后端（后端会伺服静态文件）。
@@ -9,6 +9,7 @@
 #   .\start.ps1 -BackendOnly 只起后端
 
 param(
+    [switch]$Dev,        # start.bat 传 -Dev。默认就是开发模式，此参数只为兼容 start.bat 的调用方式
     [switch]$Prod,
     [switch]$BackendOnly,
     [int]$Port = 9000

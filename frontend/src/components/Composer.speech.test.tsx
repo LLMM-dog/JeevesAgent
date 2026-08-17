@@ -31,7 +31,6 @@ vi.mock("@/store/chat", () => ({
       usage: null,
     }),
 }));
-vi.mock("@/components/MacroPicker", () => ({ MacroPicker: () => null }));
 vi.mock("@/components/RefPicker", () => ({ RefPicker: () => null }));
 
 class FakeRecognition {

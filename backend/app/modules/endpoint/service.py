@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 from app.core.crypto import decrypt, encrypt, key_hint
@@ -16,13 +17,31 @@ from app.core.time import now_ms
 from app.infra.llm.openai_compat import normalize_base_url
 from app.infra.llm.port import LLMPort, ResolvedModel
 from app.modules.endpoint.models import Endpoint, Model, ModelBinding
-from app.modules.endpoint.windows import looks_non_chat, lookup_window
+from app.modules.endpoint.windows import detect_model_type, detect_vision_support, looks_non_chat, lookup_window
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
-PURPOSES = ("chat", "vision", "title", "compact", "embedding")
+PURPOSES = ("chat", "vision", "title", "compact", "embedding", "memory", "memory_rerank")
+
+# 功能位之间的中间回落。
+#
+# 默认链是 (agent, purpose) → ("", purpose) → ("", "chat")，中间不经过别的功能位。
+# memory 是例外：记忆提取和上下文压缩是同一类活儿（后台批处理、要便宜模型、
+# 输出结构化），已经配了 compact 的用户不该被要求再配一次 memory。
+#
+# 【不能反向】—— compact 不回落到 memory。压缩是每次对话都可能触发的高频动作，
+# 让它去用一个为提取选的模型会有意想不到的开销。
+PURPOSE_FALLBACKS: dict[str, tuple[str, ...]] = {"memory": ("compact",)}
+
+# 禁止回落到 chat 的 purpose。
+#
+# embedding 和 memory_rerank 必须显式配置，不能回落到 chat 模型：
+# - chat 模型通常没有 /embeddings 端点，回落会导致运行时 404
+# - rerank 模型的 API 协议与 chat 完全不同
+# 没配置时应该抛 NoModelBoundError，由调用方决定降级策略（如跳过向量搜索）。
+NO_CHAT_FALLBACK = {"embedding", "memory_rerank"}
 
 
 @dataclass
@@ -31,6 +50,7 @@ class ProbedModel:
     context_window: int
     window_source: str
     looks_non_chat: bool
+    model_type: str
 
 
 async def probe_models(
@@ -54,12 +74,68 @@ async def probe_models(
                 context_window=window,
                 window_source=source,
                 looks_non_chat=looks_non_chat(name),
+                model_type=detect_model_type(name),
             )
         )
     # 对话模型排前面，同类按名字排
     out.sort(key=lambda m: (m.looks_non_chat, m.model_id))
     log.info("probe_ok", base_url=normalized, count=len(out))
     return normalized, out
+
+
+# 已知主机 → 分组名。探测/添加时用户不填分组名，从地址推断。
+#
+# 匹配用子串（`"deepseek" in host`）而不是精确相等 —— 中转站常带子域名
+# （api.deepseek.com、deepseek.r4ai.cn），精确匹配会漏掉。
+_KNOWN_HOSTS = (
+    ("openai", "OpenAI"),
+    ("anthropic", "Anthropic"),
+    ("deepseek", "DeepSeek"),
+    ("siliconflow", "SiliconFlow"),
+    ("moonshot", "Moonshot"),
+    ("minimax", "MiniMax"),
+    ("bigmodel", "智谱"),
+    ("zhipu", "智谱"),
+    ("dashscope", "通义千问"),
+    ("aliyuncs", "通义千问"),
+    ("mistral", "Mistral"),
+    ("generativelanguage", "Gemini"),
+    ("groq", "Groq"),
+    ("x.ai", "xAI"),
+    ("together", "Together"),
+    ("openrouter", "OpenRouter"),
+    ("fireworks", "Fireworks"),
+    ("ollama", "Ollama"),
+    ("localhost", "本地"),
+    ("127.0.0.1", "本地"),
+)
+
+# 主机名里这些段不参与命名推断，直接跳过。
+_SKIP_SEGMENTS = frozenset(
+    {"api", "openapi", "gateway", "v1", "v2", "www", "com", "cn", "net", "org", "io", "ai", "co"}
+)
+
+
+def guess_endpoint_name(base_url: str) -> str:
+    """
+    从 base_url 推断分组名，用于"添加模型"时自动分组。
+
+    规则：已知主机直接映射；未知主机取第一个非通用段的单词首字母大写；
+    解析不出来回落到"自定义"。
+    """
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    if not host:
+        return "自定义"
+    for hint, name in _KNOWN_HOSTS:
+        if hint in host:
+            return name
+    for seg in host.split("."):
+        if seg and seg not in _SKIP_SEGMENTS:
+            return seg.capitalize()
+    return "自定义"
 
 
 async def create_endpoint(
@@ -90,6 +166,9 @@ async def create_endpoint(
     """
     norm_url = normalize_base_url(base_url)
     hint = key_hint(api_key)
+
+    # 用户不填分组名时从地址推断（"添加模型"是纯自动分组，见路由层）。
+    name = name.strip() or guess_endpoint_name(norm_url)
 
     # 先按名字找，再按"同端点同 Key"找
     p = (
@@ -151,6 +230,13 @@ async def create_endpoint(
             source = "manual"
         else:
             window, source = lookup_window(mid)
+
+        # 启发式检测视觉能力（默认 unknown）
+        vision_hint = str(m.get("supports_vision", "")) or detect_vision_support(mid)
+
+        # 工具能力默认 unknown（暂不启发式检测）
+        tools_hint = str(m.get("supports_tools", "")) or "unknown"
+
         db.add(
             Model(
                 id=model_id(),
@@ -159,6 +245,9 @@ async def create_endpoint(
                 display_name=str(m.get("display_name", "") or ""),
                 context_window=int(window),
                 window_source=source,
+                model_type=str(m.get("model_type") or detect_model_type(mid)),
+                supports_vision=vision_hint,
+                supports_tools=tools_hint,
             )
         )
 
@@ -188,6 +277,36 @@ async def delete_endpoint(db: AsyncSession, pid: str) -> None:
     await get_endpoint(db, pid)
     await db.execute(delete(Endpoint).where(Endpoint.id == pid))
     await db.commit()
+
+
+async def update_endpoint(
+    db: AsyncSession,
+    pid: str,
+    *,
+    name: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> Endpoint:
+    """
+    改分组的名字 / 地址 / Key。
+
+    ## 为什么 Key 传空串等于不改
+
+    前端永远拿不到明文 Key（只回显尾 4 位），编辑分组时 Key 输入框是空的。
+    空串表示"保持原 Key"，只有用户真的重新填了才更新。否则每次改个名字
+    都会把 Key 清空，端点立刻失效。
+    """
+    p = await get_endpoint(db, pid)
+    if name is not None and name.strip():
+        p.name = name.strip()
+    if base_url is not None and base_url.strip():
+        p.base_url = normalize_base_url(base_url)
+    if api_key is not None and api_key.strip():
+        p.api_key_cipher = encrypt(api_key)
+        p.key_hint = key_hint(api_key)
+        p.last_probe_at = now_ms()
+    await db.commit()
+    return p
 
 
 async def list_models(db: AsyncSession, endpoint_id_: str | None = None) -> list[Model]:
@@ -296,7 +415,13 @@ async def resolve(
     if agent_name:
         attempts.append((agent_name, purpose))
     attempts.append(("", purpose))
-    if purpose != "chat":
+    # 中间回落。memory → compact 让已配 compact 的用户不必再配一次。
+    for mid in PURPOSE_FALLBACKS.get(purpose, ()):
+        if agent_name:
+            attempts.append((agent_name, mid))
+        attempts.append(("", mid))
+    # 某些 purpose 禁止回落到 chat（如 embedding、memory_rerank）
+    if purpose != "chat" and purpose not in NO_CHAT_FALLBACK:
         attempts.append(("", "chat"))
 
     chosen: ModelBinding | None = None

@@ -24,4 +24,4 @@ Accepted (2026-08-07)
 ## References
 
 - `docs/guides/product.md` — 形态决策 1
-- `docs/architecture/architecture.md`
+- `docs/architecture/backend.md`

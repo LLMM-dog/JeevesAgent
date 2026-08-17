@@ -30,10 +30,12 @@ APP = ROOT / "backend" / "app"
 
 def _all_tables() -> set[str]:
     """从 metadata 拿真实表名。"""
+    import app.modules.agent.models  # noqa: F401
     import app.modules.cron.models  # noqa: F401
     import app.modules.endpoint.models  # noqa: F401
-    import app.modules.memory.models  # noqa: F401
+    import app.modules.memory.models_db  # noqa: F401
     import app.modules.session.models  # noqa: F401
+    import app.modules.settings.models  # noqa: F401
     import app.modules.skill.models  # noqa: F401
     import app.modules.todo.models  # noqa: F401
     import app.modules.trace.models  # noqa: F401

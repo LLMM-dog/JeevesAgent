@@ -17,8 +17,8 @@
     ├── agents/<agent_id>/
     │   ├── soul.md
     │   ├── preferences/<topic>.md
-    │   ├── peers/<peer_agent_id>/identity.md
-    │   └── sessions/<session_id>/events/<Y>/<M>/<D>/<name>.md
+    │   └── peers/<peer_agent_id>/identity.md
+    ├── sessions/<session_id>/events/<Y>/<M>/<D>/<name>.md   ← 会话记忆，与 agents 平级
     └── .index/
 """
 
@@ -59,7 +59,7 @@ _RESERVED_NAMES = frozenset(
 # 单段路径的长度上限。
 #
 # 取 80 而非文件系统上限（255）：记忆的路径可能有 6 层
-# （agents/<id>/sessions/<id>/events/2026/08/13/<name>.md），
+# （sessions/<id>/events/2026/08/13/<name>.md），
 # Windows 的 260 字符总长限制会先撞上。80 × 3 层 + 前缀仍在安全区。
 MAX_SEGMENT_LEN = 80
 
@@ -88,8 +88,14 @@ def peer_root(agent_id: str, peer_agent_id: str) -> Path:
     return agent_root(agent_id) / "peers" / _safe_segment(peer_agent_id, label="peer_agent_id")
 
 
-def session_root(agent_id: str, session_id: str) -> Path:
-    return agent_root(agent_id) / "sessions" / _safe_segment(session_id, label="session_id")
+def session_root(session_id: str) -> Path:
+    # 会话记忆与智能体记忆【平级】，不嵌在 agents/ 下面。
+    #
+    # 会话记忆（events、entities）是"这次会话发生了什么"，属于会话本身，
+    # 只被第一个智能体代表会话修改（见 registry 的 is_first 说明），
+    # 不按智能体隔离。放 agents/<id>/sessions/ 会让它看起来"属于某个智能体"，
+    # 且删除会话时要遍历 agent 才能定位 —— 平级后按 session_id 一步定位。
+    return memory_root() / "sessions" / _safe_segment(session_id, label="session_id")
 
 
 def trace_dir(scope: MemoryScope) -> Path:
@@ -126,7 +132,7 @@ def scope_root(scope: MemoryScope, kind: MemoryScopeKind, *, peer_enabled: bool 
         return agent_root(scope.agent_id)
 
     # session 域不进 peer 目录（schema 层已强制 peer_enabled=false）。
-    return session_root(scope.agent_id, scope.session_id)
+    return session_root(scope.session_id)
 
 
 def resolve(
@@ -193,6 +199,10 @@ def describe(path: Path) -> tuple[MemoryScopeKind, str, str, str]:
     if parts[0] == "global":
         return MemoryScopeKind.GLOBAL, "", "", ""
 
+    # 会话记忆：sessions/<session_id>/...，与 agents 平级
+    if parts[0] == "sessions" and len(parts) >= 2:
+        return MemoryScopeKind.SESSION, "", parts[1], ""
+
     if parts[0] != "agents" or len(parts) < 2:
         return MemoryScopeKind.GLOBAL, "", "", ""
 
@@ -201,9 +211,6 @@ def describe(path: Path) -> tuple[MemoryScopeKind, str, str, str]:
 
     if len(rest) >= 2 and rest[0] == "peers":
         return MemoryScopeKind.AGENT, agent_id, "", rest[1]
-
-    if len(rest) >= 2 and rest[0] == "sessions":
-        return MemoryScopeKind.SESSION, agent_id, rest[1], ""
 
     return MemoryScopeKind.AGENT, agent_id, "", ""
 

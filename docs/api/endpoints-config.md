@@ -1,4 +1,4 @@
-# 配置类接口
+﻿# 配置类接口
 
 通用约定（错误格式、分页、时间戳）见 [conventions.md](conventions.md)。对话与会话相关的接口见 [endpoints-chat.md](endpoints-chat.md)。
 
@@ -6,7 +6,7 @@
 
 ## 供应商与模型
 
-### POST /api/providers/probe
+### POST /api/endpoints/probe
 
 填完 baseURL + Key 后拉模型列表，**不落库**。
 
@@ -14,37 +14,31 @@
 { "base_url": "https://api.deepseek.com/v1", "api_key": "sk-..." }
 ```
 
-响应：
+响应里带 `normalized_base_url`（回显规范化后的地址）和 `suggested_name`（从地址推断的分组名，用于"添加模型"自动分组）。
 
-```json
-{
-  "ok": true,
-  "models": [{ "model_id": "deepseek-chat", "context_window": 65536 }],
-  "error": null
-}
-```
+### GET /api/endpoints
 
-探测失败时 `ok=false` 且 `error` 给出人能看懂的原因（域名解析失败 / 401 / 超时），不是抛 500 —— 用户填错 Key 是常态，不是服务器故障。
+列出供应商（分组）。`api_key` 只回显尾 4 位，任何情况下不返回明文。
 
-### GET /api/providers
+### POST /api/endpoints
 
-列出供应商。`api_key` 只回显尾 4 位，任何情况下不返回明文。
+新建供应商（分组），可同时带 `models` 数组一次性建好。`name` 可留空，由后端从 `base_url` 推断。同名或同地址同 Key 会并入已有分组而非报错。
 
-### POST /api/providers
+### PATCH /api/endpoints/{endpoint_id}
 
-新建供应商，可同时带 `models` 数组一次性建好。
+改分组的名字 / 地址 / Key。`api_key` 传空串表示保持原 Key（前端拿不到明文，编辑时输入框留空）。
 
-### DELETE /api/providers/{provider_id}
+### DELETE /api/endpoints/{endpoint_id}
 
 删供应商会级联删掉它的模型和绑定。
 
-### GET /api/providers/{provider_id}/available-models
+### GET /api/endpoints/{endpoint_id}/available-models
 
 用已存的 Key 重新探测这个供应商，用于"供应商上了新模型"的场景。
 
 ### GET /api/models
 
-`?provider_id=` 可选。
+`?endpoint_id=` 可选，`?enabled_only=true` 只返回启用的（对话页切换菜单用）。
 
 ### POST /api/models
 
@@ -52,7 +46,7 @@
 
 ### PATCH /api/models/{model_pk}
 
-改 `context_window`、`price_*` 之类。
+改 `display_name`、`context_window`、`price_*`、`enabled`、`model_type`，以及 `endpoint_id`（拖动改分组）。
 
 > 路径参数是 `model_pk` 而非 `id`：`model_id` 是供应商那边的模型名（如 `deepseek-chat`），会重复；`model_pk` 是本地主键。混用这两个名字会导致绑定指向错的行。
 
@@ -86,7 +80,7 @@
 {
   "tools_tokens": 4298,
   "system_tokens": 1722,
-  "tool_count": 20,
+  "mcp_tool_count": 8,
   "window_tokens": 131072,
   "is_estimate": true
 }
@@ -235,32 +229,6 @@ stdio 服务器等同于任意代码执行，规范要求执行前让用户看�
 
 先摘掉所有 `mcp__` 前缀的旧工具再注册新的 —— 不摘的话旧工具残留且指向已关闭的连接。
 
-## 记忆
-
-### GET /api/memories
-
-`?theme=` / `?archived=` 可选。
-
-### GET /api/memories-search
-
-`?q=` 召回探针，用同一套召回逻辑，让用户能验证"问某句话时会召回什么"。
-
-### POST /api/memories
-
-手动加一条。`source` 记为 `manual`。
-
-### PATCH /api/memories/{memory_id}
-
-改内容或 theme。**必须带 reason**，写进 `history` —— 记忆影响之后所有对话，"这条为什么变成现在这样"事后无从追溯。
-
-### DELETE /api/memories/{memory_id}
-
-归档而非真删（设 `archived_at`）。
-
-### POST /api/memories/{memory_id}/restore
-
-取消归档。
-
 ## 人设
 
 ### GET /api/personas
@@ -384,7 +352,7 @@ stdio 服务器等同于任意代码执行，规范要求执行前让用户看�
 ```json
 {
   "version": "0.1.0",
-  "tool_count": 20,
+  "mcp_tool_count": 8,
   "tool_names": ["read_file", "..."],
   "skill_count": 1,
   "macro_count": 1,

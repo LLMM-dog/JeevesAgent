@@ -36,6 +36,9 @@ CREATE TABLE model (
     supports_vision TEXT NOT NULL DEFAULT 'unknown',  -- true|false|unknown
     supports_tools  TEXT NOT NULL DEFAULT 'unknown',
     vision_checked_at INTEGER,
+    model_type      TEXT NOT NULL DEFAULT 'chat',  -- chat|reasoning|embedding|rerank|tts|audio|image
+    price_in_per_1m  REAL,
+    price_out_per_1m REAL,
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
@@ -81,43 +84,6 @@ CREATE UNIQUE INDEX idx_binding_unique ON model_binding(agent_name, purpose);
 
 解析顺序见 [../architecture/agents.md](../architecture/agents.md#每个智能体可绑不同模型)。
 
-## memory
-
-```sql
-CREATE TABLE memory (
-    id                TEXT PRIMARY KEY,
-    content           TEXT NOT NULL,
-    theme             TEXT NOT NULL,          -- 主题分类
-    hit               INTEGER NOT NULL,       -- 命中次数
-    last_hit_at       INTEGER,
-    confidence        REAL NOT NULL,          -- 默认 0.6
-    source            TEXT NOT NULL,          -- auto / manual / tool
-    origin_session_id TEXT,
-    history           TEXT NOT NULL,          -- JSON，每次变更的记录
-    archived_at       INTEGER,                -- 非 NULL = 已归档
-    created_at        INTEGER NOT NULL,
-    updated_at        INTEGER NOT NULL
-);
-CREATE INDEX ix_memory_recall  ON memory(archived_at, theme, hit);
-CREATE INDEX ix_memory_updated ON memory(archived_at, updated_at);
-```
-
-跨会话的长期记忆。
-
-`history` 存**每次变更的理由**。改一条记忆时必须写 reason —— 记忆会影响之后所有对话，而"这条为什么变成现在这样"事后完全无从追溯。
-
-`archived_at` 表示归档而非真删。删错一条记忆是不可逆的，而归档留了退路；召回时用它过滤，所以两个索引都以它开头。
-
-`hit` / `last_hit_at`：记忆条目会越积越多，需要淘汰依据。长期没被命中的条目可以提示用户清理。
-
-`confidence` 默认 0.6 而不是 1.0 —— 模型自动提炼出来的东西不该一开始就被当成确定事实。
-
-**召回零 LLM 调用**：SQL 粗筛（按 theme + hit）+ 关键词打分。用 LLM 判断相关性的话每轮对话都要多一次调用，而且成本随记忆总量线性增长。
-
-**不做向量检索。** 个人项目的记忆条目量级在几百条。真的多到装不下再上 `sqlite-vec`。
-
-`origin_session_id` 不做外键 —— 会话删除后记忆应该保留。
-
 ## path_whitelist
 
 ```sql
@@ -143,7 +109,7 @@ CREATE UNIQUE INDEX uq_whitelist_session_path
 
 `session_id` 为 NULL 表示全局条目（内置项和用户加的全局项）。
 
-`builtin=1` 的四条初始记录不允许删除：`workspace/`（可写）、`data/uploads/`（只读）、`skills/`（可写）、`macros/`（可写）。删了 agent 就不能读写文件了，而用户不容易想到是这个原因。
+`builtin=1` 的三条初始记录不允许删除：`workspace/`（可写）、`data/uploads/`（只读）、`skills/`（可写）。删了 agent 就不能读写文件了，而用户不容易想到是这个原因。
 
 这四条是**逐条 upsert** 的，不是"表为空才插"。后者会让已经在用的用户永远拿不到新增的内置项 —— 症状是"文档说能写 `skills/`，我这儿报路径不在白名单内"。
 
@@ -216,18 +182,34 @@ CREATE INDEX ix_run_parent  ON run(parent_run_id);
 CREATE TABLE span (
     id              TEXT PRIMARY KEY,
     run_id          TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
     parent_span_id  TEXT,
     depth           INTEGER NOT NULL DEFAULT 0,
     kind            TEXT NOT NULL,   -- llm|tool|agent|compaction
     name            TEXT NOT NULL,
-    status          TEXT NOT NULL,   -- running|ok|error
-    input_preview   TEXT,            -- 截断到 2000 字符
-    output_preview  TEXT,
-    prompt_tokens     INTEGER,
-    completion_tokens INTEGER,
-    error_message   TEXT,
+    agent_name      TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'ok',  -- running|ok|error
     started_at      INTEGER NOT NULL,
     ended_at        INTEGER,
+    duration_ms     INTEGER,
+    input_preview   TEXT NOT NULL DEFAULT '',
+    input_truncated INTEGER NOT NULL DEFAULT 0,
+    input_bytes     INTEGER NOT NULL DEFAULT 0,
+    output_preview  TEXT NOT NULL DEFAULT '',
+    output_truncated INTEGER NOT NULL DEFAULT 0,
+    output_bytes    INTEGER NOT NULL DEFAULT 0,
+    model_id        TEXT NOT NULL DEFAULT '',
+    provider_name   TEXT NOT NULL DEFAULT '',
+    input_tokens        INTEGER,
+    output_tokens       INTEGER,
+    cache_read_tokens   INTEGER,
+    cache_write_tokens  INTEGER,
+    reasoning_tokens    INTEGER,
+    total_tokens        INTEGER NOT NULL DEFAULT 0,
+    price_in_per_1m  REAL,
+    price_out_per_1m REAL,
+    cost_usd         REAL NOT NULL DEFAULT 0.0,
+    error            TEXT NOT NULL DEFAULT '',
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     FOREIGN KEY (run_id) REFERENCES run(id) ON DELETE CASCADE
@@ -236,9 +218,7 @@ CREATE INDEX idx_span_run ON span(run_id, started_at);
 CREATE INDEX idx_span_parent ON span(parent_span_id);
 ```
 
-M6 阶段实现。在此之前 span 只存在于内存（用于事件的 span 三件套），不落库。
-
-`*_preview` 字段截断到 2000 字符。完整内容已经在 `message` 表里了，span 只是执行树的骨架 —— 存全量会让这张表迅速变成数据库里最大的表。
+`*_preview` 字段截断到 2000 字符。完整内容已经在 `message` 表里了，span 只是执行树的骨架 —— 存全量会让这张表迅速变成数据库里最大的表。`model_id`/`provider_name`/`price_*` 存快照，模型删了报表还能算成本。
 
 ## cron_task
 
@@ -289,6 +269,75 @@ CREATE INDEX ix_cron_run_task_time ON cron_run(task_id, scheduled_at);
 `scheduled_at` 与 `started_at` 分开存。两者的差值就是调度延迟 —— 只存一个的话看不出"任务晚了 10 分钟才跑"。
 
 `session_id` 记录这次触发开在哪个会话里，用户能点进去看 agent 实际做了什么。定时任务是无人值守的，没有这个入口就只能看一行状态。
+
+## memory_index
+
+记忆本身是 Markdown 文件（`data/memory/`），不在数据库里。这张表只存元数据。完整设计见 [memory.md](memory.md)。
+
+```sql
+CREATE TABLE memory_index (
+    uri             TEXT PRIMARY KEY,       -- 相对 data/memory/ 的 POSIX 路径
+    scope           TEXT NOT NULL,          -- global|agent|session
+    memory_type     TEXT NOT NULL,
+    agent_id        TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    peer_agent_id   TEXT NOT NULL DEFAULT '',   -- 非空 = "A 眼中的 B"
+    title           TEXT NOT NULL DEFAULT '',
+    version         INTEGER NOT NULL DEFAULT 1,
+    level           INTEGER NOT NULL DEFAULT 2, -- 0=L0(abstract) 1=L1(overview) 2=L2(details)
+    active_count    INTEGER NOT NULL DEFAULT 0, -- 召回命中次数，热度分的频率分量
+    content_hash    TEXT NOT NULL DEFAULT '',   -- 幂等写入的依据
+    embedding_model TEXT NOT NULL DEFAULT '',
+    embedding_dim   INTEGER NOT NULL DEFAULT 0,
+    embedding       BLOB,                       -- float32 紧凑二进制，不是 JSON
+    embedded_hash   TEXT NOT NULL DEFAULT '',    -- 向量算的是哪一版内容
+    file_updated_at INTEGER NOT NULL DEFAULT 0, -- 文件的 updated_at
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL            -- 索引行的更新时间
+);
+CREATE INDEX ix_memory_index_owner   ON memory_index(agent_id, memory_type);
+CREATE INDEX ix_memory_index_scope   ON memory_index(scope, memory_type);
+CREATE INDEX ix_memory_index_session ON memory_index(session_id);
+```
+
+**文件是真源，这张表是可重建的缓存。** 冲突时相信文件（`service.rebuild_index()` 全量重建）。这条不能反。
+
+为什么记忆存文件却要一张表：
+
+| 字段 | 为什么不能只靠文件 |
+| --- | --- |
+| `title` / `memory_type` | 列举时不必 rglob 整个目录再逐个解 frontmatter |
+| `active_count` | 每次召回命中都要 +1。写进 Markdown frontmatter 会让 git diff 全是计数器噪音 |
+| `content_hash` | 幂等写入：合并后哈希不变就不写盘、`version` 不递增 |
+| `embedding_model` / `embedding_dim` | 换嵌入模型后旧向量失效。不检测会静默算出错误的相似度 —— 召回还在返回结果，只是结果没有意义 |
+| `embedding` | 向量本身。不进 Markdown：它是派生数据、不可读、换模型就失效，写进 frontmatter 会让 git diff 出现 4KB 乱码 |
+| `embedded_hash` | 与 `content_hash` 比较能发现"记忆改过但向量没重算"，那时召回用的是旧语义 |
+| `session_id` | 删会话时按它找出该清理的文件 |
+
+`embedding` 用 float32 BLOB 而非 JSON：1024 维存 JSON 约 12KB、存 BLOB 是 4KB，而且 JSON 每次读都要解析。不建独立的 vector 表——向量与索引行一对一且同生命周期，拆表只会让每次召回多一次 JOIN。
+
+## app_setting
+
+用户在前端调的运行时设置。
+
+```sql
+CREATE TABLE app_setting (
+    key        TEXT PRIMARY KEY,   -- 点分路径，如 memory.keep_recent_turns
+    value      TEXT NOT NULL,      -- 一律存字符串，读取时按目标类型转
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+```
+
+**key-value 而非每项一列**：设置会持续增加，每加一个就要一次迁移。表里只存「用户改过的那些」，其余回落 `config.py` 的默认值——所以"恢复默认"就是删行，不必记住默认值是多少。
+
+值存字符串而非 JSON：SQLite 的 JSON 支持依赖编译选项，而这些值都是标量。转换失败时忽略那一项并告警，不让一个坏值导致设置页打不开。
+
+可改的 key 有**白名单**（`settings/service.py` 的 `SETTABLE`）。没有白名单的话前端能写 `security.encryption_key` 或 `db.path`，那会直接破坏系统。白名单同时给前端提供类型和范围——前端不硬编码可调项列表，否则两边必然不同步。
+
+`uri` 用相对路径而非绝对路径：绝对路径含项目根目录，移动项目或换机器后全表失效，而记忆文件本身还在。
+
+`file_updated_at` 与 `updated_at` 分开：后者是索引行的更新时间（重建索引时会变），前者跟着文件走。混用会让"哪些记忆最近变过"在重建后全部错乱。
 
 ## SQLite 特定配置
 

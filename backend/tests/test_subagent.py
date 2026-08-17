@@ -545,9 +545,8 @@ class TestToolDescription:
         """
         d = SubAgentTool.description
         assert "不要用" in d or "不该用" in d
-        # 两个最重要的反例
         assert "简单" in d
-        assert "依赖当前" in d
+        assert "自包含" in d
 
     def test_not_gated_by_approval(self) -> None:
         """

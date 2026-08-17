@@ -61,7 +61,6 @@ class Ev(StrEnum):
     INTERACT_REQUIRED = "interact_required"
     TODO_UPDATED = "todo_updated"
     ARTIFACT_UPDATED = "artifact_updated"
-    MEMORY_RECALLED = "memory_recalled"
     REFS_EXPANDED = "refs_expanded"
     # 压缩开始/结束分成两个事件：压缩要花一次 LLM 调用（几秒），
     # 只发 compacted 的话用户会看到界面卡住而没有任何解释。

@@ -90,12 +90,12 @@ modules/
   agent/         智能体循环、工具、压缩、AgentSpec、run 注册表、路径守卫
     loop.py compaction.py hooks.py subagent_runner.py specs.py
     prompts.py tokens.py messages.py refs.py models.py
-    tools/   内置工具（file, exec, todo, skill, subagent, memory, context, asset, web）
+    tools/   内置工具（file, exec, todo, skill, subagent, context, asset, web）
   endpoint/      模型端点（原 provider）、模型探测、窗口匹配、视觉检测
   skill/         技能加载、扫描、宏、打包、持久化
   mcp/           MCP 连接管理、工具注册
   cron/          定时任务：调度、错过窗口、时区、无头运行
-  memory/        长期记忆
+  memory/        文件记忆：schema 注册表、提取编排、写入、召回、向量索引
   todo/          Todo 表定义（工具逻辑在 agent/tools/todo.py）
   trace/         run/span 记录、脱敏、成本计算
   web/           联网搜索、网页抓取、正文提取

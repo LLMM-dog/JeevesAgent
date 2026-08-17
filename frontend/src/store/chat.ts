@@ -82,8 +82,6 @@ interface ChatState {
   usage: ContextUsageEvent | null;
   /** 本轮跑过的子智能体。每轮开始时清空 */
   activeAgents: AgentCard[];
-  /** 本轮召回的记忆。每轮清空 */
-  recalledMemories: { memory_id: string; theme: string; content: string; score: number }[];
   /** 非 null 表示正在压缩上下文。压缩要几秒，不显示会让人以为卡死 */
   compacting: { victim_count: number } | null;
   /**
@@ -122,12 +120,13 @@ interface ChatState {
   approvalMode: "manual" | "auto";
   /** 视觉模式。开启后可发图片，但模型必须先通过核验 */
   visionMode: boolean;
+  /** 会话级流式开关：控制 LLM 调用的 stream 参数 */
+  streamEnabled: boolean;
   /**
    * 私密模式：这轮对话不写记忆。
    *
-   * 后端在三个写工具（remember / update_memory / forget_memory）里都拦了，
-   * 而且查不到会话时【默认按禁止写处理】—— 那是实测抓到的 bug 留下的：
-   * 最初只在召回侧做了拦截，模型看不到会话开关照样调 remember，真写进去了。
+   * 查不到会话时【默认按禁止写处理】—— 那是实测抓到的 bug 留下的：
+   * 最初只在召回侧做了拦截，模型看不到会话开关照样写，真写进去了。
    */
   privateMode: boolean;
   /**
@@ -162,6 +161,7 @@ interface ChatState {
   /** 设置这次对话用哪个智能体。传空串清除选择 */
   setAgentId: (id: string) => Promise<void>;
   setVisionMode: (on: boolean) => Promise<void>;
+  setStreamEnabled: (on: boolean) => Promise<void>;
   /** 轮询后台正在跑的 run，直到它结束 */
   watchBackgroundRun: (sessionId: string) => Promise<void>;
   setPrivateMode: (on: boolean) => Promise<void>;
@@ -225,10 +225,14 @@ const emptyStreaming = (run_id: string): StreamingTurn => ({
 function restoreUsage(
   items: MessageOut[],
   contextWindow: number,
+  watermark: number,
 ): ContextUsageEvent | null {
+  // 只取【归档水位线之后】的消息。归档前的消息已被记忆归档，它们的
+  // prompt_tokens 是"发出时的完整上下文"（大值），归档后已过时 ——
+  // 用它恢复会让 token 条显示"没有压缩的程度"。
   for (let i = items.length - 1; i >= 0; i--) {
     const m = items[i];
-    if (m.role === "assistant" && m.prompt_tokens) {
+    if (m.role === "assistant" && m.prompt_tokens && m.seq > watermark) {
       // 窗口大小按会话选的模型算。拿不到就用一个保守的默认值 ——
       // 宁可比率偏大（提前提示压缩），也不要偏小让用户以为还很空。
       const win = contextWindow || 32768;
@@ -270,7 +274,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   banner: null,
   usage: null,
   activeAgents: [],
-  recalledMemories: [],
   compacting: null,
   approval: null,
   workDir: "",
@@ -279,6 +282,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   contextWindow: 0,
   approvalMode: "manual",
   visionMode: false,
+  streamEnabled: true,
   privateMode: false,
   amnesiaMode: false,
   artifact: null,
@@ -300,7 +304,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       runId: null,
       banner: null,
       activeAgents: [],
-      recalledMemories: [],
       compacting: null,
       approval: null,
       artifact: null,
@@ -314,7 +317,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     try {
-      const [{ items }, session, todos] = await Promise.all([
+      const [{ items, watermark }, session, todos] = await Promise.all([
         api.listMessages(sessionId),
         api.getSession(sessionId),
         api.listTodos(sessionId),
@@ -341,7 +344,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         //
         // 取最后一条带 prompt_tokens 的助手消息：那就是上一轮真实
         // 发出去的提示词大小，也就是当前的上下文占用。
-        usage: restoreUsage(items, session.context_window ?? 0),
+        usage: restoreUsage(items, session.context_window ?? 0, watermark ?? -1),
         approvalMode: session.approval_mode ?? "manual",
         // 空串兜底：老会话在迁移前没有这个字段
         workDir: session.work_dir ?? "",
@@ -349,6 +352,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         agentId: session.agent_id ?? "",
         contextWindow: session.context_window ?? 0,
         visionMode: session.vision_mode ?? false,
+        streamEnabled: session.stream_enabled ?? true,
         // 【必须读回来】。不读的话切会话后开关显示的是上一个会话的状态 ——
         // 用户以为自己开着私密模式，而实际这个会话是关的。
         privateMode: session.private_mode ?? false,
@@ -463,7 +467,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 每轮清空子智能体卡片。不清的话上一轮的委派记录会一直堆在界面上，
       // 用户分不清哪个是这一轮的。
       activeAgents: [],
-      recalledMemories: [],
     }));
 
     // 【所有回调都必须先确认自己还属于当前会话】。
@@ -670,6 +673,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // "去设置页核验"的 hint。不显示的话开关会静默弹回去，
       // 用户完全不知道为什么。
       set({ visionMode: previous, banner: toBanner(err) });
+    }
+  },
+
+  async setStreamEnabled(on) {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    const previous = get().streamEnabled;
+    set({ streamEnabled: on });
+    try {
+      await api.patchSession(sessionId, { stream_enabled: on });
+    } catch (err) {
+      set({ streamEnabled: previous, banner: toBanner(err) });
     }
   },
 
@@ -901,15 +916,6 @@ function handleEvent<K extends SseEventName>(
       });
       break;
     }
-
-        case "memory_recalled": {
-          // 记忆被召回时要让用户看到用了哪些 ——
-          // 记忆是自动注入的，不显示的话用户不知道 AI 的回答受了什么影响，
-          // 更不知道某条错误记忆正在生效。
-          const d = data as SseEventMap["memory_recalled"];
-          set({ recalledMemories: d.items });
-          break;
-        }
 
         case "refs_expanded": {
           // 引用失败必须提示。

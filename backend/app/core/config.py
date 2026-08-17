@@ -293,6 +293,18 @@ class MemoryConfig(BaseModel):
     # 截太狠会让模型拿不到可匹配的原文，只能新建。
     prefetch_preview_chars: int = 1_500
 
+    # 向量化时 L2 详细层级的截断上限（字符）。
+    #
+    # L2 记忆可能包含完整的对话记录、代码片段等长文本，
+    # 直接向量化会导致：
+    # 1. 成本高 - 嵌入 API 按 token 计费
+    # 2. 效果差 - 过长的文本会稀释关键信息
+    # 3. 超限风险 - 可能超过嵌入模型的最大 token 限制
+    #
+    # 截断策略：取开头 + 结尾，保留关键信息和结论。
+    # 2000 字符约 500-600 tokens，适合大多数嵌入模型。
+    embedding_l2_max_chars: int = 2_000
+
     # 预取的【总字符预算】。超了从尾部类型开始丢条目。
     #
     # 必须有这个上限：原来 eager 模式不限量，实测一个有 120 条偏好的
@@ -398,45 +410,10 @@ class MemoryConfig(BaseModel):
     #
     # Rerank 是精筛：能捕捉更细粒度的相关性（词序、逻辑关系）。
     # OpenViking 默认启用，但需要额外的 API 调用和成本。
+    #
+    # 注意：rerank 模型需要在设置页配置（purpose="memory_rerank"），
+    # 不再通过环境变量配置。
     recall_enable_rerank: bool = False
-
-    # Rerank 提供商。
-    #
-    # 支持的提供商：
-    # - "cohere": Cohere Rerank v3.5（推荐，最先进）
-    # - "jina": Jina Reranker v2（开源友好）
-    # - "voyage": Voyage Rerank 1（专注检索）
-    #
-    # 默认 "cohere"，但需要设置 JEEVES_RERANK__API_KEY。
-    rerank_provider: str = "cohere"
-
-    # Rerank 模型名称。
-    #
-    # 各提供商的默认模型：
-    # - cohere: "rerank-v3.5"
-    # - jina: "jina-reranker-v2-base-multilingual"
-    # - voyage: "rerank-1"
-    #
-    # 留空使用提供商的默认模型。
-    rerank_model: str = ""
-
-    # Rerank API 密钥。
-    #
-    # 必须设置才能使用 rerank 功能。
-    # 通过环境变量设置：JEEVES_RERANK__API_KEY=sk-xxx
-    rerank_api_key: str = ""
-
-    # Rerank API 基础 URL（可选）。
-    #
-    # 用于自定义 API 端点或使用代理。
-    # 留空使用提供商的默认 URL。
-    rerank_api_base: str = ""
-
-    # Rerank 超时时间（秒）。
-    #
-    # Rerank 调用比 embedding 慢，需要更长的超时。
-    # 30 秒是合理的默认值。
-    rerank_timeout: float = 30.0
 
     # 向量分数和 rerank 分数的混合权重。
     #

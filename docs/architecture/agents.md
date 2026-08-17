@@ -6,10 +6,10 @@
 | --- | --- | --- |
 | 用途 | 用户在设置页创建、管理、选择 | 内置子智能体模板 |
 | 存储 | `agent_defs` 表 | `specs.py` 硬编码 + `agents/*.md` 覆盖 |
-| 包含 | 提示词、模型、权限、技能、MCP、验证开关 | 提示词、工具白名单、max_turns |
+| 包含 | 提示词、模型、权限、技能、MCP、额外 LLM 参数 | 提示词、工具白名单、max_turns |
 | 数量 | 不限 | 2 个内置（researcher, reviewer） |
 
-**AgentDefinition 用于用户在对话页选择的"主智能体"**，可以绑定模型、权限、技能、MCP、开启验证增强。
+**AgentDefinition 用于用户在对话页选择的"主智能体"**，可以绑定模型、权限、技能、MCP、额外 LLM 参数。
 
 **AgentSpec 用于 subagent 工具可以委派的目标**，是"工具型智能体"的模板。
 
@@ -190,8 +190,7 @@ class AgentDefinition(Base, TimestampMixin):
     permission_shell: int
     permission_network: int
     permission_subagent: int
-    verification_enabled: int    # 验证增强开关
-    strict_mode: int             # 验证不通过时是否阻止继续
+    extra_llm_params: str       # 智能体级额外 LLM 参数（自由格式，解析后进请求 body）
     hidden: int                  # 是否在对话页选择器中隐藏
     max_turns: int | None        # NULL=使用全局默认
     deleted_at: int | None       # 软删除

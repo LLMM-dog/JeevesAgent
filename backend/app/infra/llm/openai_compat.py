@@ -199,12 +199,13 @@ class OpenAICompatLLM:
         model: ResolvedModel,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        stream: bool = True,
         **kwargs: Any,
     ) -> AsyncIterator[LLMChunk]:
         body: dict[str, Any] = {
             "model": model.model_id,
             "messages": messages,
-            "stream": True,
+            "stream": stream,
             # 要求上游在流末尾给真实 usage。压缩的触发依据必须是真实
             # prompt_tokens 而非本地估算 —— 估算与真实值在有工具定义、
             # system 提示词、图片时可差 20% 以上，估高了白压缩，估低了直接 400。
@@ -547,6 +548,49 @@ class OpenAICompatLLM:
         content = msg.get("content")
         if isinstance(content, list):
             # 某些模型回数组形式，取其中的 text 片段
+            return " ".join(
+                p.get("text", "") for p in content if isinstance(p, dict)
+            ).strip()
+        return str(content or "").strip()
+
+    async def complete_chat(
+        self, model: ResolvedModel, messages: list[dict[str, Any]]
+    ) -> str:
+        """
+        非流式完整回复。用于视觉识别等一次性调用（非真实对话）。
+
+        与 probe_chat 的区别：收 ResolvedModel、不限制 max_tokens。
+        识别图片需要完整描述，不是探测用的一句话。
+        """
+        base = normalize_base_url(model.base_url)
+        headers = {
+            "Authorization": f"Bearer {model.api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(
+            trust_env=settings.llm.trust_env,
+            timeout=httpx.Timeout(float(settings.llm.request_timeout)),
+        ) as client:
+            resp = await client.post(
+                f"{base}/chat/completions",
+                headers=headers,
+                json={
+                    "model": model.model_id,
+                    "messages": messages,
+                    "stream": False,
+                },
+            )
+        if resp.status_code >= 400:
+            raise ProviderError(
+                f"视觉模型返回 {resp.status_code}", hint=resp.text[:400]
+            )
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        msg = choices[0].get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, list):
             return " ".join(
                 p.get("text", "") for p in content if isinstance(p, dict)
             ).strip()

@@ -32,10 +32,9 @@ async def create(
     permission_shell: bool = False,
     permission_network: bool = False,
     permission_subagent: bool = False,
-    verification_enabled: bool = False,
-    strict_mode: bool = False,
     hidden: bool = False,
     max_turns: int | None = None,
+    extra_llm_params: str = "",
 ) -> AgentDefinition:
     ts = now_ms()
     agent = AgentDefinition(
@@ -51,10 +50,9 @@ async def create(
         permission_shell=int(permission_shell),
         permission_network=int(permission_network),
         permission_subagent=int(permission_subagent),
-        verification_enabled=int(verification_enabled),
-        strict_mode=int(strict_mode),
         hidden=int(hidden),
         max_turns=max_turns,
+        extra_llm_params=extra_llm_params or "",
         created_at=ts,
         updated_at=ts,
     )
@@ -108,8 +106,8 @@ async def update(
     for key, value in kwargs.items():
         if key in ("skill_names", "mcp_servers") and isinstance(value, list):
             value = json.dumps(value, ensure_ascii=False)
-        if key.startswith("permission_") or key in ("verification_enabled", "strict_mode", "hidden"):
-            value = int(value)  # type: ignore[arg-type]
+        if key.startswith("permission_") or key in ("hidden",):
+            value = int(value)  # type: ignore[call-overload]
         if hasattr(agent, key):
             setattr(agent, key, value)
 

@@ -65,8 +65,19 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
 
 async def get_db() -> AsyncIterator[AsyncSession]:
     """FastAPI 依赖。"""
-    async with get_sessionmaker()() as session:
-        yield session
+    session = get_sessionmaker()()
+    try:
+        async with session:
+            yield session
+    except Exception as e:
+        # 诊断日志：捕获会话异常
+        log.error(
+            "database_session_error",
+            error=str(e),
+            error_type=type(e).__name__,
+            session_state=str(getattr(session, "_transaction", None)),
+        )
+        raise
 
 
 async def checkpoint_wal() -> None:

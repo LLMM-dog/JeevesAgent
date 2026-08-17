@@ -42,7 +42,7 @@ SKILL_FILE = "SKILL.md"
 #
 # 【不能只防 ../】。Windows 上 CON、NUL 这类保留名建不出目录；冒号和
 # 反斜杠在路径里有特殊含义；空格结尾的目录名在 Windows 上会被静默去掉，
-# 于是"我的宏 "和"我的宏"指向同一个目录 —— 而用户以为是两个。
+# 于是"我的技能 "和"我的技能"指向同一个目录 —— 而用户以为是两个。
 #
 # 只允许字母数字、连字符、下划线和中文。够表达，且不含任何路径语义。
 _NAME_OK = re.compile(r"^[\w\u4e00-\u9fff-]{1,60}$")
@@ -80,7 +80,7 @@ def validate_name(name: str) -> str:
             code="invalid_name",
         )
     if got.lower() in _WIN_RESERVED:
-        # 这条单独报 —— 用户看到"my-macro 不行"会以为是字符问题，
+        # 这条单独报 —— 用户看到"my-skill 不行"会以为是字符问题，
         # 而实际原因是它撞了系统保留名。
         raise BadRequestError(
             f"{got!r} 是系统保留名，换一个", code="reserved_name"
@@ -163,14 +163,14 @@ def upsert(
 
     ## 为什么默认不覆盖
 
-    模型建宏时用的名字是它自己起的，撞名很常见（"部署流程"这种）。
-    默认覆盖的话它会悄悄冲掉用户手写的宏 —— 而用户不会收到任何提示。
+    模型建技能时用的名字是它自己起的，撞名很常见（"部署流程"这种）。
+    默认覆盖的话它会悄悄冲掉用户手写的技能 —— 而用户不会收到任何提示。
 
     要覆盖必须显式传 overwrite=True，那时调用方（界面上的编辑按钮，
-    或模型明确说"更新那个宏"）已经知道自己在改已有的东西。
+    或模型明确说"更新那个技能"）已经知道自己在改已有的东西。
     """
-    if kind not in ("macro", "skill"):
-        raise BadRequestError(f"kind 只能是 macro 或 skill，收到 {kind!r}")
+    if kind != "skill":
+        raise BadRequestError(f"kind 只能是 skill，收到 {kind!r}")
 
     safe = validate_name(name)
     d = _target_dir(kind, safe)

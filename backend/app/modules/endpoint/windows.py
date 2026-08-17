@@ -183,3 +183,77 @@ NON_CHAT_HINTS = (
 def looks_non_chat(model_id: str) -> bool:
     low = model_id.lower()
     return any(h in low for h in NON_CHAT_HINTS)
+
+
+# 模型类型分类。探测/添加时按名字启发式判定一次并落库 —— 前端用图标显示，
+# 用户可在编辑里改。
+#
+# ## 为什么靠名字而不是接口返回
+#
+# 标准 /v1/models 只返回 {id, object, created, owned_by}，不返回类型/能力。
+# 硅基流动等平台的"推理 / 工具"分类只在它们网站上，API 里 type / sub_type
+# 只是【过滤参数】不是返回值。supports_vision 之所以能用实测，是因为有
+# verify-vision 发真实请求；类型没有对应的廉价探测手段，只能猜。
+#
+# ## 推理模型为什么单独一类
+#
+# 它先吐思维链（reasoning_content）再给答案，交互体验和普通对话模型不同
+# （前端折叠思维链）。用户配模型时看到"推理"图标能立刻分辨，不用点进去。
+_REASONING_HINTS = ("reasoner", "qwq", "thinking", "-r1", "r1-")
+_REASONING_EXACT = frozenset(
+    {"o1", "o1-mini", "o3", "o3-mini", "o4-mini", "gpt-5", "gpt-5-mini", "gpt-5-nano"}
+)
+_EMBED_HINTS = ("embed", "bge-", "gte-", "m3e-", "jina-")
+_IMAGE_HINTS = ("dall-e", "stable-diffusion", "flux", "sdxl")
+_AUDIO_HINTS = ("whisper", "sensevoice", "asr", "parakeet")
+
+
+def detect_model_type(model_id: str) -> str:
+    """
+    按名字猜模型类型。返回 chat / reasoning / embedding / rerank / tts /
+    audio / image。
+
+    只做粗分类：猜错的代价是图标不准确（用户能改），而不是功能不可用。
+    """
+    low = model_id.lower()
+    if (
+        any(h in low for h in _REASONING_HINTS)
+        or low in _REASONING_EXACT
+        or low.startswith(("o1-", "o3-", "o4-"))
+    ):
+        return "reasoning"
+    if "rerank" in low:
+        return "rerank"
+    if any(h in low for h in _EMBED_HINTS):
+        return "embedding"
+    if "tts" in low:
+        return "tts"
+    if any(h in low for h in _AUDIO_HINTS):
+        return "audio"
+    if any(h in low for h in _IMAGE_HINTS):
+        return "image"
+    return "chat"
+
+
+def detect_vision_support(model_id: str) -> str:
+    """
+    按名字检测是否【肯定不支持】视觉输入。返回 "false" / "unknown"。
+
+    设计原则：
+    - 只判断明确不支持的类型（嵌入、音频、TTS）
+    - 其余一律返回 "unknown"，由用户选择或实测
+    - 不猜测"可能支持"，避免误导用户
+
+    为什么不启发式判 true：
+    - 模型名可能误导（如某些"vision"模型实际是图片生成而非理解）
+    - 中转站可能改名、加前缀，导致判断失效
+    - 默认 unknown 更安全，用户可以手动标记或通过 verify-vision 实测
+    """
+    low = model_id.lower()
+
+    # 嵌入、音频、TTS 模型肯定不支持视觉
+    if any(h in low for h in (_EMBED_HINTS + _AUDIO_HINTS + ("tts",))):
+        return "false"
+
+    # 其他情况一律返回 unknown，不猜测
+    return "unknown"

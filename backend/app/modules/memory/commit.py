@@ -26,18 +26,251 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.ids import new_id
+from app.modules.memory import layout
 from app.modules.memory import prefetch as prefetch_mod
 from app.modules.memory import service as memory_service
 from app.modules.memory.extract_context import ExtractContext, from_messages
 from app.modules.memory.extract_input import prepare
 from app.modules.memory.extract_loop import ExtractLoop, ExtractOutcome
 from app.modules.memory.extract_tools import ToolRunner
-from app.modules.memory.models import BatchResult, MemoryExtraction, MemoryScope, WriteOp
+from app.modules.memory.models import ArchiveSummary, BatchResult, MemoryExtraction, MemoryItem, MemoryScope, WriteOp
 from app.modules.memory.schema import MemoryScopeKind, MemoryTypeSchema, OperationMode
-from app.modules.memory.vectorize import VectorizeReport
 from app.modules.session import repo
 
 log = structlog.get_logger(__name__)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 归档读取
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+async def get_latest_archive_summary(session_id: str) -> ArchiveSummary | None:
+    """
+    读取会话的最新归档摘要。
+
+    参考 OpenViking 的实现：
+    - 扫描 sessions/{session_id}/history/archive_NNN/ 目录
+    - 找到最大编号的归档
+    - 读取 .overview.md（摘要）和 messages.jsonl（获取 last_seq）
+
+    返回 None 表示：
+    - 会话还没有归档
+    - 归档目录不存在或损坏
+    """
+    import json
+    from pathlib import Path
+
+    history_dir = layout.session_root(session_id) / "history"
+    if not history_dir.exists():
+        return None
+
+    # 查找所有 archive_NNN 目录
+    archives: list[tuple[int, Path]] = []
+    for item in history_dir.iterdir():
+        if item.is_dir() and item.name.startswith("archive_"):
+            try:
+                index = int(item.name.split("_")[1])
+                archives.append((index, item))
+            except (IndexError, ValueError):
+                continue
+
+    if not archives:
+        return None
+
+    # 按编号倒序，找最新的
+    archives.sort(reverse=True, key=lambda x: x[0])
+
+    for index, archive_dir in archives:
+        archive_id = f"archive_{index:03d}"
+
+        # 读取 .overview.md
+        overview_file = archive_dir / ".overview.md"
+        overview = ""
+        if overview_file.exists():
+            try:
+                overview = overview_file.read_text(encoding="utf-8")
+            except Exception as e:
+                log.warning("read_archive_overview_failed", archive_id=archive_id, error=str(e))
+                continue
+
+        # 读取 .abstract.md
+        abstract_file = archive_dir / ".abstract.md"
+        abstract = ""
+        if abstract_file.exists():
+            try:
+                abstract = abstract_file.read_text(encoding="utf-8")
+            except Exception:
+                pass
+
+        # 读取 messages.jsonl 获取 last_seq 和 message_count
+        messages_file = archive_dir / "messages.jsonl"
+        last_seq = -1
+        last_message_id = ""
+        message_count = 0
+
+        if messages_file.exists():
+            try:
+                lines = messages_file.read_text(encoding="utf-8").strip().split("\n")
+                message_count = len([line for line in lines if line.strip()])
+
+                # 最后一条消息
+                if lines:
+                    last_line = lines[-1].strip()
+                    if last_line:
+                        last_msg = json.loads(last_line)
+                        # messages.jsonl 中的消息格式可能包含 seq 或 id
+                        last_seq = last_msg.get("seq", -1)
+                        last_message_id = last_msg.get("id", "")
+            except Exception as e:
+                log.warning("read_archive_messages_failed", archive_id=archive_id, error=str(e))
+                continue
+
+        # 读取 .meta.json 获取创建时间和 token 数
+        meta_file = archive_dir / ".meta.json"
+        created_at = 0
+        overview_tokens = 0
+
+        if meta_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                created_at = meta.get("created_at", 0)
+                overview_tokens = meta.get("overview_tokens", 0)
+            except Exception:
+                pass
+
+        # 构造 ArchiveSummary
+        summary = ArchiveSummary(
+            archive_id=archive_id,
+            archive_index=index,
+            session_id=session_id,
+            overview=overview,
+            abstract=abstract,
+            last_seq=last_seq,
+            last_message_id=last_message_id,
+            message_count=message_count,
+            created_at=created_at,
+            overview_tokens=overview_tokens,
+        )
+
+        # 如果这个归档有效，返回它
+        if summary.is_valid():
+            log.info(
+                "archive_summary_loaded",
+                session_id=session_id,
+                archive_id=archive_id,
+                last_seq=last_seq,
+                message_count=message_count,
+            )
+            return summary
+
+    # 所有归档都无效
+    return None
+
+
+def _render_archive_overview(agent_reports: list[Any], watermark: int) -> str:
+    """
+    生成归档摘要（.overview.md 的内容）。
+
+    摘要不是逐字对话，而是"这次提取把哪些内容变成了记忆"的清单。
+    上下文加载时用它替代被归档的原始消息 —— 模型看到的是"聊过什么、
+    记下了什么"，而不是几千字的原文。
+    """
+    lines = ["# 会话归档摘要", "", f"覆盖到 seq {watermark}", ""]
+    for r in agent_reports:
+        if r.batch is None:
+            continue
+        prefix = f"[{r.agent_id}] " if len(agent_reports) > 1 else ""
+        if r.batch.written:
+            lines.append(f"## {prefix}新增记忆")
+            for uri in r.batch.written:
+                lines.append(f"- {uri}")
+        if r.batch.edited:
+            lines.append(f"## {prefix}更新记忆")
+            for uri in r.batch.edited:
+                lines.append(f"- {uri}")
+        if r.batch.deletes:
+            lines.append(f"## {prefix}删除记忆")
+            for d in r.batch.deletes:
+                if d:
+                    lines.append(f"- {d.uri}")
+    if len(lines) == 3:
+        lines.append("（本次没有产生记忆变更）")
+    return "\n".join(lines) + "\n"
+
+
+async def write_archive(
+    *,
+    session_id: str,
+    watermark: int,
+    archive_messages: list[dict[str, Any]],
+    agent_reports: list[Any],
+) -> str | None:
+    """
+    写归档目录，返回 archive_id，或 None（没有可归档的消息）。
+
+    ## 归档目录契约（与 get_latest_archive_summary 对应）
+
+        sessions/{session_id}/history/archive_NNN/
+          messages.jsonl  归档的消息（每行 JSONL，含 seq/id/role/content）
+          .overview.md    会话摘要（本次提取的记忆变更）
+          .meta.json      元数据（created_at / overview_tokens / last_seq）
+
+    ## 为什么归档要落盘而不是只更新 DB 水位线
+
+    记忆提取和上下文加载是两套逻辑。归档目录既是"水位线"（last_seq）
+    也是"摘要"（overview）的载体，落到文件系统里，加载侧只要读最新
+    archive 就能同时拿到两者，不需要额外查 DB。
+    """
+    import json
+    import time
+
+    if not archive_messages:
+        return None
+
+    history_dir = layout.session_root(session_id) / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    # 确定下一个归档编号（扫描现有 archive_NNN 取最大 + 1）
+    next_index = 1
+    for item in history_dir.iterdir():
+        if item.is_dir() and item.name.startswith("archive_"):
+            try:
+                idx = int(item.name.split("_")[1])
+                next_index = max(next_index, idx + 1)
+            except (IndexError, ValueError):
+                continue
+
+    archive_id = f"archive_{next_index:03d}"
+    archive_dir = history_dir / archive_id
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # messages.jsonl
+    payload = "\n".join(json.dumps(m, ensure_ascii=False) for m in archive_messages) + "\n"
+    (archive_dir / "messages.jsonl").write_text(payload, encoding="utf-8")
+
+    # .overview.md
+    overview = _render_archive_overview(agent_reports, watermark)
+    (archive_dir / ".overview.md").write_text(overview, encoding="utf-8")
+
+    # .meta.json
+    meta = {
+        "created_at": int(time.time() * 1000),
+        "last_seq": watermark,
+        # 粗略 token 估算（中文约 1 token / 2 字符，这里偏保守取 /3）
+        "overview_tokens": len(overview) // 3,
+        "archived_count": len(archive_messages),
+    }
+    (archive_dir / ".meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+    log.info(
+        "archive_written",
+        session_id=session_id,
+        archive_id=archive_id,
+        watermark=watermark,
+        archived=len(archive_messages),
+    )
+    return archive_id
 
 
 @dataclass
@@ -87,22 +320,57 @@ class CommitReport:
     extraction_id: str = ""
     session_id: str = ""
     skipped: str = ""  # 非空表示整次跳过，值是原因
-
-    # 阶段计数(多智能体时是所有智能体的总和)
-    messages_loaded: int = 0
-    messages_used: int = 0
-    turns_held_back: int = 0
-    messages_truncated: int = 0
-    prefetched_items: int = 0
-
-    outcome: ExtractOutcome | None = None
-    batch: BatchResult | None = None
-    vectorize: VectorizeReport | None = None
-    diff_path: str = ""
-    warnings: list[str] = field(default_factory=list)
+    archive_id: str = ""  # 本次提取写出的归档 ID（archive_NNN），空表示未归档
 
     # 多智能体:每个智能体的提取结果
     agents: list[AgentReport] = field(default_factory=list)
+
+    # ── 兼容属性：单智能体测试访问 ──
+    #
+    # 旧测试期待访问 report.batch / report.outcome 等字段。
+    # 现在这些在 agents[0] 里，通过 @property 提供兼容访问。
+
+    @property
+    def batch(self) -> BatchResult | None:
+        """单智能体兼容：返回第一个智能体的 batch。"""
+        return self.agents[0].batch if self.agents else None
+
+    @property
+    def outcome(self) -> ExtractOutcome | None:
+        """单智能体兼容：返回第一个智能体的 outcome。"""
+        return self.agents[0].outcome if self.agents else None
+
+    @property
+    def diff_path(self) -> str:
+        """单智能体兼容：返回第一个智能体的 diff_path。"""
+        return self.agents[0].diff_path if self.agents else ""
+
+    @property
+    def messages_loaded(self) -> int:
+        """单智能体兼容：返回第一个智能体的 messages_new。"""
+        return self.agents[0].messages_new if self.agents else 0
+
+    @property
+    def messages_used(self) -> int:
+        """单智能体兼容：返回第一个智能体的 messages_new。"""
+        return self.agents[0].messages_new if self.agents else 0
+
+    @property
+    def prefetched_items(self) -> int:
+        """单智能体兼容：返回第一个智能体的 prefetched_items。"""
+        return self.agents[0].prefetched_items if self.agents else 0
+
+    @property
+    def warnings(self) -> list[str]:
+        """多智能体：合并所有智能体的警告。"""
+        if not self.agents:
+            return []
+        all_warnings = []
+        for _i, agent in enumerate(self.agents):
+            if agent.warnings:
+                prefix = f"[{agent.agent_id}] " if len(self.agents) > 1 else ""
+                all_warnings.extend(f"{prefix}{w}" for w in agent.warnings)
+        return all_warnings
 
     @property
     def ok(self) -> bool:
@@ -136,31 +404,33 @@ class CommitReport:
 async def _load_messages_for_extract(
     db: AsyncSession,
     session_id: str,
-    keep_recent_turns: int | None = None,
-) -> tuple[list[Any], list[int]]:
+    after_seq: int | None = None,
+) -> tuple[list[Any], list[int], list[int]]:
     """
     加载会话消息用于记忆提取。
 
-    返回：
-    - messages: 消息列表（截断后）
-    - timestamps: 时间戳列表（截断后）
+    参数:
+        after_seq: 只加载 seq > after_seq 的消息（增量提取）
+
+    返回:
+        - messages: 消息列表（原始，未截断）
+        - timestamps: 时间戳列表（原始，未截断）
+        - seqs: seq 列表（与 messages 一一对应，用于确定归档 watermark）
+
+    注意：不在这里截断，交给调用方决定何时截断。
+    这样可以在多智能体模式下只截断一次。
     """
-    from app.modules.session import repo
 
     # 读取全部消息（agent_name=None 表示不过滤智能体）
-    rows = await repo.load_messages(db, session_id, agent_name=None)
+    rows = await repo.load_messages(db, session_id, agent_name=None, after_seq=after_seq)
     if not rows:
-        return [], []
+        return [], [], []
 
     msgs = [repo.row_to_msg(r) for r in rows]
     stamps = [r.created_at for r in rows]
+    seqs = [r.seq for r in rows]
 
-    # 截断（保留最近 N 轮）
-    prepared = prepare(msgs, stamps, keep_recent_turns=keep_recent_turns)
-    if prepared.is_empty:
-        return [], []
-
-    return prepared.messages, prepared.timestamps
+    return msgs, stamps, seqs
 
 
 async def commit_session(
@@ -171,32 +441,46 @@ async def commit_session(
     keep_recent_turns: int | None = None,
 ) -> CommitReport:
     """
-    对会话中的所有智能体各提取一次。
+    对会话中的所有智能体各提取一次。这是记忆提取的唯一公开接口。
 
-    ## 统一流程
+    ## 统一流程（无论单/多智能体）
 
-    无论会话中有 1 个还是 N 个智能体，都走同样的流程：
-    1. 从会话表读取 agent_ids
-    2. 两阶段预取（共享记忆 + 私有记忆）
-    3. 并行提取所有智能体
+    1. 加载会话消息（原始）
+    2. 读取上次归档摘要（获取 watermark）
+    3. 截断最近会话（keep_recent_turns）
+    4. 预处理会话消息（一次）
+    5. 用预处理消息向量计算，提取全局记忆（global + session，一次）
+    6. 并行：为每个智能体提取私有记忆（agent）
+    7. 并行：为每个智能体组装上下文并运行提取
+       - 第一个智能体：全局 + session + 自己的 agent 记忆
+       - 其他智能体：只有自己的 agent 记忆
 
-    ## 智能体列表
+    ## 多智能体记忆隔离
 
-    从 Session.agent_ids 读取，支持动态添加/移除智能体。
-    如果列表为空，返回 "会话中没有智能体"。
+    - **预取阶段**：所有智能体都能看到全局/session记忆（用于参考）
+    - **提取阶段**：只有第一个智能体能修改全局/session记忆
+    - **系统提示词**：第一个智能体包含全局/session类型的模板
 
-    ## 返回值
+    ## 归档和 Watermark
 
-    CommitReport.agents 包含每个智能体的提取结果（AgentReport）。
+    - 读取最新归档的 `last_seq`，只提取新消息
+    - 归档摘要注入到提取上下文，让 LLM 知道"上次提取了什么"
+    - 不使用 `memory_extraction` 表，文件系统是 source of truth
 
-    llm_call 是 `async (messages) -> str`。注入而非内部构造：
-    提取模型的解析走 endpoint.resolve('memory')，那属于调用方的关注点，
-    而注入让测试能用一个假实现跑通整条管线。
+    参数:
+        db: 数据库会话
+        session_id: 会话 ID
+        llm_call: LLM 调用函数 `async (messages) -> str`
+        keep_recent_turns: 保留最近 N 轮对话不提取
+
+    返回:
+        CommitReport 包含所有智能体的提取结果
     """
     import asyncio
 
     from sqlalchemy import select
 
+    from app.modules.memory import registry
     from app.modules.memory.prefetch import prefetch_multi_agent
     from app.modules.session.models import Session
 
@@ -206,7 +490,7 @@ async def commit_session(
         report.skipped = "记忆系统已关闭（memory.enabled=false）"
         return report
 
-    # ── 读取会话的智能体列表 ──
+    # ── 1. 读取会话和智能体列表 ──
     stmt = select(Session).where(Session.id == session_id)
     session = (await db.execute(stmt)).scalar_one_or_none()
     if not session:
@@ -218,38 +502,54 @@ async def commit_session(
         report.skipped = "会话中没有智能体"
         return report
 
-    # ── 两阶段预取 ──
-    #
-    # 1. 提取共享记忆（global + session）：一次搜索，所有智能体共享
-    # 2. 并行提取每个智能体的私有记忆（agent scope）
-    #
-    # 这样避免重复搜索，同时隔离私有记忆。
+    # ── 2. 读取归档摘要（获取 watermark 和上次摘要）──
+    latest_archive = await get_latest_archive_summary(session_id)
+    watermark_seq = latest_archive.last_seq if latest_archive else -1
+    archive_overview = latest_archive.overview if latest_archive else ""
 
-    # 读取消息（用于构建搜索查询）
-    messages, timestamps = await _load_messages_for_extract(
+    if latest_archive:
+        log.info(
+            "using_archive_watermark",
+            session_id=session_id,
+            archive_id=latest_archive.archive_id,
+            last_seq=watermark_seq,
+        )
+
+    # ── 3. 加载消息（只加载新消息）──
+    messages, timestamps, seqs = await _load_messages_for_extract(
         db,
         session_id=session_id,
-        keep_recent_turns=keep_recent_turns,
+        after_seq=watermark_seq if watermark_seq >= 0 else None,
     )
 
     if not messages:
-        report.skipped = "会话中没有消息"
+        report.skipped = "没有新消息需要提取"
         return report
 
-    # 获取嵌入模型（如果有）
+    # ── 4. 截断（保留最近 N 轮）──
+    prepared = prepare(
+        messages, timestamps, keep_recent_turns=keep_recent_turns, seqs=seqs
+    )
+    if prepared.is_empty:
+        report.skipped = "截断后没有可提取的消息"
+        return report
+
+    # ── 5. 预处理消息（用于向量搜索）──
+    # 获取嵌入模型
     embedding_model = None
     try:
         from app.modules.llm import get_embedding_model
-
-        embedding_model = await get_embedding_model(db, agent_name="")
+        embedding_model = await get_embedding_model(db)
     except Exception as e:
         log.debug("memory_embedding_model_unavailable", error=str(e))
 
-    # 多智能体预取（两阶段：共享 + 私有）
+    # ── 6. 两阶段预取 ──
+    # 阶段1：提取共享记忆（global + session），所有智能体共享
+    # 阶段2：并行提取每个智能体的私有记忆（agent scope）
     multi_prefetch = await prefetch_multi_agent(
         session_id=session_id,
         agent_ids=agent_ids,
-        messages=messages,
+        messages=prepared.messages,  # 使用截断后的消息
         db=db,
         model=embedding_model,
         eager=True,
@@ -262,359 +562,248 @@ async def commit_session(
         shared_items=sum(len(v) for v in multi_prefetch.shared.by_type.values()),
     )
 
-    # ── 并行提取所有智能体的记忆 ──
-    #
-    # 每个智能体：
-    # - 看到全部消息（用户 + 所有智能体）
-    # - 看到共享记忆（global + session）+ 自己的私有记忆（agent）
-    # - 只写入自己作用域内的记忆
+    # ── 7. 并行提取所有智能体的记忆 ──
+    # 像遍历列表一样，无论1个还是N个都走同样的循环
 
-    async def commit_agent_with_prefetch(agent_id: str) -> AgentReport:
-        """为单个智能体执行提取，使用已预取的记忆。"""
-        # 合并该智能体的完整预取结果（共享 + 私有）
-        agent_prefetch = multi_prefetch.merge_for_agent(agent_id)
-
-        return await commit_session_agent(
-            db,
-            session_id=session_id,
+    async def extract_agent_memory(agent_id: str, is_first: bool) -> AgentReport:
+        """为单个智能体执行提取。纯内部函数。"""
+        # 初始化报告
+        agent_report = AgentReport(
             agent_id=agent_id,
-            llm_call=llm_call,
-            keep_recent_turns=keep_recent_turns,
-            prefetched=agent_prefetch,
-            messages_cache=(messages, timestamps),
+            extraction_count=1,  # TODO: 从归档读取累计次数
+            watermark_before=watermark_seq,
+            watermark_after=prepared.last_seq if prepared.last_seq >= 0 else watermark_seq,
+            messages_new=len(messages),
+            prefetched_items=0,
         )
 
-    # 并行提取所有智能体
-    tasks = [commit_agent_with_prefetch(aid) for aid in agent_ids]
+        # 合并该智能体的完整预取结果（共享 + 私有）
+        agent_prefetch = multi_prefetch.merge_for_agent(agent_id)
+        agent_report.prefetched_items = agent_prefetch.total
+
+        # 获取该智能体可见的记忆类型
+        visible_schemas = registry.get_visible_schemas(is_first)
+
+        # 构建提取上下文
+        extract_ctx = from_messages(prepared.messages, prepared.timestamps)
+
+        # 创建工具运行器
+        tool_runner = ToolRunner(
+            scope=MemoryScope(agent_id=agent_id, session_id=session_id),
+            pages=agent_prefetch.pages,
+            read_uris=set(agent_prefetch.read_uris),
+        )
+
+        # 运行 ReAct 循环
+        loop = ExtractLoop(
+            llm_call=llm_call,
+            schemas=visible_schemas,
+            prefetched=agent_prefetch,
+            extract_context=extract_ctx,
+            tool_runner=tool_runner,
+            is_first_agent=is_first,
+            archive_overview=archive_overview,  # 注入上次摘要
+        )
+        outcome = await loop.run()
+        agent_report.outcome = outcome
+        agent_report.warnings.extend(outcome.warnings)
+
+        # 如果没有提取到任何内容，直接返回
+        if not outcome.operations and not outcome.delete_page_ids:
+            agent_report.warnings.append("模型判断没有值得记的内容")
+            return agent_report
+
+        # ── 解析写入操作 ──
+        scope_agent = MemoryScope(agent_id=agent_id)
+        scope_session = MemoryScope(agent_id=agent_id, session_id=session_id)
+
+        ops = _to_write_ops(
+            outcome,
+            schemas=visible_schemas,
+            pages=agent_prefetch.pages,
+            scope_agent=scope_agent,
+            scope_session=scope_session,
+            extract_context=extract_ctx,
+            warnings=agent_report.warnings,
+        )
+
+        # ── 批量写入 ──
+        extraction_id = new_id("ext")
+        batch = await memory_service.write_many(ops, db=db, extraction_id=extraction_id)
+        agent_report.batch = batch
+
+        # ── 删除处理 ──
+        # 同批冲突保护：写入和删除同一个 URI 时，保留写入
+        upserted = {u.casefold().rstrip("/") for u in (*batch.written, *batch.edited)}
+
+        # 写入失败时不执行删除（避免半成功批次丢数据）
+        write_failed = [r for r in batch.results if not r.ok]
+        dropped_by_loop = bool(outcome.warnings)
+
+        if (write_failed or dropped_by_loop) and outcome.delete_page_ids:
+            reason = "写入失败" if write_failed else "提取阶段有条目被丢弃"
+            agent_report.warnings.append(
+                f"本批{reason}，已跳过全部 {len(outcome.delete_page_ids)} 个删除"
+            )
+            log.warning(
+                "memory_deletes_skipped_incomplete_batch",
+                agent_id=agent_id,
+                write_failed=len(write_failed),
+                dropped_by_loop=dropped_by_loop,
+                skipped_deletes=len(outcome.delete_page_ids),
+            )
+            outcome.delete_page_ids = []
+
+        # 执行删除
+        for pid in outcome.delete_page_ids:
+            uri = agent_prefetch.pages.uri_of(pid)
+            if not uri:
+                agent_report.warnings.append(f"delete_page_ids 里的 {pid} 无效，已忽略")
+                continue
+            if uri.casefold().rstrip("/") in upserted:
+                agent_report.warnings.append(
+                    f"跳过删除 {uri}：同批刚写入过（模型把「替换」表达成了「删+建」，按更新处理）"
+                )
+                log.info("memory_delete_skipped_same_batch", uri=uri, agent_id=agent_id)
+                continue
+            batch.deletes.append(await memory_service.delete_with_trace(uri, db=db))
+
+        # ── supersedes 处理 ──
+        if not write_failed and not dropped_by_loop:
+            await _apply_supersedes(
+                db, batch, scope_agent=scope_agent, warnings=agent_report.warnings, upserted=upserted
+            )
+        elif any(_declares_supersedes(op) for op in ops):
+            agent_report.warnings.append("本批不完整，已跳过 supersedes 删除")
+
+        # ── 刷新目录索引（生成 L1 概览）──
+        # 删除的类型也要刷新（避免 overview 中有指向不存在文件的链接）
+        affected = {r.memory_type for r in batch.results if r.ok}
+        affected.update(d.memory_type for d in batch.deletes if d)
+
+        overview_uris = []  # 收集生成的 .overview.md URI，稍后向量化
+        for mtype in affected:
+            schema = next((s for s in visible_schemas if s.memory_type == mtype), None)
+            if schema and schema.overview_template:
+                # 刷新该类型的 overview（生成 L1）
+                # 根据 schema 的 scope 选择正确的 MemoryScope
+                from app.modules.memory.schema import MemoryScopeKind
+                if schema.scope == MemoryScopeKind.SESSION:
+                    overview_uri = await memory_service.refresh_overview(scope_session, mtype)
+                else:
+                    overview_uri = await memory_service.refresh_overview(scope_agent, mtype)
+
+                if overview_uri:
+                    overview_uris.append(overview_uri)
+                    log.info("memory_overview_generated", agent_id=agent_id, memory_type=mtype, uri=overview_uri)
+
+        # ── 向量化 L2 记忆 ──
+        # 对新写入和更新的记忆进行向量化
+        changed_uris = [r.uri for r in batch.results if r.ok and r.changed]
+        if changed_uris or overview_uris:
+            try:
+                from app.modules.llm import get_embedding_model
+                from app.modules.memory import vectorize as vec_mod
+
+                embed_model = await get_embedding_model(db)
+                if embed_model:
+                    # 读取函数：从文件系统加载记忆
+                    async def read_item(uri: str) -> MemoryItem | None:
+                        return await memory_service.read_uri(uri)
+
+                    # 向量化 L2（单个记忆文件）
+                    if changed_uris:
+                        vec_report = await vec_mod.vectorize_uris(
+                            db=db,
+                            uris=changed_uris,
+                            model=embed_model,
+                            read_item=read_item,
+                        )
+                        log.info(
+                            "memory_l2_vectorized",
+                            agent_id=agent_id,
+                            attempted=vec_report.attempted,
+                            succeeded=vec_report.succeeded,
+                            skipped=vec_report.skipped,
+                        )
+
+                    # 向量化 L1（.overview.md）
+                    if overview_uris:
+                        vec_report_l1 = await vec_mod.vectorize_uris(
+                            db=db,
+                            uris=overview_uris,
+                            model=embed_model,
+                            read_item=read_item,
+                        )
+                        log.info(
+                            "memory_l1_vectorized",
+                            agent_id=agent_id,
+                            attempted=vec_report_l1.attempted,
+                            succeeded=vec_report_l1.succeeded,
+                            skipped=vec_report_l1.skipped,
+                        )
+                else:
+                    log.debug("memory_vectorize_skipped_no_model", count=len(changed_uris) + len(overview_uris))
+            except Exception as e:
+                log.warning("memory_vectorize_failed", agent_id=agent_id, error=str(e))
+
+        # ── 写入 diff 痕迹 ──
+        # 用 scope_session 而非 scope_agent：一次提取是会话级的，痕迹要带上
+        # session_id 才能按会话过滤（追踪页按会话查看提取历史）。
+        if batch.results or batch.deletes:
+            agent_report.diff_path = await memory_service.write_diff(batch, scope=scope_session)
+
+        return agent_report
+
+    # 并行提取所有智能体（像遍历列表一样）
+    tasks = [extract_agent_memory(agent_id, is_first=(i == 0)) for i, agent_id in enumerate(agent_ids)]
     agent_reports = await asyncio.gather(*tasks)
     report.agents = list(agent_reports)
+
+    # ── 归档：把已提取的消息从上下文移除，用摘要替代 ──
+    #
+    # 只有提取覆盖到的消息（seq <= watermark）才归档；held_back（最近 N 轮）
+    # 还没结束，保留在 live 消息里下次再处理。归档后 load_context 只加载
+    # seq > watermark 的消息 + 注入 archive 的 .overview.md 摘要，
+    # token 占用随之下降。
+    watermark = prepared.last_seq
+    if watermark >= 0:
+        archive_messages = [
+            {
+                "seq": seq,
+                "id": messages[i].message_id or "",
+                "role": messages[i].role,
+                "content": messages[i].content or "",
+            }
+            for i, seq in enumerate(seqs)
+            if seq <= watermark
+        ]
+        try:
+            archive_id = await write_archive(
+                session_id=session_id,
+                watermark=watermark,
+                archive_messages=archive_messages,
+                agent_reports=agent_reports,
+            )
+            report.archive_id = archive_id or ""
+        except Exception as e:
+            # 归档失败不能拖垮提取 —— 记忆已经写进文件了，缺的只是
+            # "移出上下文"这一步，下次提取会重新处理（幂等）。
+            log.warning("archive_write_failed", session_id=session_id, error=str(e))
 
     log.info(
         "memory_session_commit_done",
         extraction_id=report.extraction_id,
         session_id=session_id,
         agents=len(agent_reports),
+        archive_id=report.archive_id,
+        watermark=watermark,
         summary=report.summary(),
     )
     return report
 
 
 async def commit_session_agent(
-    db: AsyncSession,
-    *,
-    session_id: str,
-    agent_id: str,
-    llm_call: Any,
-    keep_recent_turns: int | None = None,
-    use_watermark: bool = True,
-    prefetched: Any = None,
-    messages_cache: tuple[list[Any], list[int]] | None = None,
-) -> AgentReport:
-    """
-    对单个智能体跑一次记忆提取。
-
-    ## 增量提取（use_watermark=True）
-
-    读取 memory_extraction 表的 last_seq,只处理 seq > last_seq 的新消息。
-    提取完更新 watermark。
-
-    ## 全量提取（use_watermark=False）
-
-    每次读全部消息（旧版行为）。用于兼容旧测试和单次手动提取场景。
-
-    ## 预取结果（prefetched）和消息缓存（messages_cache）
-
-    多智能体模式下，这两个参数用于避免重复计算：
-    - `prefetched`：已预取的记忆（共享 + 私有）
-    - `messages_cache`：已加载的消息列表
-
-    单智能体模式下这两个参数为 None，函数内部自行加载。
-
-    ## 与旧版的差别
-
-    旧版 `commit_session` 返回 CommitReport,包含全部阶段的计数。
-    新版只负责单智能体,返回 AgentReport（更轻量）。
-    多智能体编排由新的 `commit_session` 负责。
-
-    llm_call 是 `async (messages) -> str`。注入而非内部构造：
-    提取模型的解析走 endpoint.resolve('memory')，那属于调用方的关注点，
-    而注入让测试能用一个假实现跑通整条管线。
-    """
-    from sqlalchemy import select
-
-    # ── 0. 查水位线（可选） ──
-    last_seq = -1
-    extraction_count = 0
-    if use_watermark:
-        stmt = select(MemoryExtraction).where(
-            MemoryExtraction.session_id == session_id,
-            MemoryExtraction.agent_id == agent_id,
-        )
-        watermark_row = (await db.execute(stmt)).scalar_one_or_none()
-        last_seq = watermark_row.last_seq if watermark_row else -1
-        extraction_count = (watermark_row.extraction_count if watermark_row else 0) + 1
-
-    agent_report = AgentReport(
-        agent_id=agent_id,
-        extraction_count=extraction_count,
-        watermark_before=last_seq,
-        watermark_after=last_seq,
-        messages_new=0,
-    )
-
-    if not settings.memory.enabled:
-        agent_report.warnings.append("记忆系统已关闭（memory.enabled=false）")
-        return agent_report
-
-    # ── 1. 加载消息（增量或全量） ──
-    #
-    # ## 为什么看【全部】记忆线而不只是自己的
-    #
-    # agent_name=None 表示不按记忆线过滤，拿到的是完整对话：用户的话、
-    # 本智能体的话、其他智能体的话。这是必须的 —— 提取"用户偏好"要看
-    # 用户说了什么，而那些消息的 agent_name 是空串。只看自己那条线
-    # 会让偏好类记忆完全提不出来。
-    #
-    # ## after_seq 在 SQL 层过滤
-    #
-    # use_watermark=True 时只取 seq > last_seq 的新消息。
-    # use_watermark=False 时取全部（兼容旧版）。
-    new_rows = await repo.load_messages(
-        db, session_id, agent_name=None, after_seq=last_seq if use_watermark and last_seq >= 0 else None
-    )
-    agent_report.messages_new = len(new_rows)
-
-    if not new_rows:
-        agent_report.warnings.append("没有新消息需要提取")
-        return agent_report
-
-    msgs = [repo.row_to_msg(r) for r in new_rows]
-    stamps = [r.created_at for r in new_rows]
-    new_max_seq = max(r.seq for r in new_rows)
-
-    # ── 2. 截断 ──
-    prepared = prepare(msgs, stamps, keep_recent_turns=keep_recent_turns)
-    if prepared.is_empty:
-        agent_report.warnings.append("截断后没有可提取的消息（对话还太短，或都在保留窗口内）")
-        return agent_report
-
-    ctx = from_messages(prepared.messages, prepared.timestamps)
-
-    # ── 3. 预取 ──
-    #
-    # 如果有 prefetched（多智能体模式），直接使用；否则执行预取。
-    if prefetched:
-        pre = prefetched
-        agent_report.prefetched_items = pre.total
-        # 多智能体模式：预取结果已包含共享记忆 + 私有记忆
-        prefetch_scope = MemoryScope(agent_id=agent_id, session_id=session_id)
-    else:
-        # 单智能体模式：执行预取
-        # ## 为什么用截断后的消息
-        #
-        # 截断是为了不提取"正在进行的对话"（最近 N 轮）。
-        # 向量搜索也应该基于"可以提取的部分"：
-        # - 最近 N 轮还在进行中，不应该被提取
-        # - 搜索也不应该基于这些"临时上下文"召回记忆
-        prefetch_scope = MemoryScope(agent_id=agent_id, session_id=session_id)
-
-        # 获取嵌入模型（用于向量搜索）
-        embed_model = await memory_service.resolve_embedding_model(db)
-        if not embed_model:
-            log.debug("memory_prefetch_no_embedding", reason="未配置嵌入模型")
-
-        # 预取：向量搜索 + 预算感知加载
-        pre = await prefetch_mod.prefetch(
-            prefetch_scope,
-            messages=prepared.messages,  # 截断后的消息
-            db=db,
-            model=embed_model,
-        )
-        agent_report.prefetched_items = pre.total
-
-    # ── 4. ReAct 循环 ──
-    #
-    # ## 工具永远可用
-    #
-    # 参考 OpenViking session_extract_context_provider.py:604：
-    # - eager_prefetch 只控制"预取时是否自动读 top-N"
-    # - 工具（read/search）永远可用，LLM 自己决定是否需要读更多
-    #
-    # 之前我们的实现把 eager 和工具可用性绑定，这是错误的。
-    # 即使预取了全文，LLM 也可能需要：
-    # - 读取预取中被截断的记忆全文
-    # - 搜索预取范围之外的记忆
-    # - 读取预取列表中它认为需要的其他记忆
-
-    # 定义 scope（用于工具和写入）
-    scope_agent = MemoryScope(agent_id=agent_id)
-    scope_session = MemoryScope(agent_id=agent_id, session_id=session_id)
-
-    schemas = memory_service.visible_types(prefetch_scope)
-    tool_runner = ToolRunner(scope=prefetch_scope, pages=pre.pages, read_uris=set(pre.read_uris))
-
-    loop = ExtractLoop(
-        llm_call=llm_call,
-        schemas=schemas,
-        prefetched=pre,
-        extract_context=ctx,
-        tool_runner=tool_runner,
-    )
-    outcome = await loop.run()
-    agent_report.outcome = outcome
-    agent_report.warnings.extend(outcome.warnings)
-
-    if not outcome.operations and not outcome.delete_page_ids:
-        agent_report.warnings.append("模型判断没有值得记的内容")
-        # 【watermark 仍要推进】（仅增量模式）。没提取到东西不代表这批消息要重复处理。
-        if use_watermark:
-            await _update_watermark(
-                db, session_id, agent_id, new_max_seq, extraction_count, agent_report
-            )
-        return agent_report
-
-    # ── 5. page_id → 写入操作 ──
-    ops = _to_write_ops(
-        outcome,
-        schemas=schemas,
-        pages=pre.pages,
-        scope_agent=scope_agent,
-        scope_session=scope_session,
-        extract_context=ctx,
-        warnings=agent_report.warnings,
-    )
-
-    # ── 6. 合并写入 ──
-    extraction_id = new_id("ext")
-    batch = await memory_service.write_many(ops, db=db, extraction_id=extraction_id)
-    agent_report.batch = batch
-
-    # ── 7. 删除 ──
-    #
-    # ## 同批冲突保护
-    #
-    # 模型可能同时"改写 X"和"删除 X"—— 它把「替换」表达成了「删旧的 + 建新的」，
-    # 而两者算出同一个路径。照字面执行会把刚写好的内容删掉，
-    # 净效果是这条记忆【凭空消失】，且 diff 里显示"写入成功 + 删除成功"，
-    # 看不出问题。
-    #
-    # 正确的语义是把它当更新：保留写入，跳过删除。
-    # 照抄 OpenViking 的同批保护（memory_updater.py:913-935），
-    # 包括它的大小写折叠 —— Windows 和 macOS 的文件系统大小写不敏感，
-    # "Testing.md" 和 "testing.md" 是同一个文件，不折叠会漏掉这种冲突。
-    upserted = {u.casefold().rstrip("/") for u in (*batch.written, *batch.edited)}
-
-    # ## 有写入失败时【整批不删】
-    #
-    # 写入失败意味着这批操作没有按模型的意图完整执行。
-    # 而删除是不可逆的 —— 如果模型的意图是"把 A 的内容搬到 B 然后删掉 A"，
-    # 而 B 写失败了，那时删掉 A 就是净数据丢失。
-    #
-    # 保守到底：任何写入错误都阻止全部删除。代价是留下几条该删的记忆
-    # （下次提取会再删一次），收益是绝不因为半成功的批次丢数据。
-    # 照抄 OpenViking 的 has_unresolved_upserts 保护（memory_updater.py:917）。
-    # 失败有两个来源，都要算进来：
-    #
-    # 1. 写入阶段失败（patch 打不上、路径渲染失败）→ batch.results
-    # 2. 【提取阶段被丢弃】→ outcome.warnings
-    #
-    # 第 2 个是我第一版漏的：循环在修复重试后仍失败的条目会被丢掉
-    # （只保留能写的那些），于是 batch 里【没有】失败记录，
-    # write_failed 是空的，删除照常执行 —— 而那正是"意图没被完整执行"
-    # 的情形。测试抓到了这个洞。
-    write_failed = [r for r in batch.results if not r.ok]
-    dropped_by_loop = bool(outcome.warnings)
-
-    if (write_failed or dropped_by_loop) and outcome.delete_page_ids:
-        reason = "写入失败" if write_failed else "提取阶段有条目被丢弃"
-        agent_report.warnings.append(
-            f"本批{reason}，已跳过全部 {len(outcome.delete_page_ids)} 个删除"
-            "（避免半成功批次丢数据）"
-        )
-        log.warning(
-            "memory_deletes_skipped_incomplete_batch",
-            write_failed=len(write_failed),
-            dropped_by_loop=dropped_by_loop,
-            skipped_deletes=len(outcome.delete_page_ids),
-        )
-        outcome.delete_page_ids = []
-
-    for pid in outcome.delete_page_ids:
-        uri = pre.pages.uri_of(pid)
-        if not uri:
-            agent_report.warnings.append(f"delete_page_ids 里的 {pid} 无效，已忽略")
-            continue
-        if uri.casefold().rstrip("/") in upserted:
-            agent_report.warnings.append(
-                f"跳过删除 {uri}：同批刚写入过（模型把「替换」表达成了「删+建」，按更新处理）"
-            )
-            log.info("memory_delete_skipped_same_batch", uri=uri)
-            continue
-        batch.deletes.append(await memory_service.delete_with_trace(uri, db=db))
-
-    # ── 7b. supersedes：新经验取代旧经验 ──
-    #
-    # 同样受"写入失败则不删"保护 —— supersedes 也是删除操作。
-    # 新经验没写成功却删掉了被它取代的旧经验，那是净损失。
-    if not write_failed and not dropped_by_loop:
-        await _apply_supersedes(
-            db, batch, scope_agent=scope_agent, warnings=agent_report.warnings, upserted=upserted
-        )
-    elif any(_declares_supersedes(op) for op in ops):
-        agent_report.warnings.append("本批不完整，已跳过 supersedes 删除")
-
-    # ── 8. 目录索引 ──
-    #
-    # 【删除的类型也要刷新】。只刷新写入过的类型会留下过时的 overview ——
-    # 删掉某类最后一条记忆后，overview 里仍然列着它，点进去是 404。
-    #
-    # OpenViking 同样把 delete 的目录并进刷新集合
-    # （memory_updater.py:982-988）。
-    touched = {op.memory_type for op in ops}
-    touched.update(d.memory_type for d in batch.deletes if d.memory_type)
-
-    for mtype in touched:
-        schema = memory_service.get_schema(mtype)
-        if schema is None or not schema.overview_template:
-            continue
-        scope = scope_session if schema.scope is MemoryScopeKind.SESSION else scope_agent
-        await memory_service.refresh_overview(scope, mtype)
-
-    # ── 9. 向量化 ──
-    #
-    # 【只增类型也要算】。events / trajectories 预取时跳过（不会被改，
-    # 回顾只是白烧 token），但向量化不能跳过 —— 那是为了以后能召回。
-    # 两件事目的不同。OpenViking 同样对全部 written + edited 向量化
-    # （memory_updater.py:1352），只排除 overview / abstract。
-    #
-    # 放在痕迹之前：向量化失败不该阻止痕迹落盘，但它的结果要能进报告。
-    changed_uris = [*batch.written, *batch.edited]
-    if changed_uris:
-        vec_report = await memory_service.vectorize(db, changed_uris)
-        if vec_report.errors:
-            # 嵌入失败【不算 commit 失败】—— 记忆已经写进文件了，
-            # 缺的只是向量，下次 revectorize 能补上。
-            agent_report.warnings.extend(vec_report.errors)
-
-    agent_report.diff_path = await memory_service.write_diff(batch, scope=scope_agent)
-    agent_report.warnings.extend(batch.errors)
-
-    # ── 10. 更新 watermark（仅增量模式） ──
-    if use_watermark:
-        await _update_watermark(db, session_id, agent_id, new_max_seq, extraction_count, agent_report)
-
-    log.info(
-        "memory_agent_extraction_done",
-        session_id=session_id,
-        agent_id=agent_id,
-        extraction_count=extraction_count,
-        written=agent_report.written,
-        discarded=agent_report.discarded,
-    )
-    return agent_report
-
-
-async def _update_watermark(
     db: AsyncSession,
     session_id: str,
     agent_id: str,
@@ -766,7 +955,6 @@ def _to_write_ops(
 
     写入冲突由文件系统的原子性和版本号机制保护。
     """
-    from app.modules.memory.schema import MemoryScopeKind
 
     by_name = {s.memory_type: s for s in schemas}
     ops: list[WriteOp] = []

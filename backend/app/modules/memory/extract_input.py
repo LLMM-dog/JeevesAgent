@@ -101,6 +101,9 @@ class ExtractInput:
     dropped_turns: int = 0
     # 被截断的消息条数
     truncated_messages: int = 0
+    # 本次提取覆盖到的最大 seq（参与提取的最后一条消息的 seq）。
+    # 用于归档：提取完成后把 seq <= last_seq 的消息归档，下次只加载更新的。
+    last_seq: int = -1
 
     @property
     def is_empty(self) -> bool:
@@ -118,6 +121,7 @@ def prepare(
     keep_recent_turns: int | None = None,
     max_total_chars: int | None = None,
     max_msg_chars: int | None = None,
+    seqs: list[int] | None = None,
 ) -> ExtractInput:
     """
     准备提取输入。
@@ -168,11 +172,13 @@ def prepare(
     picked: list[Msg] = []
     picked_stamps: list[int] = []
     truncated = 0
+    last_index = -1
     for turn in usable:
         for offset, msg in enumerate(turn.messages):
             new_msg, was_cut = _truncate(msg, max_msg_chars)
             picked.append(new_msg)
             idx = turn.start + offset
+            last_index = idx
             picked_stamps.append(stamps[idx] if idx < len(stamps) else 0)
             truncated += int(was_cut)
 
@@ -192,6 +198,7 @@ def prepare(
         held_back_turns=held_back,
         dropped_turns=dropped,
         truncated_messages=truncated,
+        last_seq=(seqs[last_index] if seqs and last_index >= 0 and last_index < len(seqs) else -1),
     )
 
 

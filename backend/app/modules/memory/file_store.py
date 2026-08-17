@@ -234,8 +234,8 @@ class FileMemoryStore:
     async def drop_agent(self, agent_id: str) -> int:
         return await asyncio.to_thread(_rmtree_count, layout.agent_root(agent_id))
 
-    async def drop_session(self, agent_id: str, session_id: str) -> int:
-        return await asyncio.to_thread(_rmtree_count, layout.session_root(agent_id, session_id))
+    async def drop_session(self, session_id: str) -> int:
+        return await asyncio.to_thread(_rmtree_count, layout.session_root(session_id))
 
     # ── uri ↔ path ───────────────────────────────
 

@@ -240,7 +240,7 @@ class TestAvailableModels:
     """第 3 条：加模型该自动拉列表，不该让用户手敲。"""
 
     async def test_endpoint_exists(self, client: AsyncClient) -> None:
-        r = await client.get("/api/providers/prv_nope/available-models")
+        r = await client.get("/api/endpoints/prv_nope/available-models")
         # 端点不存在是 404，不是 405 —— 说明路由注册了
         assert r.status_code == 404
 

@@ -139,7 +139,7 @@ GET /api/sessions?page=1&size=20
 
 - `GET /api/sessions/{id}/messages` —— 一个会话的消息（前端需要完整时间线）
 - `GET /api/sessions/{id}/todos` —— 几十条
-- `GET /api/providers` —— 几个
+- `GET /api/endpoints` —— 几个
 - `GET /api/skills` —— 几十个
 - `GET /api/settings/whitelist` —— 几条
 

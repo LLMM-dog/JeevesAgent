@@ -72,7 +72,7 @@ class MemoryStore(Protocol):
         """删掉一个智能体的全部记忆。返回删除的文件数。"""
         ...
 
-    async def drop_session(self, agent_id: str, session_id: str) -> int:
+    async def drop_session(self, session_id: str) -> int:
         """删掉一个会话的全部记忆。返回删除的文件数。"""
         ...
 

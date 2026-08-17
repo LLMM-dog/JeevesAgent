@@ -1,52 +1,40 @@
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Globe, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { Eye, EyeOff, Globe, Loader2 } from "lucide-react";
 import clsx from "clsx";
 
 import { api } from "@/lib/api";
 
 /**
- * 联网搜索开关。
+ * 联网搜索开关 + Tavily Key 管理。
  *
- * ## 为什么需要这个界面
+ * ## 密钥脱敏
  *
- * 联网搜索默认关闭 —— 它会把用户的查询词发给第三方搜索引擎，
- * 这种有外部副作用的能力必须显式同意，不能因为装了个包就默认开。
+ * Key 输入框默认 type=password（脱敏显示圆点），点眼睛按钮才显示明文。
+ * 已保存的 Key 后端只回 has_tavily_key（不返回明文/尾号），所以这里
+ * 只显示「已配置」，改 Key 就是重新输入覆盖。
  *
- * 但"必须改 .env 再重启"对使用者门槛太高：clone 下来想开个联网搜索，
- * 要去翻文档找环境变量名、改文件、重启进程。
+ * ## 自动保存（debounce）
  *
- * 所以这里做成运行时开关。改完立刻重建工具，不需要重启。
- *
- * ## 为什么要说"重启后失效"
- *
- * 这个开关改的是运行时的 settings 对象，重启回落 .env 的值。
- * 不说清楚的话用户重启后发现又关了，会以为是 bug。
+ * 选后端是明确的点击，立即保存；填 Key 是连续输入，节流 1.5 秒保存 ——
+ * 每敲一个字都打一次后端是浪费，还会把不完整的 Key 存进去。
  */
 
 const OPTIONS = [
-  {
-    value: "none",
-    label: "关闭",
-    hint: "不注册 web_search 工具",
-  },
-  {
-    value: "ddg",
-    label: "DuckDuckGo",
-    hint: "免费，不需要 API Key",
-  },
-  {
-    value: "tavily",
-    label: "Tavily",
-    hint: "需要 API Key，结果为 LLM 优化过",
-  },
+  { value: "none", label: "关闭", hint: "不注册 web_search 工具" },
+  { value: "ddg", label: "DuckDuckGo", hint: "免费，不需要 API Key" },
+  { value: "tavily", label: "Tavily", hint: "需要 API Key，结果为 LLM 优化过" },
 ] as const;
+
+type SaveState = "idle" | "saving" | "saved" | "error";
 
 export default function WebSearchPanel() {
   const qc = useQueryClient();
   const [key, setKey] = useState("");
-  const [note, setNote] = useState<string | null>(null);
+  const [showKey, setShowKey] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [err, setErr] = useState<string | null>(null);
+  const keyTimer = useRef<number | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["websearch"],
@@ -54,23 +42,42 @@ export default function WebSearchPanel() {
   });
 
   const save = useMutation({
-    mutationFn: (backend: string) =>
-      api.setWebsearch(backend, backend === "tavily" ? key || undefined : undefined),
-    onSuccess: (r) => {
+    mutationFn: (args: { backend: string; key?: string }) =>
+      api.setWebsearch(args.backend, args.key || undefined),
+    onMutate: () => setSaveState("saving"),
+    onSuccess: () => {
       setErr(null);
-      setNote(r.persist_hint);
+      setSaveState("saved");
       setKey("");
       void qc.invalidateQueries({ queryKey: ["websearch"] });
-      // 工具列表变了，聊天页的 #工具 选择器要跟着刷
       void qc.invalidateQueries({ queryKey: ["tools"] });
+      window.setTimeout(() => setSaveState((s) => (s === "saved" ? "idle" : s)), 2000);
     },
     onError: (e: Error) => {
       setErr(e.message);
-      setNote(null);
+      setSaveState("error");
     },
   });
 
   const current = data?.backend ?? "none";
+
+  // Key 输入：节流 1.5 秒后自动保存。空串不保存（等用户继续输入）。
+  const onKeyChange = (v: string) => {
+    setKey(v);
+    if (keyTimer.current) window.clearTimeout(keyTimer.current);
+    if (!v.trim()) return;
+    keyTimer.current = window.setTimeout(() => {
+      save.mutate({ backend: "tavily", key: v });
+    }, 1500);
+  };
+
+  // 卸载时清掉计时器，避免组件卸载后还发请求
+  useEffect(
+    () => () => {
+      if (keyTimer.current) window.clearTimeout(keyTimer.current);
+    },
+    [],
+  );
 
   return (
     <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
@@ -84,7 +91,7 @@ export default function WebSearchPanel() {
         )}
       </h2>
       <p className="mb-3 text-xs text-[var(--color-muted)]">
-        默认关闭 —— 开启后 agent 的搜索词会发给第三方搜索引擎。
+        默认关闭 —— 开启后 agent 的搜索词会发给第三方搜索引擎。配置会持久化，重启后生效。
       </p>
 
       {isLoading && (
@@ -97,8 +104,6 @@ export default function WebSearchPanel() {
       {data && (
         <div className="space-y-2">
           {OPTIONS.map((o) => {
-            // 依赖没装时不能选 —— 选了也起不来，
-            // 而错误只会在模型调用工具时才出现
             const missing =
               (o.value === "ddg" && !data.ddg_available) ||
               (o.value === "tavily" && !data.tavily_available);
@@ -120,7 +125,7 @@ export default function WebSearchPanel() {
                   value={o.value}
                   checked={active}
                   disabled={missing || save.isPending}
-                  onChange={() => save.mutate(o.value)}
+                  onChange={() => save.mutate({ backend: o.value })}
                   className="mt-0.5"
                 />
                 <div className="min-w-0 flex-1">
@@ -138,33 +143,51 @@ export default function WebSearchPanel() {
             );
           })}
 
-          {/* Tavily 的 key 输入。只在选它时出现 ——
-              一直显示的话用户会以为不填就不能用联网搜索 */}
-          {current !== "tavily" && data.tavily_available && (
+          {/* Tavily Key：脱敏输入 + 点眼睛显示 + 自动保存 */}
+          {data.tavily_available && (
             <div className="flex items-center gap-2 pt-1">
-              <input
-                type="password"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                placeholder="Tavily API Key（选 Tavily 才需要）"
-                aria-label="Tavily API Key"
-                className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-xs"
-              />
-              <button
-                type="button"
-                disabled={!key.trim() || save.isPending}
-                onClick={() => save.mutate("tavily")}
-                className="shrink-0 rounded-md bg-[var(--color-accent)] px-2.5 py-1.5 text-xs text-white transition hover:opacity-90 disabled:opacity-40"
-              >
-                用 Tavily
-              </button>
+              <div className="relative min-w-0 flex-1">
+                <input
+                  type={showKey ? "text" : "password"}
+                  value={key}
+                  onChange={(e) => onKeyChange(e.target.value)}
+                  placeholder={
+                    current === "tavily" && data.has_tavily_key
+                      ? `已配置 ${data.key_hint}（重新输入以更换）`
+                      : "Tavily API Key"
+                  }
+                  aria-label="Tavily API Key"
+                  className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 pr-8 text-xs outline-none focus:border-[var(--color-accent)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  aria-label={showKey ? "隐藏 Key" : "显示 Key"}
+                  title={showKey ? "隐藏" : "显示"}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-[var(--color-muted)] hover:text-[var(--color-text)]"
+                >
+                  {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
             </div>
           )}
-          {current === "tavily" && data.has_tavily_key && (
-            <p className="pt-1 text-[11px] text-[var(--color-muted)]">
-              已配置 API Key
-            </p>
-          )}
+
+          {/* 保存状态 */}
+          <div className="flex items-center gap-2 pt-0.5 text-[11px]">
+            {saveState === "saving" && (
+              <span className="flex items-center gap-1 text-[var(--color-muted)]">
+                <Loader2 size={11} className="animate-spin" />
+                保存中…
+              </span>
+            )}
+            {saveState === "saved" && <span className="text-[var(--color-ok)]">✓ 已保存</span>}
+            {saveState === "error" && <span className="text-[var(--color-err)]">✗ 保存失败</span>}
+            {current === "tavily" && data.has_tavily_key && saveState === "idle" && (
+              <span className="text-[var(--color-muted)]">
+                已配置 API Key（{data.key_hint}）
+              </span>
+            )}
+          </div>
         </div>
       )}
 
@@ -174,11 +197,6 @@ export default function WebSearchPanel() {
           className="mt-3 rounded-md bg-[var(--color-err)]/10 px-2.5 py-1.5 text-[11px] text-[var(--color-err)]"
         >
           {err}
-        </div>
-      )}
-      {note && !err && (
-        <div className="mt-3 rounded-md bg-[var(--color-warn)]/10 px-2.5 py-1.5 text-[11px] text-[var(--color-warn)]">
-          {note}
         </div>
       )}
     </section>

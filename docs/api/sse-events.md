@@ -56,7 +56,6 @@ data: {"call_id":"call_abc","tool_name":"read_file","args":{"path":"a.py"}}
 | `todo_updated` | 结构 | 否 | Todo 清单变化 |
 | `artifact_updated` | 结构 | 否 | 产物更新 |
 | `refs_expanded` | 结构 | 否 | 引用展开结果，带失败清单 |
-| `memory_recalled` | 结构 | 否 | 召回了哪些长期记忆 |
 | `compacting` | 结构 | 否 | 压缩开始（可能耗时数秒） |
 | `compacted` | 结构 | 否 | 上下文已压缩 |
 | `context_usage` | 结构 | 否 | 上下文占用情况 |
@@ -210,15 +209,6 @@ run 的第一个事件。
 **一轮只发一次**，在末尾统一发。最初的实现是有失败时先发一条 `ok=0`、末尾再发真实值 —— 部分成功时前端会先收到"全失败"再收到"1 成功 1 失败"，中间那一帧是错的（实测在"一批里坏一个"的场景下看到两条）。
 
 `failures` 非空时前端必须提示。用户打了 `@某文件` 却没生效时，不提示的话他只会觉得"AI 没看我给的文件"，而真相可能是文件不存在、超过单文件 64KB 上限、或者被路径白名单拒绝。
-
-### memory_recalled
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `count` | int | 召回条数 |
-| `items` | object[] | `{memory_id, theme, content, score}` |
-
-记忆是自动注入的。不显示的话用户不知道 AI 的回答受了什么影响，更不知道某条错误记忆正在生效。
 
 ### compacting
 

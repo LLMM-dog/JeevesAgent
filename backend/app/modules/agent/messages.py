@@ -10,6 +10,7 @@ Agent 内部的消息表示与上下文一致性修复。
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -20,6 +21,19 @@ from app.core.config import settings
 log = structlog.get_logger(__name__)
 
 Role = Literal["user", "assistant", "tool", "system", "summary", "artifact"]
+
+
+def _norm_path(raw: str) -> str:
+    """
+    规范化路径用于比较。read 和 edit 的 path 可能写法不一致：
+    `src/main.py` vs `./src/main.py` vs 反斜杠 vs 绝对路径。
+    不规范化的话，同一文件的 read/edit 会因为写法差异匹配不上，
+    导致 stale 折叠失效、旧文件内容留在上下文里重复发送。
+    """
+    s = (raw or "").strip().replace("\\", "/")
+    norm = os.path.normpath(s)
+    # 去掉开头和结尾的斜杠，去掉末尾的 "."，让 "./a" 和 "a" 和 "a/" 相等
+    return norm.strip("/").rstrip(".")
 
 
 @dataclass
@@ -230,6 +244,84 @@ def repair_tool_pairing(msgs: list[Msg]) -> tuple[list[Msg], int]:
         i += 1
 
     return out, fixes
+
+
+# 会改变文件内容的工具。这些工具执行后，之前的 read_file 快照就过期了。
+_FILE_MUTATING_TOOLS = frozenset({"edit_file", "write_file"})
+
+_STALE_READ_HINT = (
+    "[已过时的文件快照] {path} 在此后被修改过，上面的读取内容已作废。"
+    "需要当前内容请重新 read_file。"
+)
+
+
+def mark_stale_file_reads(msgs: list[Msg]) -> int:
+    """
+    折叠"读取后又被修改"的 read_file 结果，防止旧文件快照污染上下文。
+
+    ## 为什么需要
+
+    模型 read 一个文件后，若又用 edit_file / write_file 改了它，之前那份
+    read 结果（完整文件内容）就成了过时快照。它继续躺在上下文里会：
+    - 和后续 read 到的新内容打架，模型分不清哪个是"当前事实"
+    - 在长会话里反复怀疑"文件到底改了没有"，陷入重复验证的死循环
+
+    ## 为什么是折叠而不是删掉或替换
+
+    - 删掉：那是历史事实，删了会断裂"我当时为什么这么判断"的推理链
+    - 替换成最新内容：历史快照和最新内容混在一起，同样让模型困惑
+
+    折叠成一行的"已过时"占位，明确告诉模型"这份作废了，要当前内容重新 read"，
+    既压掉了旧快照的权重，又保留了"这里发生过一次 read"的事实。
+
+    ## 判定规则
+
+    一个 read_file 的结果，只要它读取的文件【在它之后】被 edit_file /
+    write_file 修改过，就标记为 stale。不判断修改是否成功 —— 失败的那次
+    edit 本就会返回错误让模型重新 read，误标的代价只是多读一次。
+
+    返回标记的数量。
+    """
+    # 第一遍：收集所有修改操作 (path → 该文件每次修改所在的 assistant 位置)。
+    edits_by_path: dict[str, list[int]] = {}
+    for idx, m in enumerate(msgs):
+        if m.role != "assistant":
+            continue
+        for tc in m.tool_calls:
+            if tc.name not in _FILE_MUTATING_TOOLS:
+                continue
+            path = tc.parsed_args().get("path")
+            if isinstance(path, str) and path:
+                edits_by_path.setdefault(_norm_path(path), []).append(idx)
+
+    if not edits_by_path:
+        return 0
+
+    marked = 0
+    i = 0
+    n = len(msgs)
+    while i < n:
+        m = msgs[i]
+        if m.role == "assistant" and m.tool_calls:
+            j = i + 1
+            while j < n and msgs[j].role == "tool":
+                tm = msgs[j]
+                read_call: ToolCall | None = next(
+                    (c for c in m.tool_calls if c.id == tm.tool_call_id), None
+                )
+                if read_call is not None and read_call.name == "read_file":
+                    path = read_call.parsed_args().get("path")
+                    if isinstance(path, str):
+                        positions = edits_by_path.get(_norm_path(path))
+                        if positions and any(pos > i for pos in positions):
+                            tm.content = _STALE_READ_HINT.format(path=path)
+                            marked += 1
+                j += 1
+            i = j
+            continue
+        i += 1
+
+    return marked
 
 
 def find_missing_tool_calls(msgs: list[Msg]) -> list[ToolCall]:

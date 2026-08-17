@@ -281,3 +281,40 @@ async def probe_vision(
         return False, "上游返回了空内容，可能是中转站丢弃了图片部分。不算支持"
     log.info("vision_probe_ok", model=model_id, reply=text[:60])
     return True, f"支持。测试回复：{text[:60]}"
+
+
+async def describe_images(llm: Any, model: Any, images: list[str]) -> str:
+    """
+    用视觉模型识别图片，返回文本描述。
+
+    用于「配置了视觉功能位」的场景：视觉模型看图片 → 生成一段文字描述，
+    描述喂给 chat 模型（chat 模型看不到原图，只看到这段文字）。
+
+    返回空串表示没有可识别的图片（图片全解码失败）。
+    """
+    import base64 as _b64
+
+    parts: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                "请详细描述这张图片的内容，包括其中的文字、界面元素、代码、"
+                "错误信息等所有可见细节。只描述你实际看到的，不要臆测。"
+            ),
+        }
+    ]
+    for url in images:
+        decoded = decode_data_url(url)
+        if decoded is None:
+            continue
+        mime, raw = decoded
+        parts.append(
+            ImagePart(mime=mime, data_b64=_b64.b64encode(raw).decode()).to_api()
+        )
+
+    if len(parts) == 1:
+        # 没有一张图解码成功
+        return ""
+
+    text = await llm.complete_chat(model, [{"role": "user", "content": parts}])
+    return (text or "").strip()

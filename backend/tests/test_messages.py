@@ -11,6 +11,7 @@ from app.modules.agent.messages import (
     Msg,
     ToolCall,
     find_missing_tool_calls,
+    mark_stale_file_reads,
     repair_tool_pairing,
 )
 
@@ -138,6 +139,147 @@ class TestRepairToolPairing:
         assert [(m.role, m.tool_call_id) for m in once] == [
             (m.role, m.tool_call_id) for m in twice
         ]
+
+
+class TestMarkStaleFileReads:
+    """读取后又被修改的 read_file 结果应折叠成过时占位。"""
+
+    def test_read_then_edit_marks_stale(self) -> None:
+        msgs = [
+            Msg(role="user", content="改 a.py"),
+            Msg(role="assistant", tool_calls=[_tc("c1", "read_file")]),
+            Msg(role="tool", content="<a.py 旧内容>", tool_call_id="c1", tool_name="read_file"),
+            Msg(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="c2", name="edit_file", arguments='{"path":"a.py"}')
+                ],
+            ),
+            Msg(role="tool", content="已修改 a.py", tool_call_id="c2", tool_name="edit_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 1
+        assert "已过时的文件快照" in msgs[2].content
+
+    def test_read_without_edit_untouched(self) -> None:
+        msgs = [
+            Msg(role="user", content="读 a.py"),
+            Msg(role="assistant", tool_calls=[_tc("c1", "read_file")]),
+            Msg(role="tool", content="<a.py 内容>", tool_call_id="c1", tool_name="read_file"),
+            Msg(role="assistant", content="看完了"),
+        ]
+        assert mark_stale_file_reads(msgs) == 0
+        assert msgs[2].content == "<a.py 内容>"
+
+    def test_edit_then_read_not_stale(self) -> None:
+        """read 发生在 edit 之后，读到的是最新内容，不该被标记。"""
+        msgs = [
+            Msg(role="assistant", tool_calls=[ToolCall(id="c1", name="edit_file", arguments='{"path":"a.py"}')]),
+            Msg(role="tool", content="已修改 a.py", tool_call_id="c1", tool_name="edit_file"),
+            Msg(role="assistant", tool_calls=[_tc("c2", "read_file")]),
+            Msg(role="tool", content="<a.py 新内容>", tool_call_id="c2", tool_name="read_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 0
+        assert msgs[3].content == "<a.py 新内容>"
+
+    def test_write_also_marks_stale(self) -> None:
+        msgs = [
+            Msg(role="assistant", tool_calls=[_tc("c1", "read_file")]),
+            Msg(role="tool", content="<旧>", tool_call_id="c1", tool_name="read_file"),
+            Msg(role="assistant", tool_calls=[ToolCall(id="c2", name="write_file", arguments='{"path":"a.py"}')]),
+            Msg(role="tool", content="已写入", tool_call_id="c2", tool_name="write_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 1
+
+    def test_different_file_untouched(self) -> None:
+        msgs = [
+            Msg(role="assistant", tool_calls=[_tc("c1", "read_file")]),
+            Msg(role="tool", content="<a.py>", tool_call_id="c1", tool_name="read_file"),
+            Msg(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="c2", name="edit_file", arguments='{"path":"b.py"}')
+                ],
+            ),
+            Msg(role="tool", content="已修改 b.py", tool_call_id="c2", tool_name="edit_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 0
+        assert msgs[1].content == "<a.py>"
+
+    def test_multiple_edits_mark_all_prior_reads(self) -> None:
+        """文件被改两次，两次修改之前的所有 read 都应 stale。"""
+        msgs = [
+            Msg(role="assistant", tool_calls=[_tc("r1", "read_file")]),
+            Msg(role="tool", content="<v1>", tool_call_id="r1", tool_name="read_file"),
+            Msg(role="assistant", tool_calls=[ToolCall(id="e1", name="edit_file", arguments='{"path":"a.py"}')]),
+            Msg(role="tool", content="改1", tool_call_id="e1", tool_name="edit_file"),
+            Msg(role="assistant", tool_calls=[_tc("r2", "read_file")]),
+            Msg(role="tool", content="<v2>", tool_call_id="r2", tool_name="read_file"),
+            Msg(role="assistant", tool_calls=[ToolCall(id="e2", name="edit_file", arguments='{"path":"a.py"}')]),
+            Msg(role="tool", content="改2", tool_call_id="e2", tool_name="edit_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 2
+        assert "已过时" in msgs[1].content  # v1 在 e1 之前，stale
+        assert "已过时" in msgs[5].content  # v2 在 e1 之后但 e2 之前，stale
+
+    def test_empty(self) -> None:
+        assert mark_stale_file_reads([]) == 0
+
+    def test_same_round_read_and_edit_not_stale(self) -> None:
+        """同一轮里先 read 再 edit，read 结果对这次 edit 仍有效。"""
+        msgs = [
+            Msg(
+                role="assistant",
+                tool_calls=[
+                    _tc("c1", "read_file"),
+                    ToolCall(id="c2", name="edit_file", arguments='{"path":"a.py"}'),
+                ],
+            ),
+            Msg(role="tool", content="<a.py>", tool_call_id="c1", tool_name="read_file"),
+            Msg(role="tool", content="已修改", tool_call_id="c2", tool_name="edit_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 0
+
+    def test_path_normalization_matches(self) -> None:
+        """read 和 edit 的路径写法不一致（./a.py vs a.py）也要能折叠。"""
+        msgs = [
+            Msg(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="c1", name="read_file", arguments='{"path":"./a.py"}')
+                ],
+            ),
+            Msg(role="tool", content="<旧>", tool_call_id="c1", tool_name="read_file"),
+            Msg(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="c2", name="edit_file", arguments='{"path":"a.py"}')
+                ],
+            ),
+            Msg(role="tool", content="已改", tool_call_id="c2", tool_name="edit_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 1
+        assert "已过时" in msgs[1].content
+
+    def test_path_normalization_backslash_and_trailing_slash(self) -> None:
+        """反斜杠、末尾斜杠、../ 都要规范化成同一路径。"""
+        msgs = [
+            Msg(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="c1", name="read_file", arguments='{"path":"src\\\\a.py/"}')
+                ],
+            ),
+            Msg(role="tool", content="<旧>", tool_call_id="c1", tool_name="read_file"),
+            Msg(
+                role="assistant",
+                tool_calls=[
+                    ToolCall(id="c2", name="edit_file", arguments='{"path":"./src/a.py"}')
+                ],
+            ),
+            Msg(role="tool", content="已改", tool_call_id="c2", tool_name="edit_file"),
+        ]
+        assert mark_stale_file_reads(msgs) == 1
+        assert "已过时" in msgs[1].content
 
 
 class TestFindMissingToolCalls:

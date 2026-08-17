@@ -1,7 +1,6 @@
 ﻿import { useEffect, useRef, useState } from "react";
 import { Archive, Brain, ChevronRight, Loader2, RotateCcw } from "lucide-react";
 import clsx from "clsx";
-import { RecalledMemoriesBadge } from "./MemoryPanel";
 import Markdown from "./Markdown";
 import { SubAgentCards } from "./SubAgentCards";
 import ToolCard from "./ToolCard";
@@ -183,7 +182,6 @@ export default function MessageList() {
   const messages = useChatStore((s) => s.messages);
   const streaming = useChatStore((s) => s.streaming);
   const activeAgents = useChatStore((s) => s.activeAgents);
-  const recalledMemories = useChatStore((s) => s.recalledMemories);
   const compacting = useChatStore((s) => s.compacting);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -242,7 +240,6 @@ export default function MessageList() {
 
         {streaming && (
           <div className="max-w-[92%] space-y-2">
-            <RecalledMemoriesBadge items={recalledMemories} />
             {streaming.reasoning && (
               <Reasoning text={streaming.reasoning} streaming />
             )}

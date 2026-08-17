@@ -28,12 +28,12 @@ export default function VisionPanel() {
   const [results, setResults] = useState<Record<string, string>>({});
 
   const { data: providers } = useQuery({
-    queryKey: ["providers"],
-    queryFn: api.listProviders,
+    queryKey: ["endpoints"],
+    queryFn: api.listEndpoints,
   });
   const { data: models, isLoading } = useQuery({
-    queryKey: ["models"],
-    queryFn: () => api.listModels(),
+    queryKey: ["models", "all"],
+    queryFn: () => api.models(),
   });
 
   const verify = useMutation({
@@ -85,7 +85,7 @@ export default function VisionPanel() {
                   <Icon size={12} className={`shrink-0 ${meta.cls}`} aria-hidden />
                   <span className="min-w-0 flex-1 truncate text-xs">
                     <span className="text-[var(--color-muted)]">
-                      {providerName.get(m.provider_id) ?? "?"} /{" "}
+                      {providerName.get(m.endpoint_id) ?? "?"} /{" "}
                     </span>
                     {m.model_id}
                   </span>

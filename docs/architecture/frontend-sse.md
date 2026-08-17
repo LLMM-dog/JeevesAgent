@@ -118,7 +118,7 @@ function parseEvent(raw: string): { event: string; data: any } | null {
 
 `backend/tests/test_events_contract.py` 扫描四处：`Ev` 枚举、`docs/api/sse-events.md` 的事件总表、`SseEventMap`、store 的 switch。不一致就失败。
 
-这个测试之前不存在（虽然 `events.py` 的 docstring 声称它存在），于是四个事件悄悄漏出了文档：`approval_resolved` / `compacting` / `memory_recalled` / `refs_expanded`。
+这个测试之前不存在（虽然 `events.py` 的 docstring 声称它存在），于是几个事件悄悄漏出了文档：`approval_resolved` / `compacting` / `refs_expanded`。
 
 ### 几个容易漏的事件
 
@@ -126,7 +126,6 @@ function parseEvent(raw: string): { event: string; data: any } | null {
 | --- | --- |
 | `approval_resolved` | 审批弹框一直挂着。超时（视为拒绝）时用户那边不会有任何变化，看起来像卡死 |
 | `compacting` | 压缩要调一次 LLM，可能几秒。不显示"正在压缩"的话界面看起来卡住了 |
-| `memory_recalled` | 记忆是自动注入的。不显示的话用户不知道回答受了什么影响，更不知道某条错误记忆正在生效 |
 | `refs_expanded` | `failures` 非空时不提示的话，用户打了 `@某文件` 却没生效，他只会觉得"AI 没看我给的文件" |
 
 `refs_expanded` 成功时**不提示** —— 那是预期行为，弹一条"引用成功"只是噪音。
@@ -275,7 +274,6 @@ idle
 | `approval_resolved` | **收掉模态框**。漏了它超时后弹框会一直挂着 |
 | `todo_updated` | 更新顶栏进度条 + 看板 |
 | `refs_expanded` | `failures` 非空时显示警告条；成功不提示 |
-| `memory_recalled` | 在气泡上方显示"用了这几条记忆" |
 | `compacting` | 显示"正在压缩"（要调一次 LLM，可能几秒） |
 | `compacted` | 在时间线插入"已压缩 N 条消息"分隔条 |
 | `context_usage` | 更新占用条。固定开销另从 `/context-overhead` 拉 |

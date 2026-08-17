@@ -1,5 +1,5 @@
 """
-第六轮：宏增删改查、私密/失忆开关、skill/mcp 开关、模型能编辑宏和技能。
+第六轮：技能增删改查、私密/失忆开关、skill/mcp 开关、模型能编辑技能。
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class TestNameValidation:
     ## 为什么不只防 ../
 
     Windows 上 CON、NUL 这类保留名建不出目录；空格结尾的目录名会被
-    静默去掉，于是"我的宏 "和"我的宏"指向同一个目录 ——
+    静默去掉，于是"我的技能 "和"我的技能"指向同一个目录 ——
     而用户以为是两个。
     """
 
@@ -163,7 +163,6 @@ class TestAuthoringCrud:
         import app.core.config as cfg
 
         d = Path(tempfile.mkdtemp())
-        (d / "macros").mkdir(parents=True)
         (d / "skills").mkdir(parents=True)
         monkeypatch.setattr(cfg, "PROJECT_ROOT", d)
         yield d
@@ -184,7 +183,7 @@ class TestAuthoringCrud:
 
     def test_collision_needs_overwrite(self) -> None:
         """
-        模型起的名字撞车很常见。默认覆盖会悄悄冲掉用户手写的宏 ——
+        模型起的名字撞车很常见。默认覆盖会悄悄冲掉用户手写的技能 ——
         而他不会收到任何提示。
         """
         authoring.upsert(
@@ -236,21 +235,20 @@ class TestAuthoringCrud:
 
 
 class TestManageAssetTool:
-    """模型自己建宏/技能的工具。"""
+    """模型自己建技能的工具。"""
 
     @pytest.fixture(autouse=True)
     def _tmp_dirs(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         """
-        改 PROJECT_ROOT 而不是 settings.macros_dir。
+        改 PROJECT_ROOT 而不是 settings.skills_dir。
 
-        那两个是 @property（`PROJECT_ROOT / "macros"`），没有 setter ——
+        那个是 @property（`PROJECT_ROOT / "skills"`），没有 setter ——
         monkeypatch.setattr 会报 "property has no setter"。
         真正的接缝是 PROJECT_ROOT。
         """
         import app.core.config as cfg
 
         d = Path(tempfile.mkdtemp())
-        (d / "macros").mkdir(parents=True)
         (d / "skills").mkdir(parents=True)
         monkeypatch.setattr(cfg, "PROJECT_ROOT", d)
         yield d
@@ -268,7 +266,7 @@ class TestManageAssetTool:
 
     def test_description_explains_trigger_wording(self) -> None:
         """
-        description 字段决定这个宏什么时候会被想起来。
+        description 字段决定这个技能什么时候会被想起来。
         工具描述里必须说清这件事，否则模型会写"关于 X 的说明"
         这种永远不会被触发的描述。
         """

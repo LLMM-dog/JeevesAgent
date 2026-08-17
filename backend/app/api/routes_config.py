@@ -39,7 +39,7 @@ from app.infra.sandbox.factory import get_sandbox
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.agent.tools.todo import _serialize, _stats, load_active
 from app.modules.endpoint import service as ps
-from app.modules.endpoint.models import Endpoint
+from app.modules.endpoint.models import Endpoint, ModelBinding
 from app.modules.mcp.tools import build_tools
 from app.modules.session import repo
 from app.modules.session.models import Session
@@ -201,6 +201,10 @@ async def list_models(
     pmap = {
         p.id: p.name for p in (await db.execute(select(Endpoint))).scalars()
     }
+    # 一次查出所有绑定，按 model_pk 分组，给模型卡片显示"被配置为什么功能"
+    bindings_map: dict[str, list[str]] = {}
+    for b in (await db.execute(select(ModelBinding))).scalars():
+        bindings_map.setdefault(b.model_pk, []).append(b.purpose)
     return ModelListResponse(
         items=[
             ModelOut(
@@ -215,6 +219,7 @@ async def list_models(
                 supports_tools=m.supports_tools,
                 model_type=m.model_type,
                 enabled=bool(m.enabled),
+                bindings=bindings_map.get(m.id, []),
                 price_in_per_1m=m.price_in_per_1m,
                 price_out_per_1m=m.price_out_per_1m,
             )
@@ -355,7 +360,7 @@ async def meta(
     docker_ok = sandbox.name == "docker"
 
     return MetaResponse(
-        version="0.1.0",
+        version="0.2.0",
         sandbox_backend=settings.sandbox.backend,
         sandbox_docker_available=docker_ok,
         sandbox_fallback_reason=sandbox_fallback_reason(),
@@ -432,9 +437,20 @@ class WebSearchPatch(BaseModel):
 @router.get("/websearch", summary="联网搜索状态")
 async def websearch_get(request: Request) -> dict[str, object]:
     reg: ToolRegistry = request.app.state.registry
+
+    # API Key 脱敏显示：只返回尾 4 位
+    key = settings.websearch.tavily_api_key
+    key_hint = ""
+    if key and len(key) >= 4:
+        key_hint = f"****{key[-4:]}"
+    elif key:
+        # 少于 4 位的异常情况，全部脱敏
+        key_hint = "*" * len(key)
+
     return {
         "backend": settings.websearch.backend or "none",
-        "has_tavily_key": bool(settings.websearch.tavily_api_key),
+        "has_tavily_key": bool(key),
+        "key_hint": key_hint,  # 新增：脱敏显示，如 "****abcd"
         "registered": "web_search" in reg.names(),
         # 依赖装了没 —— 没装的话选了 ddg 也起不来，
         # 而错误只会在模型调用时才出现
@@ -451,26 +467,22 @@ def _mod_ok(name: str) -> bool:
 
 @router.put("/websearch", summary="开关联网搜索")
 async def websearch_put(
-    body: WebSearchPatch, request: Request
+    body: WebSearchPatch, request: Request, db: AsyncSession = Depends(get_db)
 ) -> dict[str, object]:
     """
-    运行时开关联网搜索，不用改 .env 重启。
+    运行时开关联网搜索，并持久化到数据库。
 
     ## 为什么联网搜索默认是关的
 
     它会把用户的查询词发给第三方搜索引擎。这种有外部副作用的能力
     必须显式同意，不能因为装了个包就默认开。
 
-    ## 为什么需要这个接口
+    ## 持久化到数据库
 
-    但"必须改 .env 再重启"对普通使用者门槛太高 —— 他 clone 下来
-    想开个联网搜索，要去翻文档找环境变量名、改文件、重启进程。
-
-    这里改的是【运行时的 settings 对象】，进程重启后回落 .env 的值。
-    想持久化就写 .env（响应里给出具体该写什么）。
-
-    改完立刻重建 web 工具，所以不需要重启。
+    配置会保存到 app_setting 表，重启后自动生效。
+    不再需要手动修改 .env 文件。
     """
+    from app.modules.settings import service as settings_svc
     from app.modules.web import tools as web_tools
 
     if body.backend == "tavily":
@@ -481,7 +493,7 @@ async def websearch_put(
                 "或者改用 ddg（免费、不需要 key）",
                 code="tavily_key_required",
             )
-        settings.websearch.tavily_api_key = key
+
     if body.backend != "none" and not _mod_ok(
         "tavily" if body.backend == "tavily" else "ddgs"
     ):
@@ -490,7 +502,12 @@ async def websearch_put(
             code="search_dep_missing",
         )
 
-    settings.websearch.backend = body.backend
+    # 持久化到数据库
+    updates = {"websearch.backend": body.backend}
+    if body.backend == "tavily" and body.tavily_api_key:
+        updates["websearch.tavily_api_key"] = body.tavily_api_key
+
+    await settings_svc.set_many(db, updates)
 
     # 重建 web 工具。
     #
@@ -503,20 +520,14 @@ async def websearch_put(
     for t in web_tools.build_web_tools():
         reg.register(t)
 
-    env_hint = (
-        f"JEEVES_WEBSEARCH__BACKEND={body.backend}"
-        if body.backend != "none"
-        else "JEEVES_WEBSEARCH__BACKEND=none"
-    )
-    log.info("websearch_switched", backend=body.backend)
+    log.info("websearch_switched", backend=body.backend, persisted=True)
     return {
         "backend": body.backend,
         "registered": "web_search" in reg.names(),
-        "tools": [n for n in reg.names() if n.startswith("web_")],
-        # 说清楚这是临时的 —— 不说的话用户重启后发现又关了，
-        # 会以为是 bug
-        "persisted": False,
-        "persist_hint": f"要重启后仍生效，把 {env_hint} 写进 .env",
+        "has_tavily_key": bool(settings.websearch.tavily_api_key),
+        # 配置已持久化到数据库，重启后自动生效
+        "persisted": True,
+        "persist_hint": "配置已保存到数据库，重启后自动生效",
     }
 
 

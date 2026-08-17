@@ -89,15 +89,20 @@ async def _detail_with_window(db: AsyncSession, s: Session) -> SessionDetail:
 
 
 def _detail(s: Session) -> SessionDetail:
+    # 获取第一个智能体 ID（兼容旧的单智能体模式）
+    agent_ids = s.get_agent_ids()
+    agent_id = agent_ids[0] if agent_ids else ""
+
     return SessionDetail(
         **_brief(s).model_dump(),
         approval_mode=s.approval_mode,
         private_mode=bool(s.private_mode),
         amnesia_mode=bool(s.amnesia_mode),
         vision_mode=bool(s.vision_mode),
+        stream_enabled=bool(s.stream_enabled),
         work_dir=s.work_dir or "",
         model_pk=s.model_pk or "",
-        agent_id=s.agent_id or "",
+        agent_id=agent_id,
     )
 
 
@@ -165,7 +170,67 @@ async def create_session(
 
 @router.get("/sessions/{session_id}", response_model=SessionDetail, summary="会话详情")
 async def get_session(session_id: str, db: AsyncSession = Depends(get_db)) -> SessionDetail:
-    return await _detail_with_window(db, await repo.get_session(db, session_id))
+    s = await repo.get_session(db, session_id)
+    # 审批模式有两份：DB 是持久化真值，runtime_state 是运行时可改状态。
+    # 应用重启后 runtime_state 是空的，会回落到默认 "manual"，导致用户
+    # 设过的"自动模式"界面显示 auto、实际却仍弹确认框。这里从 DB 恢复。
+    runtime_state.restore_approval_mode(session_id, s.approval_mode)
+    return await _detail_with_window(db, s)
+
+
+@router.get("/sessions/{session_id}/memory-status", summary="记忆提取状态")
+async def get_memory_extraction_status(session_id: str) -> dict[str, Any]:
+    """
+    获取会话的记忆提取状态。
+
+    返回：
+    {
+        "extracting": bool,        // 是否正在提取
+        "extraction_id": str       // 当前提取的 ID（如果正在提取）
+    }
+
+    前端可以轮询此接口（例如每 2 秒），在 UI 上显示"正在记忆..."提示。
+    也可以在对话 SSE 流中推送此状态变更事件。
+    """
+    from app.core.runtime_state import get_memory_extraction_status
+
+    return get_memory_extraction_status(session_id)
+
+
+@router.post("/sessions/{session_id}/extract-memory", summary="手动触发记忆提取")
+async def trigger_memory_extraction(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    手动触发记忆提取。
+
+    用户可以在对话中主动点击"整理记忆"按钮来触发。
+
+    与自动触发的区别：
+    - 不检查阈值，立即提取
+    - 返回详细的提取结果
+    - 防止重复提取（如果正在提取中，返回 409 错误）
+
+    返回：
+    {
+        "success": bool,
+        "message": str,
+        "extraction_id": str,
+        "summary": {              // 如果成功
+            "total_adds": int,
+            "total_updates": int,
+            "total_deletes": int,
+            ...
+        }
+    }
+
+    错误：
+    - 409 Conflict - 该会话正在进行记忆提取
+    """
+    from app.modules.memory import auto_commit
+
+    return await auto_commit.trigger_manual_extraction(db, session_id)
 
 
 @router.get("/sessions/{session_id}/export", summary="导出会话")
@@ -374,11 +439,20 @@ async def patch_session(
                 ),
             )
 
-    for flag in ("private_mode", "amnesia_mode", "vision_mode"):
+    for flag in ("private_mode", "amnesia_mode", "vision_mode", "stream_enabled"):
         if flag in data and data[flag] is not None:
             setattr(s, flag, 1 if data[flag] else 0)
+
     if "agent_id" in data and data["agent_id"] is not None:
-        s.agent_id = data["agent_id"]
+        # agent_id 是单个智能体 ID（前端传的），但数据库存的是 agent_ids（JSON 数组）
+        # 切换智能体 = 替换整个列表为单个智能体
+        agent_id = data["agent_id"]
+        if agent_id:
+            # 设置为单个智能体
+            s.set_agent_ids([agent_id])
+        else:
+            # 清空智能体列表
+            s.set_agent_ids([])
 
     await db.commit()
     return await _detail_with_window(db, s)
@@ -386,6 +460,17 @@ async def patch_session(
 
 @router.delete("/sessions/{session_id}", summary="删除会话")
 async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, bool]:
+    # 删除会话记忆（events/entities 等 session 级记忆）。
+    #
+    # 记忆在文件系统、会话在 DB，两者独立。记忆删除失败不该阻断会话删除 ——
+    # 残留的记忆文件只是占空间，会话删不掉才是 bug。
+    from app.modules.memory import service as memory_service
+
+    try:
+        await memory_service.drop_session(session_id, db=db)
+    except Exception as e:  # noqa: BLE001
+        log.warning("memory_session_drop_failed", session=session_id, err=str(e)[:200])
+
     await repo.delete_session(db, session_id)
 
     # 清掉该会话的沙箱资源。
@@ -405,6 +490,59 @@ async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)) ->
     return {"ok": True}
 
 
+@router.post("/sessions/batch-delete", summary="批量删除会话")
+async def batch_delete_sessions(
+    body: dict[str, list[str]],
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    批量删除会话。
+
+    请求体：
+    {
+        "session_ids": ["ses_xxx", "ses_yyy", ...]
+    }
+
+    响应：
+    {
+        "total": 10,
+        "succeeded": ["ses_xxx", "ses_yyy", ...],
+        "failed": [{"session_id": "ses_zzz", "error": "..."}],
+        "not_found": ["ses_aaa", ...]
+    }
+
+    注意：
+    - 会话删除会级联删除所有消息（ON DELETE CASCADE）
+    - 会清理运行时状态和沙箱资源
+    - 部分失败不会影响其他会话的删除
+    """
+    session_ids = body.get("session_ids", [])
+    if not session_ids:
+        raise BadRequestError("session_ids 不能为空")
+
+    if len(session_ids) > 100:
+        raise BadRequestError("单次最多删除 100 个会话")
+
+    # 批量删除会话（数据库层面）
+    result = await repo.delete_sessions_batch(db, session_ids)
+
+    # 删除会话记忆 + 清理沙箱资源（只处理成功删除的）
+    from app.modules.memory import service as memory_service
+
+    sandbox = await get_sandbox()
+    for session_id in result["succeeded"]:
+        try:
+            await memory_service.drop_session(session_id, db=db)
+        except Exception as e:  # noqa: BLE001
+            log.warning("memory_session_drop_failed", session=session_id, err=str(e)[:200])
+        try:
+            await sandbox.cleanup_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("sandbox_cleanup_failed", session=session_id, err=str(e)[:200])
+
+    return result
+
+
 @router.get(
     "/sessions/{session_id}/messages",
     response_model=MessageListResponse,
@@ -419,7 +557,23 @@ async def list_messages(
     rows = await repo.load_messages(
         db, session_id, agent_name=None if agent_name == "*" else agent_name
     )
-    return MessageListResponse(items=[_msg_out(m) for m in rows])
+
+    # 归档水位线：前端用它跳过已归档消息，恢复"归档后的上下文占用"。
+    # 归档后的实际上下文 = system + watermark 之后的消息 + overview 摘要，
+    # 而历史消息的 prompt_tokens 是"发出时的上下文"（归档前的大值），已过时。
+    watermark = -1
+    try:
+        from app.modules.memory.commit import get_latest_archive_summary
+
+        latest = await get_latest_archive_summary(session_id)
+        if latest is not None:
+            watermark = latest.last_seq
+    except Exception:  # noqa: BLE001
+        pass
+
+    return MessageListResponse(
+        items=[_msg_out(m) for m in rows], watermark=watermark
+    )
 
 
 @router.delete(

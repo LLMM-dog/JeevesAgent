@@ -13,13 +13,23 @@ import type {
   CronRun,
   CronTask,
   CronValidateResult,
-  MemoryOut,
+  MemoryItem,
+  MemoryListResponse,
+  MemoryRebuildResult,
+  MemorySearchResult,
+  MemorySettingItem,
+  MemoryTrace,
+  MemoryTraceListResponse,
+  MemoryVectorizeResponse,
+  MemoryVectorStatus,
+  MemoryWriteRequest,
+  MemoryWriteResponse,
   MessageOut,
   MetaResponse,
   ModelItem,
   ModelOut,
   ProbeResponse,
-  ProviderOut,
+  EndpointOut,
   Purpose,
   SessionDetail,
   SessionListResponse,
@@ -188,7 +198,7 @@ export const api = {
    * 后端会跳过 node_modules / .venv 这类目录，否则候选列表会被淹掉。
    */
   refCandidates: (
-    kind: "file" | "skill" | "tool" | "macro",
+    kind: "file" | "skill" | "tool",
     q: string,
     sessionId?: string,
   ) =>
@@ -212,9 +222,9 @@ export const api = {
    * enabledOnly 给对话页的切换菜单用 —— 设置页要看到全部（含禁用的），
    * 否则用户没法把它重新启用。
    */
-  models: (opts?: { providerId?: string; enabledOnly?: boolean }) => {
+  models: (opts?: { endpointId?: string; enabledOnly?: boolean }) => {
     const q = new URLSearchParams();
-    if (opts?.providerId) q.set("provider_id", opts.providerId);
+    if (opts?.endpointId) q.set("endpoint_id", opts.endpointId);
     if (opts?.enabledOnly) q.set("enabled_only", "true");
     const s = q.toString();
     return request<{ items: ModelItem[] }>(`/models${s ? `?${s}` : ""}`);
@@ -247,27 +257,40 @@ export const api = {
         (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""),
     ),
 
-  availableModels: (providerId: string) =>
+  availableModels: (endpointId: string) =>
     request<{
       items: {
         model_id: string;
         context_window: number;
         window_source: string;
         looks_non_chat: boolean;
+        model_type: string;
         already_added: boolean;
       }[];
-    }>(`/providers/${providerId}/available-models`),
+    }>(`/endpoints/${endpointId}/available-models`),
 
   addModel: (body: {
-    provider_id: string;
+    endpoint_id: string;
     model_id: string;
     display_name?: string;
     context_window?: number;
+    model_type?: string;
+    enabled?: boolean;
   }) => request<ModelItem>("/models", { method: "POST", json: body }),
 
   patchModel: (
     pk: string,
-    body: { enabled?: boolean; display_name?: string; context_window?: number },
+    body: {
+      enabled?: boolean;
+      display_name?: string;
+      context_window?: number;
+      endpoint_id?: string;
+      model_type?: string;
+      price_in_per_1m?: number | null;
+      price_out_per_1m?: number | null;
+      supports_vision?: "true" | "false" | "unknown";
+      supports_tools?: "true" | "false" | "unknown";
+    },
   ) =>
     request<ModelItem>(`/models/${pk}`, {
       method: "PATCH",
@@ -339,6 +362,8 @@ export const api = {
     request<{
       backend: string;
       has_tavily_key: boolean;
+      /** 脱敏的 Key 尾号，如 "****X7Qs"。空 = 未配置 */
+      key_hint: string;
       registered: boolean;
       ddg_available: boolean;
       tavily_available: boolean;
@@ -497,41 +522,6 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  // ---- 长期记忆 ----
-  listMemories: (opts?: { includeArchived?: boolean; theme?: string }) => {
-    const q = new URLSearchParams();
-    if (opts?.includeArchived) q.set("include_archived", "true");
-    if (opts?.theme) q.set("theme", opts.theme);
-    const qs = q.toString();
-    return request<{
-      items: MemoryOut[];
-      themes: { theme: string; count: number }[];
-    }>(`/memories${qs ? `?${qs}` : ""}`);
-  },
-
-  createMemory: (content: string, theme: string) =>
-    request<MemoryOut>("/memories", {
-      method: "POST",
-      json: { content, theme },
-    }),
-
-  updateMemory: (id: string, body: { content?: string; theme?: string; reason?: string }) =>
-    request<MemoryOut>(`/memories/${id}`, {
-      method: "PATCH",
-      json: body,
-    }),
-
-  archiveMemory: (id: string) =>
-    request<MemoryOut>(`/memories/${id}`, { method: "DELETE" }),
-
-  restoreMemory: (id: string) =>
-    request<MemoryOut>(`/memories/${id}/restore`, { method: "POST" }),
-
-  searchMemories: (q: string) =>
-    request<{
-      items: (MemoryOut & { score: number })[];
-      injection_preview: string;
-    }>(`/memories-search?q=${encodeURIComponent(q)}`),
   // ---- 追踪 ----
   listTraces: (sessionId?: string) =>
     request<{
@@ -650,44 +640,6 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  // ---- 宏 ----
-/** 新建或更新宏。overwrite=false 时撞名会 409 */
-  reloadMacros: () =>
-    request<{ count: number; names: string[] }>("/macros/reload", {
-      method: "POST",
-    }),
-
-  upsertMacro: (body: {
-    name: string;
-    description: string;
-    body: string;
-    keywords?: string[];
-    overwrite?: boolean;
-  }) =>
-    request<{ name: string; created: boolean }>("/macros", {
-      method: "POST",
-      json: body,
-    }),
-
-  /**
-   * 取宏的可编辑字段。
-   *
-   * 不用 getMacro —— 那个返回渲染后的正文（${MACRO_DIR} 已替换成真实
-   * 路径），保存时写回去宏就跟当前机器绑死了。
-   */
-  getMacroSource: (name: string) =>
-    request<{
-      name: string;
-      description: string;
-      body: string;
-      keywords: string[];
-    }>(`/macros/${encodeURIComponent(name)}/source`),
-
-  deleteMacro: (name: string) =>
-    request<{ ok: boolean }>(`/macros/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-    }),
-
   /** 开关一个技能。关掉的不进系统提示词 */
   toggleSkill: (name: string, enabled: boolean) =>
     request<{ name: string; enabled: boolean }>(
@@ -700,16 +652,6 @@ export const api = {
     request<{ server_id: string; enabled: boolean; tools: number }>(
       `/mcp/servers/${encodeURIComponent(serverId)}/enabled`,
       { method: "PATCH", json: { enabled } },
-    ),
-
-  listMacros: () =>
-    request<{
-      items: { name: string; description: string; keywords: string[] }[];
-    }>("/macros"),
-
-  getMacro: (name: string) =>
-    request<{ name: string; body: string }>(
-      `/macros/${encodeURIComponent(name)}`,
     ),
 
   patchSession: (
@@ -727,14 +669,30 @@ export const api = {
       private_mode: boolean;
       amnesia_mode: boolean;
       vision_mode: boolean;
+      stream_enabled: boolean;
     }>,
   ) => request<SessionDetail>(`/sessions/${id}`, { method: "PATCH", json: body }),
 
   deleteSession: (id: string) =>
     request<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
 
+  /**
+   * 批量删除会话。单次最多 100 个，部分失败不影响其他会话。
+   * 返回区分成功 / 失败 / 不存在，前端要分别反馈。
+   */
+  batchDeleteSessions: (sessionIds: string[]) =>
+    request<{
+      total: number;
+      succeeded: string[];
+      failed: { session_id: string; error: string }[];
+      not_found: string[];
+    }>("/sessions/batch-delete", {
+      method: "POST",
+      json: { session_ids: sessionIds },
+    }),
+
   listMessages: (id: string, agent_name = "") =>
-    request<{ items: MessageOut[] }>(
+    request<{ items: MessageOut[]; watermark: number }>(
       `/sessions/${id}/messages?agent_name=${encodeURIComponent(agent_name)}`,
     ),
 
@@ -770,26 +728,38 @@ export const api = {
   // ─────────────────────────── 端点 ───────────────────────────
 
   probe: (base_url: string, api_key: string) =>
-    request<ProbeResponse>("/providers/probe", {
+    request<ProbeResponse>("/endpoints/probe", {
       method: "POST",
       json: { base_url, api_key },
     }),
 
-  listProviders: () => request<{ items: ProviderOut[] }>("/providers"),
+  listEndpoints: () => request<{ items: EndpointOut[] }>("/endpoints"),
 
-  createProvider: (body: {
-    name: string;
+  createEndpoint: (body: {
+    name?: string;
     base_url: string;
     api_key: string;
-    models: { model_id: string; display_name?: string; context_window?: number }[];
-  }) => request<ProviderOut>("/providers", { method: "POST", json: body }),
+    models: {
+      model_id: string;
+      display_name?: string;
+      context_window?: number;
+      model_type?: string;
+      supports_vision?: "true" | "false" | "unknown";
+      supports_tools?: "true" | "false" | "unknown";
+    }[];
+  }) => request<EndpointOut>("/endpoints", { method: "POST", json: body }),
 
-  deleteProvider: (id: string) =>
-    request<{ ok: boolean }>(`/providers/${id}`, { method: "DELETE" }),
+  patchEndpoint: (
+    id: string,
+    body: { name?: string; base_url?: string; api_key?: string },
+  ) => request<EndpointOut>(`/endpoints/${id}`, { method: "PATCH", json: body }),
 
-  listModels: (provider_id?: string) =>
+  deleteEndpoint: (id: string) =>
+    request<{ ok: boolean }>(`/endpoints/${id}`, { method: "DELETE" }),
+
+  listModels: (endpoint_id?: string) =>
     request<{ items: ModelOut[] }>(
-      `/models${provider_id ? `?provider_id=${provider_id}` : ""}`,
+      `/models${endpoint_id ? `?endpoint_id=${endpoint_id}` : ""}`,
     ),
 
   listBindings: () => request<{ items: BindingOut[] }>("/bindings"),
@@ -811,6 +781,15 @@ export const api = {
   activeRun: (sessionId: string) =>
     request<{ run_id: string } | null>(
       `/sessions/${encodeURIComponent(sessionId)}/active-run`,
+    ),
+
+  /**
+   * 记忆提取状态。后端异步提取，前端轮询它在 UI 上给个轻量提示。
+   * extracting 时正在后台整理记忆，不影响对话。
+   */
+  sessionMemoryStatus: (sessionId: string) =>
+    request<{ extracting: boolean; extraction_id: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/memory-status`,
     ),
 
   listTodos: (sessionId: string) =>
@@ -853,5 +832,114 @@ export const api = {
       request<AgentItem>(`/agents/${id}`, { method: "PATCH", json: data }),
     delete: (id: string) =>
       request<{ ok: boolean }>(`/agents/${id}`, { method: "DELETE" }),
+  },
+
+  memory: {
+    // ── 可调设置 ──
+    // 可调项的元信息 + 当前值。
+    //
+    // 前端【不硬编码】可调项列表 —— 类型、范围、说明都从后端来，
+    // 否则后端加一项前端就得跟着改，两边必然不同步。
+    settings: () => request<{ items: MemorySettingItem[] }>("/memory/settings"),
+    updateSettings: (values: Record<string, unknown>) =>
+      request<{ applied: Record<string, unknown>; items: MemorySettingItem[] }>(
+        "/memory/settings",
+        { method: "PUT", json: { values } },
+      ),
+    resetSettings: () =>
+      request<{ removed: number; items: MemorySettingItem[] }>(
+        "/memory/settings/reset",
+        { method: "POST" },
+      ),
+
+    // ── 向量管理 ──
+    vectors: () => request<MemoryVectorStatus>("/memory/vectors"),
+    rebuildVectors: (onlyStale = true) =>
+      request<MemoryRebuildResult>(
+        `/memory/vectors/rebuild?only_stale=${onlyStale}`,
+        { method: "POST" },
+      ),
+    clearVectors: () =>
+      request<{ cleared: number }>("/memory/vectors", { method: "DELETE" }),
+
+    // ── 记忆 CRUD ──
+    list: (opts?: {
+      agent_id?: string;
+      session_id?: string;
+      memory_type?: string;
+      limit?: number;
+    }) => {
+      const p = new URLSearchParams();
+      if (opts?.agent_id) p.set("agent_id", opts.agent_id);
+      if (opts?.session_id) p.set("session_id", opts.session_id);
+      if (opts?.memory_type) p.set("memory_type", opts.memory_type);
+      if (opts?.limit) p.set("limit", String(opts.limit));
+      return request<MemoryListResponse>(`/memory/list?${p.toString()}`);
+    },
+
+    read: (uri: string) => {
+      const p = new URLSearchParams({ uri });
+      return request<MemoryItem>(`/memory/read?${p.toString()}`);
+    },
+
+    write: (data: MemoryWriteRequest) =>
+      request<MemoryWriteResponse>("/memory/write", {
+        method: "POST",
+        json: data,
+      }),
+
+    delete: (uri: string) => {
+      const p = new URLSearchParams({ uri });
+      return request<{ deleted: boolean; uri: string }>(`/memory/delete?${p.toString()}`, {
+        method: "DELETE",
+      });
+    },
+
+    // ── 向量化 ──
+    vectorize: (uris: string[]) =>
+      request<MemoryVectorizeResponse>("/memory/vectorize", {
+        method: "POST",
+        json: { uris },
+      }),
+
+    // ── 搜索 ──
+    search: (
+      q: string,
+      opts?: { agent_id?: string; session_id?: string; memory_type?: string; limit?: number },
+    ) => {
+      const p = new URLSearchParams({ q });
+      if (opts?.agent_id) p.set("agent_id", opts.agent_id);
+      if (opts?.session_id) p.set("session_id", opts.session_id);
+      if (opts?.memory_type) p.set("memory_type", opts.memory_type);
+      if (opts?.limit) p.set("limit", String(opts.limit));
+      return request<MemorySearchResult>(`/memory/search?${p.toString()}`);
+    },
+
+    // ── 初始化智能体 ──
+    initAgent: (agent_id: string) =>
+      request<{ agent_id: string; created_files: string[] }>(
+        `/memory/init-agent?agent_id=${encodeURIComponent(agent_id)}`,
+        { method: "POST" },
+      ),
+
+    // ── 记忆痕迹 ──
+    traces: (opts?: { agent_id?: string; session_id?: string; limit?: number }) => {
+      const p = new URLSearchParams();
+      if (opts?.agent_id) p.set("agent_id", opts.agent_id);
+      if (opts?.session_id) p.set("session_id", opts.session_id);
+      if (opts?.limit) p.set("limit", String(opts.limit));
+      return request<MemoryTraceListResponse>(`/memory/traces?${p.toString()}`);
+    },
+
+    trace: (
+      extractionId: string,
+      opts?: { agent_id?: string; session_id?: string },
+    ) => {
+      const p = new URLSearchParams();
+      if (opts?.agent_id) p.set("agent_id", opts.agent_id);
+      if (opts?.session_id) p.set("session_id", opts.session_id);
+      const s = p.toString();
+      return request<MemoryTrace>(`/memory/traces/${extractionId}${s ? `?${s}` : ""}`);
+    },
   },
 };

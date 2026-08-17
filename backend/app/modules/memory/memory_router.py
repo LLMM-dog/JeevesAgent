@@ -197,3 +197,197 @@ async def search(
         # 空结果有两种原因，前端要能区分：没配模型 vs 确实没有相关记忆
         "embedding_configured": (await memory_service.resolve_embedding_model(db)) is not None,
     }
+
+
+@router.get("/list", summary="列举记忆（元数据）")
+async def list_memories(
+    agent_id: str = Query("", description="限定智能体。留空列出全局 + 全部智能体"),
+    session_id: str = Query("", description="限定会话。需要同时给 agent_id"),
+    memory_type: str = Query("", description="限定记忆类型"),
+    limit: int = Query(100, ge=1, le=1000, description="最多返回条数"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    列举记忆元数据（不读文件内容）。用于设置页的记忆列表。
+
+    范围规则（记忆列表是管理视角，和 /search 不同）：
+    - 给了 session_id → 全局 + 该智能体 + 该会话
+    - 只给 agent_id   → 全局 + 该智能体
+    - 都不给          → 全局 + 全部智能体（管理视角，列出所有非会话记忆）
+    """
+    scope = MemoryScope(agent_id=agent_id, session_id=session_id)
+    items = await memory_service.list_index(
+        db, scope, memory_type=memory_type, limit=limit
+    )
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/read", summary="读取记忆内容")
+async def read_memory(
+    uri: str = Query(..., description="记忆 URI，如 agents/adf_xxx/preferences/xxx.md"),
+) -> dict[str, Any]:
+    """
+    读取单条记忆的完整内容。
+
+    前端先通过 /list 获取 URI 列表，再按需读取具体内容。
+    """
+    item = await memory_service.read_uri(uri)
+    if item is None:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+
+    return {
+        "uri": item.uri,
+        "memory_type": item.memory_type,
+        "body": item.body,
+        "raw_content": item.raw_content,
+        "fields": item.fields,
+        "version": item.version,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+class WriteMemoryRequest(BaseModel):
+    agent_id: str = ""
+    session_id: str = ""
+    memory_type: str
+    fields: dict[str, Any]
+
+
+@router.post("/write", summary="写入/更新记忆")
+async def write_memory(
+    payload: WriteMemoryRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    写入或更新记忆。
+
+    - fields 中应包含该记忆类型的所有必需字段
+    - 已存在时更新，不存在时创建
+    - 自动触发向量化（如果配置了 embedding 模型）
+    """
+    scope = MemoryScope(agent_id=payload.agent_id, session_id=payload.session_id)
+
+    result = await memory_service.write(
+        scope=scope,
+        memory_type=payload.memory_type,
+        fields=payload.fields,
+        db=db,
+    )
+
+    await db.commit()
+
+    return {
+        "uri": result.uri,
+        "version": result.version,
+        "created": result.created,
+    }
+
+
+@router.delete("/delete", summary="删除记忆")
+async def delete_memory(
+    uri: str = Query(..., description="记忆 URI"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    删除记忆文件及其向量索引。
+
+    注意：删除是不可逆的，会同时删除文件和数据库记录。
+    """
+    result = await memory_service.delete_with_trace(uri, db=db)
+    if result.error:
+        raise HTTPException(status_code=404, detail=result.error)
+
+    await db.commit()
+    return {"deleted": True, "uri": result.uri}
+
+
+class VectorizeRequest(BaseModel):
+    uris: list[str]
+
+
+@router.post("/vectorize", summary="手动触发向量化")
+async def vectorize_memories(
+    payload: VectorizeRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    对指定的记忆 URI 列表进行向量化。
+
+    用于：
+    - 新导入的记忆批量向量化
+    - 修复个别记忆的向量
+
+    全量重算应该用 POST /vectors/rebuild
+    """
+    report = await memory_service.vectorize(db, payload.uris)
+    return {
+        "attempted": report.attempted,
+        "succeeded": report.succeeded,
+        "skipped": report.skipped,
+        "model": report.model,
+        "dim": report.dim,
+        "errors": report.errors,
+    }
+
+
+@router.post("/init-agent", summary="初始化智能体记忆目录")
+async def init_agent_memory(
+    agent_id: str = Query(..., description="智能体 ID"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    为智能体创建记忆目录结构和初始文件。
+
+    幂等操作：已存在时不会重复创建。
+    """
+    created = await memory_service.init_agent(agent_id, db=db)
+    return {"agent_id": agent_id, "created_files": created}
+
+
+@router.get("/traces", summary="列举记忆变更痕迹")
+async def list_traces(
+    agent_id: str = Query("", description="限定智能体。留空列【全部】智能体 + 全局痕迹"),
+    session_id: str = Query("", description="限定会话。需要同时给 agent_id"),
+    limit: int = Query(100, ge=1, le=1000, description="最多返回条数"),
+) -> dict[str, Any]:
+    """
+    列举记忆变更痕迹，按时间倒序。
+
+    每条痕迹记录了一次记忆提取的完整信息：
+    - 新增了哪些记忆
+    - 更新了哪些记忆
+    - 删除了哪些记忆
+    - 有哪些错误
+
+    过滤语义：
+    - agent_id 留空 → 全部智能体 + 全局
+    - agent_id 给定 → 只该智能体
+    - session_id 给定 → 在上述基础上按会话过滤
+    """
+    scope = MemoryScope(agent_id=agent_id, session_id=session_id)
+    traces = await memory_service.list_traces(scope, limit=limit)
+    return {"traces": traces, "total": len(traces)}
+
+
+@router.get("/traces/{extraction_id}", summary="读取痕迹详情")
+async def read_trace(
+    extraction_id: str,
+    agent_id: str = Query("", description="智能体 ID"),
+    session_id: str = Query("", description="会话 ID"),
+) -> dict[str, Any]:
+    """
+    读取单个痕迹文件的详细内容。
+
+    用于痕迹详情页显示"这次提取做了什么"：
+    - 提取时间
+    - 写入/编辑/未变更的记忆列表
+    - 删除的记忆列表（含删除前的内容）
+    - 错误列表
+    - 统计摘要
+    """
+    scope = MemoryScope(agent_id=agent_id, session_id=session_id)
+    trace = await memory_service.read_trace(scope, extraction_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="痕迹不存在")
+    return trace

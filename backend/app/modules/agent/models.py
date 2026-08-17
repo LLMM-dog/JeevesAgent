@@ -35,13 +35,16 @@ class AgentDefinition(Base, TimestampMixin):
     permission_network: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     permission_subagent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    # ── 验证增强 ──
-    verification_enabled: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    strict_mode: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
     # ── 系统字段 ──
     hidden: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # 额外 LLM 参数（智能体级）。用户自由填写的参数字符串，如
+    # `thinking: {"type": "disabled"}`，解析后原样发给 LLM 的 body。
+    #
+    # 各模型的思考/采样参数不统一，这里不做抽象映射，让用户直接写原始字段。
+    # 空串 = 不附加任何参数。
+    extra_llm_params: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     # 软删除
     deleted_at: Mapped[int | None] = mapped_column(Integer, nullable=True)

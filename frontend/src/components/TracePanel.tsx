@@ -3,15 +3,18 @@ import {
   Bot,
   ChevronRight,
   Cpu,
+  Filter,
+  History,
   Loader2,
   Scissors,
   TriangleAlert,
   Wrench,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 
 import { api } from "@/lib/api";
-import type { TraceSpan } from "@/lib/types";
+import type { MemoryTrace, TraceSpan } from "@/lib/types";
 import { useChatStore } from "@/store/chat";
 
 /**
@@ -127,7 +130,9 @@ function SpanRow({
           }`}
           aria-hidden
         />
-        <span className="shrink-0 font-mono">{span.name}</span>
+        <span className="w-44 shrink-0 truncate font-mono" title={span.name}>
+          {span.name}
+        </span>
         {span.agent_name && span.agent_name !== "main" && (
           <span className="shrink-0 rounded bg-[var(--color-accent)]/15 px-1 text-[9px] text-[var(--color-accent)]">
             {span.agent_name}
@@ -153,21 +158,19 @@ function SpanRow({
           />
         </span>
 
-        <span className="shrink-0 tabular-nums text-[var(--color-muted)]">
+        {/* 右侧三列固定宽度 + 右对齐，让时间轴条的左右两端都对齐 */}
+        <span className="w-14 shrink-0 text-right tabular-nums text-[var(--color-muted)]">
           {fmtDur(span.duration_ms)}
         </span>
-        {span.total_tokens > 0 && (
-          <span className="shrink-0 tabular-nums text-[10px] text-[var(--color-muted)]">
-            {fmtTok(span.total_tokens)}
-          </span>
-        )}
+        <span className="w-24 shrink-0 text-right tabular-nums text-[10px] text-[var(--color-muted)]">
+          {span.total_tokens > 0 ? fmtTok(span.total_tokens) : ""}
+        </span>
         {/* 成本只在配过单价时显示。
-            没配价时显示 $0.00 会让人以为免费 —— 那是"不知道"，不是零。 */}
-        {span.has_price && span.cost_usd > 0 && (
-          <span className="shrink-0 tabular-nums text-[10px] text-[var(--color-muted)]">
-            ${span.cost_usd.toFixed(5)}
-          </span>
-        )}
+            没配价时显示 $0.00 会让人以为免费 —— 那是"不知道"，不是零。
+            占位保持列宽，否则时间轴条又对不齐。 */}
+        <span className="w-16 shrink-0 text-right tabular-nums text-[10px] text-[var(--color-muted)]">
+          {span.has_price && span.cost_usd > 0 ? `$${span.cost_usd.toFixed(5)}` : ""}
+        </span>
       </div>
 
       {open && hasDetail && (
@@ -333,7 +336,331 @@ function TraceDetail({ runId }: { runId: string }) {
   );
 }
 
-export default function TracePanel() {
+// ── 记忆痕迹 ──
+
+function fmtTraceTime(ms: number): string {
+  return new Date(ms).toLocaleString("zh-CN");
+}
+
+function MemoryTraceCard({
+  trace,
+  onClick,
+}: {
+  trace: MemoryTrace;
+  onClick: () => void;
+}) {
+  const s = trace.summary;
+  const changes = s.total_adds + s.total_updates + s.total_deletes;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-left hover:border-[var(--color-accent)]"
+    >
+      <div className="min-w-0 flex-1">
+        <span className="block truncate text-xs text-[var(--color-text)]">
+          {fmtTraceTime(trace.extracted_at)}
+        </span>
+        <span className="block truncate font-mono text-[10px] text-[var(--color-muted)]">
+          {trace.extraction_id}
+        </span>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
+        {s.total_adds > 0 && (
+          <span className="text-[var(--color-ok)]">+{s.total_adds}</span>
+        )}
+        {s.total_updates > 0 && (
+          <span className="text-[var(--color-accent)]">~{s.total_updates}</span>
+        )}
+        {s.total_deletes > 0 && (
+          <span className="text-[var(--color-err)]">-{s.total_deletes}</span>
+        )}
+        {s.total_errors > 0 && (
+          <span className="text-[var(--color-warn)]">!{s.total_errors}</span>
+        )}
+        {changes === 0 && (
+          <span className="text-[var(--color-muted)]">无变更</span>
+        )}
+      </div>
+    </button>
+  );
+}
+
+function TraceStat({ label, value, tone }: { label: string; value: number; tone?: string }) {
+  return (
+    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-center">
+      <p className="text-base font-semibold leading-none" style={{ color: tone }}>
+        {value}
+      </p>
+      <p className="mt-1 text-[10px] text-[var(--color-muted)]">{label}</p>
+    </div>
+  );
+}
+
+function MemoryTraceDetail({ trace, onClose }: { trace: MemoryTrace; onClose: () => void }) {
+  const s = trace.summary;
+  const ops = trace.operations;
+
+  return (
+    <div
+      className="max-h-[80vh] w-full max-w-2xl overflow-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-2xl"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h3 className="text-base font-medium text-[var(--color-text)]">记忆提取详情</h3>
+          <p className="mt-1 truncate text-xs text-[var(--color-muted)]">
+            {fmtTraceTime(trace.extracted_at)}
+            {trace.trace_id ? ` · ${trace.trace_id}` : ""}
+          </p>
+        </div>
+        <button onClick={onClose} className="shrink-0 rounded p-1 hover:bg-[var(--color-surface-2)]" aria-label="关闭">
+          <X size={16} className="text-[var(--color-muted)]" />
+        </button>
+      </div>
+
+      {/* 统计摘要 */}
+      <div className="mt-4 grid grid-cols-5 gap-2">
+        <TraceStat label="新增" value={s.total_adds} tone="var(--color-ok)" />
+        <TraceStat label="更新" value={s.total_updates} tone="var(--color-accent)" />
+        <TraceStat label="删除" value={s.total_deletes} tone="var(--color-err)" />
+        <TraceStat label="未变更" value={s.total_unchanged} />
+        <TraceStat label="错误" value={s.total_errors} tone="var(--color-warn)" />
+      </div>
+
+      <div className="mt-4 space-y-4">
+        {/* 错误 */}
+        {trace.errors.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-[var(--color-warn)]">
+              错误（{trace.errors.length}）
+            </p>
+            <ul className="space-y-1 text-xs text-[var(--color-err)]">
+              {trace.errors.map((e, i) => (
+                <li key={i} className="break-words">{e}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* 删除（含删除前内容，便于恢复） */}
+        {ops?.deletes && ops.deletes.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-[var(--color-err)]">
+              删除（{ops.deletes.length}）
+            </p>
+            <div className="space-y-2">
+              {ops.deletes.map((d, i) => (
+                <details key={i} className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2">
+                  <summary className="cursor-pointer truncate text-xs text-[var(--color-text)]">
+                    <span className="text-[var(--color-muted)]">{d.memory_type} · </span>
+                    {d.uri}
+                  </summary>
+                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--color-surface-2)] p-2 text-[11px] text-[var(--color-muted)]">
+                    {d.deleted_content}
+                  </pre>
+                </details>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 更新（before → after） */}
+        {ops?.updates && ops.updates.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-[var(--color-accent)]">
+              更新（{ops.updates.length}）
+            </p>
+            <div className="space-y-2">
+              {ops.updates.map((u, i) => (
+                <details key={i} className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2">
+                  <summary className="cursor-pointer truncate text-xs text-[var(--color-text)]">
+                    <span className="text-[var(--color-muted)]">{u.memory_type} · </span>
+                    {u.uri}
+                  </summary>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--color-surface-2)] p-2 text-[11px] text-[var(--color-muted)]">
+                    {u.before}
+                  </pre>
+                  <p className="mt-1 text-[10px] text-[var(--color-muted)]">↓ 改为</p>
+                  <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--color-surface-2)] p-2 text-[11px] text-[var(--color-text)]">
+                    {u.after}
+                  </pre>
+                </details>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 新增 */}
+        {ops?.adds && ops.adds.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-[var(--color-ok)]">
+              新增（{ops.adds.length}）
+            </p>
+            <div className="space-y-2">
+              {ops.adds.map((a, i) => (
+                <details key={i} className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2">
+                  <summary className="cursor-pointer truncate text-xs text-[var(--color-text)]">
+                    <span className="text-[var(--color-muted)]">{a.memory_type} · </span>
+                    {a.uri}
+                  </summary>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--color-surface-2)] p-2 text-[11px] text-[var(--color-text)]">
+                    {a.after}
+                  </pre>
+                </details>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 未变更（仅列 uri） */}
+        {ops?.unchanged && ops.unchanged.length > 0 && (
+          <div>
+            <p className="mb-1 text-xs font-medium text-[var(--color-muted)]">
+              未变更（{ops.unchanged.length}）
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {ops.unchanged.map((u, i) => (
+                <span key={i} className="rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-muted)]">
+                  {u.uri}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MemoryTraces() {
+  const [agentId, setAgentId] = useState("");
+  const [sessionId, setSessionId] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const { data: agents } = useQuery({
+    queryKey: ["agents", "all"],
+    queryFn: () => api.agents.list(),
+  });
+  const { data: sessions } = useQuery({
+    queryKey: ["sessions", "scope"],
+    queryFn: () => api.listSessions({ size: 100 }),
+  });
+
+  const { data: traces, isLoading } = useQuery({
+    queryKey: ["memory-traces", agentId, sessionId],
+    queryFn: () =>
+      api.memory.traces({
+        agent_id: agentId || undefined,
+        session_id: sessionId || undefined,
+        limit: 200,
+      }),
+  });
+
+  const detail = useQuery({
+    queryKey: ["memory-trace", selectedId, agentId, sessionId],
+    queryFn: () =>
+      api.memory.trace(selectedId!, {
+        agent_id: agentId || undefined,
+        session_id: sessionId || undefined,
+      }),
+    enabled: !!selectedId,
+  });
+
+  const sessionWithoutAgent = sessionId && !agentId;
+  const items = traces?.traces ?? [];
+
+  return (
+    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <h2 className="text-sm font-medium">记忆痕迹</h2>
+        <span className="text-xs text-[var(--color-muted)]">
+          {traces ? `${traces.total} 次提取` : ""}
+        </span>
+      </div>
+
+      {/* 范围筛选：按智能体/会话看该范围的提取历史 */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Filter size={13} className="shrink-0 text-[var(--color-muted)]" />
+        <span className="text-xs text-[var(--color-muted)]">范围</span>
+        <select
+          value={agentId}
+          onChange={(e) => setAgentId(e.target.value)}
+          className="rounded-md border px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+          style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
+          aria-label="智能体"
+        >
+          <option value="">全部智能体</option>
+          {(agents ?? []).map((a) => (
+            <option key={a.id} value={a.id}>{a.name}</option>
+          ))}
+        </select>
+        <select
+          value={sessionId}
+          onChange={(e) => setSessionId(e.target.value)}
+          className="max-w-40 rounded-md border px-2 py-1 text-xs outline-none focus:border-[var(--color-accent)]"
+          style={{ borderColor: "var(--color-border)", background: "var(--color-bg)" }}
+          aria-label="会话"
+        >
+          <option value="">全部会话</option>
+          {(sessions?.items ?? []).map((s) => (
+            <option key={s.id} value={s.id}>{s.title || "未命名会话"}</option>
+          ))}
+        </select>
+        {sessionWithoutAgent && (
+          <span className="flex items-center gap-1 text-xs text-[var(--color-warn)]">
+            <TriangleAlert size={12} />
+            选会话时建议同时选智能体
+          </span>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
+          <Loader2 size={12} className="animate-spin" aria-hidden />
+          加载中…
+        </div>
+      ) : items.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-6 text-center text-xs text-[var(--color-muted)]">
+          当前范围内还没有记忆提取痕迹。对话结束后会在这里留下记录。
+        </div>
+      ) : (
+        <ul className="space-y-1">
+          {items.map((t) => (
+            <li key={t.extraction_id}>
+              <MemoryTraceCard trace={t} onClick={() => setSelectedId(t.extraction_id)} />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* 详情对话框 */}
+      {selectedId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          onClick={() => setSelectedId(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          {detail.isLoading ? (
+            <div className="flex items-center gap-1.5 text-xs text-[var(--color-text)]">
+              <Loader2 size={14} className="animate-spin" />
+              加载中…
+            </div>
+          ) : detail.data ? (
+            <MemoryTraceDetail trace={detail.data} onClose={() => setSelectedId(null)} />
+          ) : (
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-xs text-[var(--color-err)]">
+              {(detail.error as Error)?.message ?? "读取失败"}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RunTraces() {
   const qc = useQueryClient();
   // 【用 Set 而不是单个 id】。
   //
@@ -595,5 +922,38 @@ export default function TracePanel() {
         </ul>
       )}
     </section>
+  );
+}
+
+export default function TracePanel() {
+  const [tab, setTab] = useState<"run" | "memory">("run");
+
+  const tabs = [
+    { key: "run" as const, label: "执行记录", icon: Cpu },
+    { key: "memory" as const, label: "记忆痕迹", icon: History },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1 border-b border-[var(--color-border)]">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={
+              "flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors -mb-px " +
+              (tab === t.key
+                ? "border-[var(--color-accent)] text-[var(--color-text)]"
+                : "border-transparent text-[var(--color-muted)] hover:text-[var(--color-text)]")
+            }
+          >
+            <t.icon size={14} />
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "run" ? <RunTraces /> : <MemoryTraces />}
+    </div>
   );
 }

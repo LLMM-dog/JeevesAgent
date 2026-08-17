@@ -6,6 +6,7 @@ import Sidebar from "@/components/Sidebar";
 import ChatPage from "@/pages/ChatPage";
 import SettingsPage from "@/pages/SettingsPage";
 import CronPage from "@/pages/CronPage";
+import { ApprovalDialog } from "@/components/ApprovalDialog";
 
 export default function App() {
   const { data: meta } = useQuery({
@@ -73,6 +74,9 @@ export default function App() {
           />
         </Routes>
       </main>
+      {/* 审批框挂最外层：SSE 是 store 层的，切到设置页时后台 run 仍在跑、
+          审批事件仍会来，弹框必须全局可见而不是随 ChatPage 卸载消失 */}
+      <ApprovalDialog />
     </div>
   );
 }

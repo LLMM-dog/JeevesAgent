@@ -178,14 +178,44 @@ async def list_index(
     memory_type: str = "",
     limit: int = 0,
 ) -> list[dict[str, Any]]:
-    """只要元数据的列举。设置页的记忆列表用这个，不读文件。"""
-    rows = await index_mod.list_rows(
-        db,
-        agent_id=scope.agent_id or None,
-        session_id=scope.session_id or None,
-        memory_type=memory_type,
-        limit=limit,
-    )
+    """
+    只要元数据的列举。设置页的记忆列表用这个，不读文件。
+
+    ## 范围语义（和 /search 不同）
+
+    /search 的 agent_id="" 是"只搜全局"（搜索范围）；
+    但记忆列表的"全部智能体"是【管理视角】，要列出全局 + 所有智能体的记忆，
+    否则选"全部智能体"过滤时一片空白。session 记忆属于特定会话，不在此列。
+    """
+    from sqlalchemy import and_, or_
+    from sqlalchemy import select as sa_select
+
+    from app.modules.memory.models_db import MemoryIndex
+    from app.modules.memory.vectorize import visible_scopes
+
+    if not scope.agent_id and not scope.session_id:
+        # 全部智能体：全局 + 所有 agent（排除 session 记忆，它属于特定会话）
+        stmt = sa_select(MemoryIndex).where(
+            MemoryIndex.scope.in_(["global", "agent"])
+        )
+    else:
+        conditions = [
+            and_(
+                MemoryIndex.scope == kind,
+                MemoryIndex.agent_id == agent_id,
+                MemoryIndex.session_id == session_id,
+                MemoryIndex.peer_agent_id == peer_id,
+            )
+            for kind, agent_id, session_id, peer_id in visible_scopes(scope)
+        ]
+        stmt = sa_select(MemoryIndex).where(or_(*conditions))
+
+    if memory_type:
+        stmt = stmt.where(MemoryIndex.memory_type == memory_type)
+    stmt = stmt.order_by(MemoryIndex.file_updated_at.desc())
+    if limit > 0:
+        stmt = stmt.limit(limit)
+    rows = list((await db.execute(stmt)).scalars().all())
     return [index_mod.row_to_dict(r) for r in rows]
 
 
@@ -208,6 +238,7 @@ async def write(
     db 可以为 None —— 那时只写文件不更新索引。提取流程会传 db，
     而单元测试和脚本可以不传。
     """
+    log.debug("memory_write_called", memory_type=memory_type, has_db=(db is not None))
     schema = _require_schema(scope, memory_type)
     rel_path = await _store.resolve_path(scope, schema, fields, extract_context=extract_context)
     uri_hint = f"{schema.memory_type}:{rel_path}"
@@ -322,9 +353,13 @@ async def _write_locked(
         # 反过来（因为索引失败就报写入失败）会让调用方重试，
         # 而重试会再递增一次 version。
         try:
+            log.debug("memory_index_upserting", uri=uri, has_db=True)
             await index_mod.upsert(db, uri, item)
+            log.debug("memory_index_upsert_done", uri=uri)
         except Exception as e:  # noqa: BLE001
             log.warning("memory_index_upsert_failed", uri=uri, error=str(e))
+    else:
+        log.debug("memory_index_skipped_no_db", uri=uri)
 
     return WriteResult(
         uri=uri,
@@ -479,8 +514,10 @@ async def resolve_embedding_model(db: AsyncSession) -> ResolvedModel | None:
     系统仍然完全可用。抛异常会让"没配嵌入模型"变成"记忆功能不可用"，
     而那是过度耦合。
 
-    不回落到 chat 模型：对话模型没有 /embeddings 端点，
-    调用它只会得到 404，而那个错误看起来像配置错误。
+    ## 为什么不再需要检查 resolved.purpose
+
+    endpoint.service.resolve() 现在对 purpose="embedding" 禁止回落到 chat，
+    找不到时直接抛 NoModelBoundError。所以返回的必然是显式绑定的嵌入模型。
     """
     from app.modules.endpoint import service as endpoint_service
 
@@ -490,11 +527,31 @@ async def resolve_embedding_model(db: AsyncSession) -> ResolvedModel | None:
         log.debug("memory_embedding_model_unavailable", error=str(e))
         return None
 
-    # resolve 的兜底链会回落到 chat。嵌入必须是【显式配置】的 ——
-    # 拿一个对话模型去调 /embeddings 得到的 404 会被误读成配置错误。
-    if resolved.purpose != "embedding":
-        log.debug("memory_embedding_model_not_configured", fell_back_to=resolved.purpose)
+    return resolved
+
+
+async def resolve_rerank_model(db: AsyncSession) -> ResolvedModel | None:
+    """
+    解析当前配置的重排序模型。没配返回 None。
+
+    ## 为什么没配是 None 而不是异常
+
+    重排序是【可选】的。没配时跳过重排序步骤，直接返回向量搜索结果，
+    系统仍然完全可用。抛异常会让"没配重排序"变成"召回功能不可用"。
+
+    ## 为什么不回落到 chat
+
+    rerank 模型的 API 协议与 chat 完全不同，不能混用。
+    endpoint.service.resolve() 对 purpose="memory_rerank" 禁止回落到 chat。
+    """
+    from app.modules.endpoint import service as endpoint_service
+
+    try:
+        resolved = await endpoint_service.resolve(db, purpose="memory_rerank")
+    except Exception as e:  # noqa: BLE001
+        log.debug("memory_rerank_model_unavailable", error=str(e))
         return None
+
     return resolved
 
 
@@ -558,6 +615,10 @@ async def write_diff(batch: BatchResult, *, scope: MemoryScope) -> str:
     而按提取批次分文件让"这一次提取做了什么"是一个文件而非一段日志。
     """
     diff = batch.to_diff()
+    # 痕迹文件本身不记录所属的智能体/会话，但追踪页面要按这两个维度
+    # 过滤，所以落盘时把 scope 的信息一并写进去。
+    diff["agent_id"] = scope.agent_id
+    diff["session_id"] = scope.session_id
     name = batch.extraction_id or f"anon_{diff['extracted_at']}"
     rel = f"{name}.json"
     path = layout.trace_dir(scope) / rel
@@ -630,11 +691,11 @@ async def drop_agent(agent_id: str, *, db: AsyncSession | None = None) -> int:
     return count
 
 
-async def drop_session(agent_id: str, session_id: str, *, db: AsyncSession | None = None) -> int:
-    count = await _store.drop_session(agent_id, session_id)
+async def drop_session(session_id: str, *, db: AsyncSession | None = None) -> int:
+    count = await _store.drop_session(session_id)
     if db is not None:
-        await index_mod.remove_session(db, agent_id, session_id)
-    log.info("memory_session_dropped", agent_id=agent_id, session_id=session_id, files=count)
+        await index_mod.remove_session(db, session_id)
+    log.info("memory_session_dropped", session_id=session_id, files=count)
     return count
 
 
@@ -659,6 +720,95 @@ def diagnostics() -> list[dict[str, str]]:
     ]
 
 
+# ── 痕迹读取 ──
+
+
+async def list_traces(scope: MemoryScope, *, limit: int = 100) -> list[dict[str, Any]]:
+    """
+    列举记忆变更痕迹。
+
+    按时间倒序返回，最新的在前。用于痕迹页面显示"这个会话的记忆提取历史"。
+
+    ## 过滤语义
+
+    - agent_id 非空：只列该智能体的痕迹（agents/<id>/.trace/）
+    - agent_id 为空：列【全部】——全局 .trace 加所有智能体的 .trace
+    - session_id 非空：在上述基础上按痕迹里记录的 session_id 过滤
+
+    痕迹按 agent 目录存储，不按 session 分目录，所以 session 过滤只能在
+    读出来后按 JSON 里的 session_id 字段筛。
+    """
+    dirs: list[Path] = []
+    if scope.agent_id:
+        dirs.append(layout.trace_dir(scope))
+    else:
+        dirs.append(layout.trace_dir(scope))  # 全局 .trace
+        agents_root = layout.memory_root() / "agents"
+        if agents_root.exists():
+            for agent_dir in agents_root.iterdir():
+                if agent_dir.is_dir():
+                    dirs.append(agent_dir / layout.TRACE_DIRNAME)
+
+    def _load_traces() -> list[dict[str, Any]]:
+        traces: list[dict[str, Any]] = []
+        for d in dirs:
+            if not d.exists():
+                continue
+            for file in d.glob("*.json"):
+                try:
+                    with open(file, encoding="utf-8") as f:
+                        data = json.load(f)
+                        data["file"] = file.name
+                        traces.append(data)
+                except Exception as e:
+                    log.warning("memory_trace_read_failed", file=str(file), error=str(e))
+                    continue
+        # 会话过滤（痕迹 JSON 里的 session_id 字段）
+        if scope.session_id:
+            traces = [t for t in traces if t.get("session_id") == scope.session_id]
+        # 按时间倒序
+        traces.sort(key=lambda x: x.get("extracted_at", 0), reverse=True)
+        return traces[:limit]
+
+    return await asyncio.to_thread(_load_traces)
+
+
+async def read_trace(scope: MemoryScope, extraction_id: str) -> dict[str, Any] | None:
+    """
+    读取单个痕迹文件。
+
+    用于痕迹详情页显示"这次提取做了什么"。
+
+    ## agent_id 为空时搜索全部目录
+
+    和 list_traces 一致：agent_id 为空时遍历全局 .trace + 所有智能体的
+    .trace。否则"全部智能体"列表里点开的详情会 404 —— 列表搜了全部目录，
+    详情却只查全局一个。
+    """
+    dirs: list[Path] = []
+    if scope.agent_id:
+        dirs.append(layout.trace_dir(scope))
+    else:
+        dirs.append(layout.trace_dir(scope))  # 全局 .trace
+        agents_root = layout.memory_root() / "agents"
+        if agents_root.exists():
+            for agent_dir in agents_root.iterdir():
+                if agent_dir.is_dir():
+                    dirs.append(agent_dir / layout.TRACE_DIRNAME)
+
+    def _read() -> dict[str, Any] | None:
+        for d in dirs:
+            trace_path = d / f"{extraction_id}.json"
+            if not trace_path.exists():
+                continue
+            with open(trace_path, encoding="utf-8") as f:
+                data: dict[str, Any] = json.load(f)
+                return data
+        return None
+
+    return await asyncio.to_thread(_read)
+
+
 __all__ = [
     "MemoryScope",
     "MemoryScopeKind",
@@ -673,6 +823,8 @@ __all__ = [
     "init_agent",
     "list_index",
     "list_items",
+    "list_traces",
+    "read_trace",
     "read_uri",
     "rebuild_index",
     "refresh_overview",

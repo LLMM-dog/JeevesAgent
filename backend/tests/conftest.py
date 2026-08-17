@@ -16,6 +16,7 @@ from app.infra.db.base import Base
 # 靠测试文件自己的 import 恰好在 fixture 之前发生是不可靠的：
 # 单独运行别的文件时就不成立了。
 from app.modules.cron import models as _cron_models  # noqa: F401
+from app.modules.endpoint import models as _endpoint_models  # noqa: F401  # model_binding 表
 from app.modules.session import models  # noqa: F401  确保模型被注册到 metadata
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

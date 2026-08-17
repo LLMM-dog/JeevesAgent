@@ -1,345 +1,601 @@
-﻿"""
-用真实模型验证长期记忆。
+"""
+记忆提取的真实模型验证。
 
-## 验什么
+## 与 pytest 的分工
 
-1. **跨会话记住**：会话 A 说的偏好，会话 B 能用上
-2. **不乱记**：普通问答不该产生记忆
-3. **不重复记**：同一件事说两次只留一条
-4. **能纠正**：偏好变了能更新旧记忆，且留下变更原因
-5. **不污染**：注入的记忆不被当成用户输入再次提炼（自反馈）
-6. **开关生效**：private_mode 不写、amnesia_mode 不读
-7. **记忆是背景不是指令**：不该因为记了"偏好 X"就无条件用 X
+pytest 用假 LLM 验证【控制流】：每条分支都能被精确触发。
+这个脚本用真实模型验证【契约能不能被真模型满足】：
 
-用法：
-  1. 起后端
-  2. uv run python scripts/verify_memory.py
+- 它会不会输出合法 JSON
+- page_id 引用对不对
+- SEARCH 片段是否逐字符一致（patch 能不能打上）
+- 工具调用的参数格式对不对
+- 第二次提取会不会改已有记忆而不是新建重复的
+
+这两件事无法互相替代。假 LLM 永远输出正确格式，测不出契约是否可满足；
+真模型不可复现，测不出"第 2 轮走了 patch 修复分支"。
+
+## 用法
+
+    uv run python scripts/verify_memory.py            # 两种模式都跑
+    uv run python scripts/verify_memory.py --lazy     # 只跑工具调用模式
+    uv run python scripts/verify_memory.py --keep     # 保留产物
+
+凭证从 .env.verify 读（VERIFY_BASE_URL / VERIFY_API_KEY / VERIFY_MODEL）。
+Key 只当请求头用，输出里只显示尾 4 位。
+
+写真实的 data/，用固定的 adf_verify 智能体，不碰你已有的数据。
 """
 
+from __future__ import annotations
+
+import argparse
 import asyncio
 import json
-import sqlite3
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
-import httpx
+# 单轮 LLM 调用超时。
+#
+# 推理模型（deepseek-v4-pro 这类）单轮要几分钟 —— 实测首轮 2 分 47 秒，
+# 其中绝大部分是推理 token。给 5 分钟，超了就当这一轮失败继续，
+# 而不是让整个脚本无声挂住。
+LLM_TIMEOUT_SECONDS = 300
 
-BASE = "http://127.0.0.1:9000"
-ROOT = Path(__file__).resolve().parent.parent
-DB = ROOT / "data" / "jeeves.db"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "backend"))
+sys.path.insert(0, str(PROJECT_ROOT / "backend" / "tests"))
+
+AGENT_ID = "adf_verify"
+
+PASS = "  [OK]  "
+FAIL = "  [FAIL]"
+INFO = "  ..    "
 
 
-def load_env() -> dict[str, str]:
-    f = ROOT / ".env.verify"
-    if not f.exists():
-        print("缺 .env.verify")
-        sys.exit(2)
-    vals: dict[str, str] = {}
-    for line in f.read_text(encoding="utf-8").splitlines():
+class Checks:
+    """收集断言结果。全部跑完再汇总，不中途退出 —— 一次运行要能看到全貌。"""
+
+    def __init__(self) -> None:
+        self.items: list[tuple[bool, str, str]] = []
+
+    def add(self, ok: bool, name: str, detail: str = "") -> bool:
+        self.items.append((ok, name, detail))
+        print(f"{PASS if ok else FAIL} {name}" + (f" — {detail}" if detail else ""))
+        return ok
+
+    @property
+    def failed(self) -> list[tuple[bool, str, str]]:
+        return [i for i in self.items if not i[0]]
+
+    def report(self) -> bool:
+        ok = len(self.items) - len(self.failed)
+        print(f"\n{'=' * 78}\n断言 {ok}/{len(self.items)} 通过")
+        for _, name, detail in self.failed:
+            print(f"  失败：{name} — {detail}")
+        return not self.failed
+
+
+def load_env(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        raise SystemExit(f"缺少 {path}。见文件顶部说明。")
+    out: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
-        vals[k.strip()] = v.strip().strip("\"'")
-    return vals
+        out[k.strip()] = v.strip()
+    return out
 
 
-async def chat(c: httpx.AsyncClient, sid: str, content: str) -> dict[str, object]:
-    buf = ""
-    text: list[str] = []
-    tools: list[str] = []
-    recalled: list[dict] = []
-    errors: list[str] = []
-    async with c.stream(
-        "POST", f"{BASE}/api/chat", json={"session_id": sid, "content": content}
-    ) as r:
-        if r.status_code != 200:
-            body = (await r.aread()).decode()
-            return {"ok": False, "errors": [f"HTTP {r.status_code}: {body[:200]}"]}
-        async for raw in r.aiter_bytes():
-            buf += raw.decode("utf-8", errors="replace")
-            while "\n\n" in buf:
-                block, buf = buf.split("\n\n", 1)
-                name = ""
-                data = None
-                for line in block.strip().split("\n"):
-                    if line.startswith("event:"):
-                        name = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data = json.loads(line[5:].strip())
-                if data is None:
-                    continue
-                if name == "message":
-                    text.append(data["delta"])
-                elif name == "tool_start":
-                    tools.append(data["tool_name"])
-                    print(f"    → {data['tool_name']}")
-                elif name == "memory_recalled":
-                    recalled = data["items"]
-                    print(f"    ◆ 召回 {data['count']} 条记忆")
-                elif name == "error":
-                    errors.append(str(data.get("message")))
-                    print(f"    [错误] {str(data.get('message'))[:150]}")
-    return {
-        "ok": not errors,
-        "reply": "".join(text),
-        "tools": tools,
-        "recalled": recalled,
-        "errors": errors,
-    }
+async def build_llm_call(env: dict[str, str], checks: Checks) -> Any:
+    """
+    造一个真实的 llm_call，形状与提取循环要求的一致：
+    `async (messages, tools) -> (text, tool_calls)`
+    """
+    from app.infra.llm.openai_compat import OpenAICompatLLM
+    from app.infra.llm.port import ResolvedModel
+    from app.modules.memory.extract_tools import ToolCall
 
+    base = env.get("VERIFY_BASE_URL", "")
+    key = env.get("VERIFY_API_KEY", "")
+    if not base or not key:
+        raise SystemExit("VERIFY_BASE_URL / VERIFY_API_KEY 未填")
 
-def db_memories(include_archived: bool = False) -> list[tuple]:
-    conn = sqlite3.connect(str(DB))
-    q = "select id, content, theme, source, confidence, hit, archived_at, history from memory"
-    if not include_archived:
-        q += " where archived_at is null"
-    rows = list(conn.execute(q))
-    conn.close()
-    return rows
+    llm = OpenAICompatLLM()
+    names = await llm.list_models(base, key)
+    want = env.get("VERIFY_MODEL", "")
+    model_id = want if want in names else (names[0] if names else "")
+    checks.add(bool(model_id), "模型可用", f"{model_id}（key ...{key[-4:]}）")
 
+    resolved = ResolvedModel(model_id=model_id, base_url=base, api_key=key)
+    stats: dict[str, int] = {"rounds": 0, "tool_rounds": 0, "reasoning_chars": 0}
 
-def clear_memories() -> None:
-    conn = sqlite3.connect(str(DB))
-    conn.execute("delete from memory")
-    conn.commit()
-    conn.close()
-
-
-async def new_session(c: httpx.AsyncClient, **flags: object) -> str:
-    sid = (await c.post(f"{BASE}/api/sessions", json={})).json()["id"]
-    body: dict[str, object] = {"approval_mode": "auto"}
-    body.update(flags)
-    await c.patch(f"{BASE}/api/sessions/{sid}", json=body)
-    return sid
-
-
-async def main() -> int:
-    vals = load_env()
-    async with httpx.AsyncClient(timeout=1800.0, trust_env=False) as c:
-        try:
-            await c.get(f"{BASE}/api/health", timeout=5.0)
-        except Exception:
-            print("后端没起来")
-            return 2
-
-        print("0. 清空已有记忆，保证结果干净")
-        clear_memories()
-
-        print("1. 登记端点")
-        pr = await c.post(
-            f"{BASE}/api/providers",
-            json={
-                "name": f"mem-test-{int(asyncio.get_running_loop().time())}",
-                "base_url": vals["VERIFY_BASE_URL"],
-                "api_key": vals["VERIFY_API_KEY"],
-                "models": [
-                    {
-                        "model_id": vals.get("VERIFY_MODEL") or "deepseek-v4-pro",
-                        "context_window": 131072,
-                    }
-                ],
-            },
+    async def call(messages: list[dict[str, Any]], tools: Any = None) -> tuple[str, list[ToolCall]]:
+        stats["rounds"] += 1
+        n = stats["rounds"]
+        prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        print(
+            f"{INFO} LLM 第 {n} 轮：提示词 {prompt_chars} 字符，"
+            f"工具 {'开' if tools else '关'} … ",
+            end="",
+            flush=True,
         )
-        if pr.status_code != 201:
-            print(f"   失败 {pr.status_code}: {pr.text[:300]}")
-            return 1
-        pid = pr.json()["id"]
 
+        text: list[str] = []
+        reasoning_chars = 0
+        merged: dict[int, dict[str, str]] = {}
+        t0 = time.monotonic()
+
+        # 【必须有超时】。推理模型单轮可能跑几分钟，而没有超时的话
+        # 卡住和"正在推理"从外部完全无法区分 —— 实测首轮花了 2 分 47 秒，
+        # 看起来就是死锁。
         try:
-            models = (await c.get(f"{BASE}/api/models?provider_id={pid}")).json()["items"]
-            pk = models[0]["id"]
-            for purpose in ("chat", "title", "compact"):
-                await c.put(f"{BASE}/api/bindings", json={"purpose": purpose, "model_pk": pk})
+            async with asyncio.timeout(LLM_TIMEOUT_SECONDS):
+                async for chunk in llm.stream_chat(model=resolved, messages=messages, tools=tools):
+                    # 【是 "content" 不是 "text"】。ChunkKind 的字面量是
+                    # content/reasoning/tool_call/usage/done（port.py:17）。
+                    # 我第一版写成 "text"，于是把所有正文丢掉了，
+                    # 表现为"模型返回空 → parse_error"，看起来像模型不听话。
+                    if chunk.kind == "content" and chunk.text:
+                        text.append(chunk.text)
+                    elif chunk.kind == "reasoning" and chunk.text:
+                        # 推理内容【不参与解析】，只统计。它是模型的思考过程，
+                        # 混进正文会让 JSON 解析必然失败。
+                        reasoning_chars += len(chunk.text)
+                    elif chunk.kind == "tool_call" and chunk.tool_call:
+                        d = chunk.tool_call
+                        cur = merged.setdefault(d.index, {"id": "", "name": "", "args": ""})
+                        if d.call_id:
+                            cur["id"] = d.call_id
+                        if d.name:
+                            cur["name"] = d.name
+                        cur["args"] += d.arguments_delta
+        except TimeoutError:
+            print(f"超时（{LLM_TIMEOUT_SECONDS}s）")
+            return "", []
 
-            failures: list[str] = []
+        stats["reasoning_chars"] += reasoning_chars
+        calls = [
+            ToolCall(call_id=v["id"] or f"call_{i}", name=v["name"], arguments=v["args"] or "{}")
+            for i, v in sorted(merged.items())
+            if v["name"]
+        ]
+        if calls:
+            stats["tool_rounds"] += 1
 
-            # ── 场景一：说一个偏好，看它记不记 ──
-            print("\n2. 会话 A：陈述一个长期偏好")
-            sid_a = await new_session(c)
-            r1 = await chat(
-                c,
-                sid_a,
-                "记住一件事：我这个项目的后端统一用 FastAPI，不要给我推荐 Flask 或 Django。",
-            )
-            if not r1["ok"]:
-                print(f"   失败：{r1['errors']}")
-                return 1
-            await asyncio.sleep(0.5)
+        body = "".join(text)
+        print(
+            f"{time.monotonic() - t0:.1f}s，"
+            f"推理 {reasoning_chars} 字符，正文 {len(body)} 字符"
+            + (f"，工具调用 {len(calls)} 个" if calls else "")
+        )
+        return body, calls
 
-            mems = db_memories()
-            print(f"   记忆库现有 {len(mems)} 条：")
-            for m in mems:
-                print(f"     [{m[2]}] {m[1]}  (来源={m[3]} 置信={m[4]})")
-            if not mems:
-                failures.append("说了「记住」但没有产生任何记忆")
-            elif not any("FastAPI" in m[1] for m in mems):
-                failures.append(f"记忆内容里没有 FastAPI：{[m[1] for m in mems]}")
-            else:
-                print("   ✓ 偏好被记下了")
+    call.stats = stats  # type: ignore[attr-defined]
+    return call
 
-            # ── 场景二：新会话能不能用上 ──
-            print("\n3. 会话 B（全新会话）：问一个会触发该偏好的问题")
-            sid_b = await new_session(c)
-            r2 = await chat(c, sid_b, "我要新写一个后端接口服务，用什么框架好？")
-            if not r2["ok"]:
-                print(f"   失败：{r2['errors']}")
-                return 1
-            recalled = r2["recalled"]
-            if not recalled:
-                failures.append(
-                    "新会话没有召回任何记忆 —— 跨会话记忆没生效，这是长期记忆的全部意义"
-                )
-            else:
-                print(f"   ✓ 跨会话召回了 {len(recalled)} 条")
-                for m in recalled:
-                    print(f"     [{m['theme']}] {m['content']}")
 
-            reply2 = str(r2["reply"])
-            if "FastAPI" in reply2:
-                print("   ✓ 回答用上了记住的偏好")
-            else:
-                failures.append("召回了记忆但回答没体现出来")
+async def run_round(
+    db: Any, *, seed: str, llm_call: Any, checks: Checks, label: str
+) -> Any:
+    from app.modules.memory.commit import commit_session
+    from app.modules.session import repo
+    from tests.seed import seed_session
 
-            # ── 场景三：普通问答不该乱记 ──
-            print("\n4. 会话 C：普通问答，不该产生记忆")
-            before = len(db_memories())
-            sid_c = await new_session(c)
-            await chat(c, sid_c, "1 加 1 等于几？只回答数字。")
-            await asyncio.sleep(0.5)
-            after = len(db_memories())
-            if after > before:
-                new_ones = [m[1] for m in db_memories()][before:]
-                failures.append(
-                    f"普通问答产生了 {after - before} 条记忆（记忆污染）：{new_ones}"
-                )
-            else:
-                print(f"   ✓ 没有乱记（仍是 {after} 条）")
+    ws = await repo.ensure_default_workspace(db, str(PROJECT_ROOT / "workspace"))
+    sid = await seed_session(db, seed, workspace_id=ws.id, agent_id=AGENT_ID)
 
-            # ── 场景四：同一件事说两次，不该记两条 ──
-            print("\n5. 会话 D：重复陈述同一偏好，测去重")
-            before = len(db_memories())
-            sid_d = await new_session(c)
-            await chat(
-                c, sid_d, "再强调一次：后端就用 FastAPI，请记住这一点。"
-            )
-            await asyncio.sleep(0.5)
-            after = len(db_memories())
-            fastapi_count = sum(1 for m in db_memories() if "FastAPI" in m[1])
-            print(f"   含 FastAPI 的记忆条数：{fastapi_count}")
-            if fastapi_count > 1:
-                failures.append(
-                    f"同一件事记了 {fastapi_count} 条 —— 去重没生效"
-                )
-            else:
-                print("   ✓ 没有重复记录")
+    print(f"\n{'-' * 78}\n{label}（会话 {sid}）")
+    report = await commit_session(db, session_id=sid, agent_id=AGENT_ID, llm_call=llm_call)
 
-            # ── 场景五：偏好变了，能不能更新且留痕 ──
-            print("\n6. 会话 E：偏好变更，测更新与溯源")
-            sid_e = await new_session(c)
-            await chat(
-                c,
-                sid_e,
-                "情况变了，这个项目后端改用 Django 了，请更新你记住的框架偏好。",
-            )
-            await asyncio.sleep(0.5)
-            mems = db_memories(include_archived=True)
-            print("   记忆库当前状态：")
-            changed = False
-            for m in mems:
-                hist = json.loads(m[7] or "[]")
-                arch = "（已归档）" if m[6] else ""
-                print(f"     [{m[2]}] {m[1]}{arch}")
-                for h in hist:
-                    print(f"        ← {h['op']}: {h['reason']}")
-                    changed = True
-            if not changed:
-                failures.append(
-                    "偏好变更后没有任何 history 记录 —— 无法追溯记忆怎么变的"
-                )
-            else:
-                print("   ✓ 变更留下了原因（可追溯）")
-            if not any("Django" in m[1] for m in mems if not m[6]):
-                failures.append("更新后的记忆里没有 Django")
+    print(f"{INFO} {report.summary()}")
+    if report.outcome is not None:
+        print(f"{INFO} 循环路径 {[s.kind for s in report.outcome.steps]}")
+        if report.outcome.tools_used:
+            for t in report.outcome.tools_used:
+                print(f"{INFO} 工具 {t['name']}({json.dumps(t['args'], ensure_ascii=False)[:70]})")
+        print(f"{INFO} 模型判断：{report.outcome.reasoning[:150]}")
+    for w in report.warnings:
+        print(f"{INFO} 警告：{w}")
 
-            # ── 场景六：private_mode 不写 ──
-            print("\n7. private_mode：这轮不该写记忆")
-            before = len(db_memories(include_archived=True))
-            sid_p = await new_session(c, private_mode=1)
-            await chat(
-                c, sid_p, "记住：我的测试数据库密码规则是 test_ 开头。"
-            )
-            await asyncio.sleep(0.5)
-            after = len(db_memories(include_archived=True))
-            if after > before:
-                failures.append(
-                    f"private_mode 下仍然写入了 {after - before} 条记忆"
-                )
-            else:
-                print("   ✓ private_mode 生效，没写入")
+    checks.add(not report.skipped, f"{label}：没有被跳过", report.skipped)
+    if report.outcome is not None:
+        checks.add(
+            report.outcome.iterations <= 6,
+            f"{label}：迭代次数合理",
+            f"{report.outcome.iterations} 轮",
+        )
+        # 真模型能不能满足 JSON 契约 —— 这是最核心的一条
+        checks.add(
+            not any(s.kind == "parse_error" for s in report.outcome.steps),
+            f"{label}：首轮就输出了合法 JSON",
+        )
+    if report.batch is not None:
+        checks.add(
+            report.batch.ok,
+            f"{label}：所有写入成功",
+            "; ".join(report.batch.errors)[:200],
+        )
+    return report
 
-            # ── 场景七：amnesia_mode 不读 ──
-            print("\n8. amnesia_mode：这轮不该召回记忆")
-            sid_am = await new_session(c, amnesia_mode=1)
-            r7 = await chat(c, sid_am, "我要写后端服务，用什么框架？")
-            if r7["recalled"]:
-                failures.append(
-                    f"amnesia_mode 下仍然召回了 {len(r7['recalled'])} 条记忆"
-                )
-            else:
-                print("   ✓ amnesia_mode 生效，没召回")
 
-            # ── 场景八：自反馈检查 ──
-            print("\n9. 自反馈检查：注入的记忆不该被当成用户输入再记一遍")
-            conn = sqlite3.connect(str(DB))
-            marker_rows = list(
-                conn.execute(
-                    "select content from memory where content like '%相关记忆%'"
-                )
-            )
-            conn.close()
-            if marker_rows:
-                failures.append(
-                    f"记忆库里出现了注入标记的内容（自反馈）：{marker_rows}"
-                )
-            else:
-                print("   ✓ 没有把注入的记忆再记一遍")
+async def verify_mode(db: Any, *, eager: bool, llm_call: Any, checks: Checks) -> None:
+    from app.core.config import settings
+    from app.modules.memory import service as memory
+    from app.modules.memory.models import MemoryScope
 
-            # ── 场景九：记忆是背景不是指令 ──
-            print("\n10. 记忆不该变成硬指令")
-            sid_f = await new_session(c)
-            r9 = await chat(
-                c,
-                sid_f,
-                "这次我想专门试试 Flask，就这一次。给我一个 Flask 的最小示例。",
-            )
-            reply9 = str(r9["reply"]).lower()
-            if "flask" not in reply9:
-                failures.append(
-                    "用户明确要 Flask 却没给 —— 记忆被当成了硬指令而不是背景"
-                )
-            else:
-                print("   ✓ 用户明确要求时能覆盖记忆里的偏好")
+    mode = "eager（全预取，无工具）" if eager else "lazy（按需 read，带工具）"
+    print(f"\n{'=' * 78}\n模式：{mode}\n{'=' * 78}")
+    settings.memory.eager_prefetch = eager
 
-            # ── 召回接口 ──
-            print("\n11. 召回打分（调试接口）")
-            s = (await c.get(f"{BASE}/api/memories-search?q=后端框架用什么")).json()
-            for it in s["items"]:
-                print(f"   {it['score']:.3f}  [{it['theme']}] {it['content']}")
-            if not s["items"]:
-                failures.append("召回接口返回空")
+    await memory.init_agent(AGENT_ID, db=db)
 
-            print("\n" + "=" * 58)
-            if failures:
-                for f in failures:
-                    print(f"✗ {f}")
-                return 1
-            print("通过：跨会话记忆、去重、溯源、双开关、防自反馈全部生效")
-            return 0
+    # ── 第一次提取：全新记忆 ──
+    r1 = await run_round(db, seed="ses_first_memory", llm_call=llm_call, checks=checks, label="首次提取")
+    if r1.batch is not None:
+        checks.add(len(r1.batch.written) > 0, "首次提取：产出了新记忆", f"{len(r1.batch.written)} 条")
+
+    scope = MemoryScope(agent_id=AGENT_ID)
+    prefs = await memory.list_items(scope, "preferences")
+    print(f"{INFO} 提取到 {len(prefs)} 条偏好：{[p.title for p in prefs]}")
+    checks.add(len(prefs) > 0, "首次提取：至少记住一条偏好")
+
+    # ── 第二次提取：必须改已有而非新建重复 ──
+    before = len(prefs)
+    r2 = await run_round(
+        db, seed="ses_accumulated", llm_call=llm_call, checks=checks, label="二次提取"
+    )
+
+    prefs_after = await memory.list_items(scope, "preferences")
+    print(f"{INFO} 现在 {len(prefs_after)} 条偏好：{[p.title for p in prefs_after]}")
+
+    # 去重的核心断言：偏好数不该翻倍
+    checks.add(
+        len(prefs_after) <= before + 2,
+        "二次提取：没有大量新建重复偏好",
+        f"{before} → {len(prefs_after)}",
+    )
+
+    if r2.batch is not None and not eager:
+        checks.add(
+            bool(r2.outcome and r2.outcome.tools_used),
+            "lazy 模式：模型实际调用了工具",
+            f"{len(r2.outcome.tools_used) if r2.outcome else 0} 次",
+        )
+
+    # ── 记忆内容质量 ──
+    all_items = await memory.list_items(scope)
+    types_seen = {i.memory_type for i in all_items}
+    print(f"{INFO} 覆盖的记忆类型：{sorted(types_seen)}")
+    checks.add(len(types_seen) >= 2, "覆盖了多种记忆类型", str(sorted(types_seen)))
+
+    empty = [i.uri for i in all_items if not i.body.strip()]
+    checks.add(not empty, "没有产生空记忆", str(empty[:3]))
+
+    # 事件必须落在按日期分层的路径下
+    events = [i for i in all_items if i.memory_type == "events"]
+    if events:
+        checks.add(
+            all("/20" in e.uri for e in events),
+            "事件按日期分层存放",
+            events[0].uri,
+        )
+
+
+async def reset_agent(db: Any) -> None:
+    """清空该智能体的记忆【和会话】。两者必须一起清，见调用点的说明。"""
+    from app.modules.memory import service as memory
+    from app.modules.session import repo
+    from app.modules.session.models import Session
+    from sqlalchemy import select
+
+    await memory.drop_agent(AGENT_ID, db=db)
+    rows = (await db.execute(select(Session).where(Session.agent_id == AGENT_ID))).scalars().all()
+    for row in rows:
+        await repo.delete_session(db, row.id)
+
+
+async def verify_embedding(db: Any, env: dict[str, str], checks: Checks) -> None:
+    """
+    用【真实嵌入模型】验证向量化与语义搜索。
+
+    与假嵌入的分工：假嵌入验"维度不一致时跳过"这类控制流；
+    真实嵌入验"语义相近的内容真的会被排在前面"——那是假嵌入
+    按关键词命中造出来的，证明不了真实模型的行为。
+    """
+    from app.infra.llm.embedding import probe_dim
+    from app.infra.llm.port import ResolvedModel
+    from app.modules.memory import service as memory
+    from app.modules.memory import vectorize as vec
+    from app.modules.memory.models import MemoryScope
+
+    base = env.get("VERIFY_EMBEDDING_BASE_URL") or env.get("VERIFY_BASE_URL", "")
+    key = env.get("VERIFY_EMBEDDING_API_KEY") or env.get("VERIFY_API_KEY", "")
+    model_id = env.get("VERIFY_EMBEDDING_MODEL", "").strip()
+
+    print(f"\n{'=' * 78}\n真实嵌入模型验证\n{'=' * 78}")
+    if not model_id:
+        print(f"{INFO} 未配 VERIFY_EMBEDDING_MODEL，跳过")
+        return
+
+    resolved = ResolvedModel(
+        model_id=model_id, base_url=base, api_key=key, purpose="embedding"
+    )
+    dim = await probe_dim(resolved)
+    if not checks.add(dim > 0, "嵌入模型可用", f"{model_id}，{dim} 维"):
+        return
+
+    # 让 service 用这个模型（正常情况下从 endpoint 表解析）
+    async def resolve(_db: Any) -> ResolvedModel:
+        return resolved
+
+    memory.resolve_embedding_model = resolve  # type: ignore[assignment]
+
+    await reset_agent(db)
+    await memory.init_agent(AGENT_ID, db=db)
+    scope = MemoryScope(agent_id=AGENT_ID)
+
+    # 写三条语义上明显不同的记忆
+    written = []
+    for topic, content in (
+        ("testing", "- 用 pytest -q 跑测试，看完整报告"),
+        ("database", "- 数据库迁移用 alembic，SQLite 要 batch 模式"),
+        ("cooking", "- 喜欢吃川菜，尤其是水煮鱼"),
+    ):
+        r = await memory.write(scope, "preferences", {"topic": topic, "content": content}, db=db)
+        written.append(r.uri)
+
+    # 只增类型也要向量化 —— 这是核心验证点
+    traj = await memory.write(scope, "trajectories", {
+        "trajectory_name": "async_hang_fix",
+        "task_query": "修复异步测试挂住的问题",
+        "outcome": "success",
+        "retrieval_anchor": "场景：异步测试挂住不返回；能力：定位被吞掉的 CancelledError",
+        "content": "- 步骤：\n  1. 检查 except 范围",
+    }, db=db)
+    written.append(traj.uri)
+
+    report = await memory.vectorize(db, written)
+    print(f"{INFO} {report.summary()}")
+    checks.add(report.succeeded == len(written), "全部记忆向量化成功", report.summary())
+    checks.add(report.dim == dim, "向量维度与探测一致", f"{report.dim} vs {dim}")
+
+    # 只增类型确实有向量
+    row = await _index_row(db, traj.uri)
+    checks.add(
+        row is not None and row.embedding is not None,
+        "只增类型（trajectories）也被向量化",
+    )
+    if row is not None:
+        checks.add(
+            row.embedded_hash == row.content_hash,
+            "embedded_hash 与 content_hash 一致",
+        )
+
+    # 语义搜索：查"单元测试怎么跑"该命中 testing 而不是 cooking
+    hits = await memory.search_semantic(db, scope, "单元测试应该怎么运行")
+    if checks.add(bool(hits), "语义搜索返回结果", f"{len(hits)} 条"):
+        top = hits[0]
+        print(f"{INFO} 命中排序：{[(h.title, round(h.score, 3)) for h in hits[:4]]}")
+        checks.add(
+            top.title == "testing",
+            "语义最相关的排第一",
+            f"实际第一：{top.title}（{top.score:.3f}）",
+        )
+        cooking = next((h for h in hits if h.title == "cooking"), None)
+        checks.add(
+            cooking is None or cooking.score < top.score,
+            "无关记忆的分数更低",
+            f"cooking={cooking.score:.3f}" if cooking else "未命中",
+        )
+
+    # 只增类型能被召回
+    traj_hits = await memory.search_semantic(db, scope, "异步测试卡住不返回怎么查")
+    checks.add(
+        any(h.uri == traj.uri for h in traj_hits),
+        "只增类型能被语义召回",
+        f"{[h.title for h in traj_hits[:3]]}",
+    )
+
+    # 会话隔离。
+    #
+    # 【必须用 scope: session 的类型】。第一版我用了 preferences，
+    # 但它是 scope: agent —— 写它时 session_id 被正确忽略，
+    # 于是"其他会话也能搜到"是对的行为，而断言失败看起来像隔离坏了。
+    # events 才是会话级的。
+    ev_scope = MemoryScope(agent_id=AGENT_ID, session_id="ses_isolation")
+    ev = await memory.write(
+        ev_scope,
+        "events",
+        {
+            "event_name": "session_only_fact",
+            "goal": "记一个只属于本会话的事实",
+            "summary": "本次会话确认了一个只属于这个会话的临时约定。",
+            "outcome": "success",
+            "ranges": "0",
+        },
+        db=db,
+        extract_context=_isolation_ctx(),
+    )
+    await memory.vectorize(db, [ev.uri])
+
+    from_own = await memory.search_semantic(db, ev_scope, "本会话的临时约定")
+    from_other = await memory.search_semantic(
+        db, MemoryScope(agent_id=AGENT_ID, session_id="ses_other"), "本会话的临时约定"
+    )
+    checks.add(any(h.uri == ev.uri for h in from_own), "本会话能搜到自己的会话级记忆")
+    checks.add(
+        not any(h.uri == ev.uri for h in from_other),
+        "会话级记忆对其他会话不可见",
+        f"其他会话命中了 {[h.title for h in from_other]}",
+    )
+    # agent 级查询也不该看到任何会话记忆
+    from_agent = await memory.search_semantic(db, scope, "本会话的临时约定")
+    checks.add(
+        not any(h.uri == ev.uri for h in from_agent),
+        "agent 级查询不含会话记忆",
+    )
+
+    # 换模型 → 旧向量失效 → 一键重算恢复
+    stats_before = await memory.vector_status(db)
+    print(f"{INFO} 换模型前：{stats_before}")
+
+    fake_other = ResolvedModel(
+        model_id=model_id + "-v2", base_url=base, api_key=key, purpose="embedding"
+    )
+
+    async def resolve_other(_db: Any) -> ResolvedModel:
+        return fake_other
+
+    memory.resolve_embedding_model = resolve_other  # type: ignore[assignment]
+    stats_after = await memory.vector_status(db)
+    checks.add(
+        stats_after["model"] > 0,
+        "换模型后旧向量被标记为失效",
+        f"{stats_after['model']} 条",
+    )
+    checks.add(
+        await memory.search_semantic(db, scope, "测试") == [],
+        "换模型后旧向量停止参与召回",
+    )
+
+    # 换回来并重算
+    memory.resolve_embedding_model = resolve  # type: ignore[assignment]
+    rebuild = await memory.revectorize(db, only_stale=False)
+    print(f"{INFO} 一键重算：{rebuild.summary()}")
+    checks.add(rebuild.succeeded > 0, "一键重算成功", rebuild.summary())
+    checks.add(
+        bool(await memory.search_semantic(db, scope, "单元测试怎么跑")),
+        "重算后召回恢复",
+    )
+
+    cleared = await memory.clear_vectors(db)
+    checks.add(cleared > 0, "清空向量", f"{cleared} 条")
+    checks.add(
+        await memory.search_semantic(db, scope, "测试") == [],
+        "清空后语义搜索返回空（回落关键词）",
+    )
+    # 记忆文件本身不受影响
+    checks.add(
+        await memory.read_uri(written[0]) is not None,
+        "清空向量不影响记忆文件",
+    )
+    _ = vec  # 保持 import 显式，说明这段验证的是 vectorize 模块
+
+
+def _isolation_ctx() -> Any:
+    """events 的日期路径需要 extract_context。手工构造一个最小的。"""
+    from app.modules.agent.messages import Msg
+    from app.modules.memory.extract_context import from_messages
+
+    return from_messages(
+        [Msg(role="user", content="这个约定只在本次会话有效")], [1786608000000]
+    )
+
+
+async def _index_row(db: Any, uri: str) -> Any:
+    from app.modules.memory.models_db import MemoryIndex
+    from sqlalchemy import select
+
+    return (
+        await db.execute(select(MemoryIndex).where(MemoryIndex.uri == uri))
+    ).scalars().one_or_none()
+
+
+async def dump_and_cleanup(db: Any, *, keep: bool) -> None:
+    from app.modules.memory import layout
+    from app.modules.session.models import Session
+    from sqlalchemy import select
+
+    print(f"\n{'=' * 78}\n产出的记忆\n{'=' * 78}")
+    root = layout.memory_root()
+    for path in sorted(root.rglob("*.md")):
+        rel = path.relative_to(root).as_posix()
+        if AGENT_ID not in rel and "global" not in rel:
+            continue
+        print(f"\n----- {rel} -----")
+        print(path.read_text(encoding="utf-8").rstrip()[:1800])
+
+    trace_dir = root / "agents" / AGENT_ID / ".trace"
+    if trace_dir.is_dir():
+        print(f"\n痕迹文件：{len(list(trace_dir.glob('*.json')))} 个")
+
+    if keep:
+        print(f"\n--keep：产物保留在 {root}")
+        return
+
+    rows = (await db.execute(select(Session).where(Session.agent_id == AGENT_ID))).scalars().all()
+    await reset_agent(db)
+    print(f"\n已清理 {len(rows)} 个会话 + {AGENT_ID} 的记忆")
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser(description="记忆提取的真实模型验证")
+    parser.add_argument("--eager", action="store_true", help="只跑 eager 模式")
+    parser.add_argument("--lazy", action="store_true", help="只跑 lazy（工具调用）模式")
+    parser.add_argument("--keep", action="store_true", help="保留产物")
+    parser.add_argument(
+        "--embedding",
+        action="store_true",
+        help="只验证向量化与语义搜索（用 VERIFY_EMBEDDING_* 配的嵌入模型）",
+    )
+    args = parser.parse_args()
+
+    env = load_env(PROJECT_ROOT / ".env.verify")
+    checks = Checks()
+
+    from app.infra.db.session import get_sessionmaker
+
+    # 只验向量时不需要对话模型 —— 那能省掉几分钟的提取等待
+    if args.embedding:
+        maker = get_sessionmaker()
+        async with maker() as db:
+            try:
+                await verify_embedding(db, env, checks)
+            finally:
+                await reset_agent(db)
+        raise SystemExit(0 if checks.report() else 1)
+
+    llm_call = await build_llm_call(env, checks)
+
+    modes: list[bool] = []
+    if args.eager or not args.lazy:
+        modes.append(True)
+    if args.lazy or not args.eager:
+        modes.append(False)
+
+    maker = get_sessionmaker()
+    async with maker() as db:
+        try:
+            for eager in modes:
+                await verify_mode(db, eager=eager, llm_call=llm_call, checks=checks)
+                if len(modes) > 1:
+                    # 模式之间【连会话一起清】。
+                    #
+                    # 只 drop_agent 会留下上一模式的会话行，于是第二种模式
+                    # 又导入一份同样的对话 —— 而记忆虽然被删了，模型看到的是
+                    # "这段对话我刚处理过"的重复内容，可能判断"没有新东西可记"。
+                    #
+                    # 实测踩到：lazy 模式首次提取产出 0 条，看起来像 lazy 有 bug，
+                    # 实际是它对着第二份重复会话做了正确判断。
+                    await reset_agent(db)
+            await verify_embedding(db, env, checks)
+            await dump_and_cleanup(db, keep=args.keep)
         finally:
-            await c.delete(f"{BASE}/api/providers/{pid}")
-            print("（已清理测试端点）")
+            # stats 挂在 llm_call 上（build_llm_call 里的闭包），
+            # 不是 main 的局部变量 —— 直接写 stats[...] 会 NameError。
+            s = llm_call.stats
+            print(
+                f"\nLLM 调用 {s['rounds']} 轮（其中 {s['tool_rounds']} 轮返回工具调用），"
+                f"推理约 {s['reasoning_chars']} 字符"
+            )
+
+    raise SystemExit(0 if checks.report() else 1)
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    asyncio.run(main())

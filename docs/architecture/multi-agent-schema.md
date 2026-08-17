@@ -1,4 +1,4 @@
-# 多智能体系统 — 数据库 Schema v2
+﻿# 多智能体系统 — 数据库 Schema v2
 
 > 状态：agent_defs 已实现（`backend/app/modules/agent/models.py`）。agent_groups 表尚未实现，见 [multi-agent-roadmap.md](multi-agent-roadmap.md)。
 
@@ -29,8 +29,6 @@ CREATE TABLE agent_defs (
     permission_subagent  INTEGER NOT NULL DEFAULT 0,
 
     -- 验证增强（v2 — 每智能体独立，默认关闭）
-    verification_enabled INTEGER NOT NULL DEFAULT 0,
-    strict_mode          INTEGER NOT NULL DEFAULT 0,
 
     -- 系统字段
     hidden     INTEGER NOT NULL DEFAULT 0,   -- 1=不在选择列表中显示
@@ -60,45 +58,11 @@ CREATE TABLE agent_defs (
 
 ---
 
-## memory 表改动
+## 记忆隔离
 
-```sql
--- v2 新增
-ALTER TABLE memory ADD COLUMN agent_id TEXT;
+记忆改用文件记忆系统（`memory/` 模块），按 `agent_id` 目录隔离 —— 每个智能体有自己的记忆目录，天然隔离，不需要给表加 `agent_id` 列。
 
--- 查询示例
--- 用户 profile（跨智能体）
-SELECT * FROM memory WHERE target='user';
-
--- 智能体「代码审查员」的跨会话记忆
-SELECT * FROM memory WHERE target='agent' AND agent_id='adf_xxx';
-
--- 当前会话中「代码审查员」的记忆
-SELECT * FROM memory WHERE target='session'
-  AND session_id='ses_xxx' AND agent_id='adf_xxx';
-```
-
-### 记忆查询示例
-
-```sql
--- 用户 profile（跨智能体共享，agent_id 为空串）
-SELECT * FROM memory WHERE agent_id='';
-
--- 当前会话中当前智能体的记忆
-SELECT * FROM memory WHERE session_id='ses_xxx' AND agent_id='adf_xxx';
-
--- 查询时同时获取共享记忆和本智能体记忆
-SELECT * FROM memory WHERE agent_id IN ('', 'adf_xxx');
-```
-
-### 验证智能体的记忆
-
-验证智能体是独立实例，有自己的 `verification_agent_id`（存储在 `agent_defs.verification_agent_id`）。记忆条目用该 ID 存储：
-
-```sql
-INSERT INTO memory (agent_id, session_id, content)
-VALUES ('adf_verification_xxx', 'ses_xxx', '该智能体步骤 2 执行成功...');
-```
+验证智能体是独立实例，有自己的记忆目录（`data/memory/<agent_id>/`）。
 
 ---
 

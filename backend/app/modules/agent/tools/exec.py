@@ -121,20 +121,7 @@ def _format(result: ExecResult, *, what: str) -> ToolResult:
 
 class RunShellTool:
     name = "run_shell"
-    description = (
-        "在工作区执行一条 shell 命令（Windows 上是 PowerShell，"
-        "Linux/macOS 上是 bash），返回合并后的 stdout 与 stderr。\n"
-        "\n"
-        "注意：\n"
-        "- 输出过长会只保留末尾若干行，完整输出会写到临时文件并在结果里给出路径，"
-        "需要时可以用 read_file 读它\n"
-        "- 命令不能读取标准输入，交互式命令（等 y/n 确认的）会直接拿到 EOF，"
-        "请改用非交互参数，例如 -y / --yes / --non-interactive\n"
-        "- 超时会终止该命令及其全部子进程\n"
-        "- 每次调用都是独立的进程，`cd` 不会影响下一次调用；"
-        "需要切目录请用 cwd 参数，或者在一条命令里用 `;` 连接"
-    )
-    # 一条命令能做的事没有上界，路径白名单在这里帮不上忙。
+    description = "执行 shell 命令。用 ; 连接多条，用 cwd 指定工作目录。命令必须非交互（不能读 stdin，加 -y/--yes）。"
     requires_approval = True
 
     def parameters(self) -> dict[str, Any]:
@@ -212,16 +199,7 @@ class RunShellTool:
 
 class RunPythonTool:
     name = "run_python"
-    description = (
-        "执行一段 Python 代码。代码会被写成临时文件后用子进程运行，"
-        "返回合并后的 stdout 与 stderr。\n"
-        "\n"
-        "注意：\n"
-        "- 每次调用是全新的进程，变量与导入不跨调用保留\n"
-        "- 不能读取标准输入（input() 会拿到 EOF）\n"
-        "- 需要保留的代码请用 write_file 写成正式文件，"
-        "这个工具适合一次性的计算、验证、探查"
-    )
+    description = "执行 Python 代码。子进程运行，变量与导入不跨调用保留。"
     requires_approval = True
 
     def parameters(self) -> dict[str, Any]:

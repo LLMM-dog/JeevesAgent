@@ -35,6 +35,7 @@ from app.modules.agent.tokens import count_text, count_tools
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.endpoint import service as ps
 from app.modules.endpoint.models import Endpoint, Model, ModelBinding
+from app.modules.endpoint.windows import detect_model_type
 from app.modules.session.models import Session
 from app.modules.skill import registry as skill_registry
 from app.modules.skill import state as skill_state
@@ -47,13 +48,16 @@ router = APIRouter(tags=["模型与人格"])
 
 # 功能位的中文名。
 #
-# 错误信息里要说清是哪个功能在用这个模型 —— 只报 chat 的话
+# 错误信息和日志里要说清是哪个功能在用这个模型 —— 只报 chat 的话
 # 用户还得自己去对照设置页才知道那是什么。
 _PURPOSE_CN = {
     "chat": "对话",
     "vision": "看图",
     "title": "标题",
     "compact": "压缩",
+    "embedding": "向量化",
+    "memory": "记忆提取",
+    "memory_rerank": "重排序",
 }
 
 
@@ -68,6 +72,7 @@ def _out(m: Model, endpoint_name: str = "") -> ModelOut:
         window_source=m.window_source,
         supports_vision=m.supports_vision,
         supports_tools=m.supports_tools,
+        model_type=m.model_type,
         enabled=bool(m.enabled),
         price_in_per_1m=m.price_in_per_1m,
         price_out_per_1m=m.price_out_per_1m,
@@ -109,6 +114,7 @@ async def add_model(body: ModelCreate, db: AsyncSession = Depends(get_db)) -> Mo
         display_name=body.display_name or "",
         context_window=body.context_window,
         window_source="manual",
+        model_type=body.model_type or detect_model_type(mid),
         enabled=1,
     )
     db.add(m)
@@ -139,14 +145,11 @@ async def patch_model(
     if "enabled" in data and data["enabled"] is not None:
         want = bool(data["enabled"])
         if not want:
-            # 【禁用被功能位绑定的模型要拒绝】。
+            # 【禁用被功能位绑定的模型 → 自动解绑】。
             #
-            # 删除有这个检查，禁用却没有 —— 而后果是一样的：那个功能位
-            # 指向一个禁用的模型，下次对话报错或静默降级，而用户只是
-            # "把一个看起来没在用的模型关掉了"，完全联系不起来。
-            #
-            # 尤其是对话位：禁用它等于让整个应用不能对话，
-            # 而报错信息不会提"你刚才禁用了它"。
+            # 禁用 = "我暂时不用这个模型"，那它占着的功能位就该自动腾出来，
+            # 而不是让用户先去设置页手动换模型再回来禁用。功能位解绑后
+            # 变空，下次用到会回落或提示未配置，而不是静默指向一个禁用的模型。
             bound = list(
                 (
                     await db.execute(
@@ -156,10 +159,13 @@ async def patch_model(
             )
             if bound:
                 used = "、".join(_PURPOSE_CN.get(b.purpose, b.purpose) for b in bound)
-                raise ConflictError(
-                    f"这个模型正被【{used}】使用，禁用会让那些功能不可用。"
-                    "先在下面的功能位绑定里换成别的模型。",
-                    code="model_in_use",
+                for b in bound:
+                    await db.delete(b)
+                log.info(
+                    "model_disabled_unbound",
+                    model_pk=model_pk,
+                    model_id=m.model_id,
+                    bindings=used,
                 )
         m.enabled = 1 if want else 0
     if "display_name" in data and data["display_name"] is not None:
@@ -169,10 +175,41 @@ async def patch_model(
             raise BadRequestError("上下文窗口太小", code="window_too_small")
         m.context_window = data["context_window"]
         m.window_source = "manual"
+    if "endpoint_id" in data and data["endpoint_id"] is not None:
+        # 拖动改分组：把模型移到另一个端点。
+        #
+        # 绑定引用的是 model_pk（模型主键），跨端点移动不影响绑定 ——
+        # 只是这个模型以后用新端点的 base_url + Key 来调。
+        want_ep = data["endpoint_id"]
+        if want_ep != m.endpoint_id:
+            target = (
+                await db.execute(select(Endpoint).where(Endpoint.id == want_ep))
+            ).scalars().first()
+            if target is None:
+                raise NotFoundError("目标分组不存在", code="endpoint_not_found")
+            dup = (
+                await db.execute(
+                    select(Model).where(
+                        Model.endpoint_id == want_ep, Model.model_id == m.model_id
+                    )
+                )
+            ).scalars().first()
+            if dup is not None:
+                raise ConflictError(
+                    f"分组「{target.name}」下已有同名模型 {m.model_id}",
+                    code="model_exists",
+                )
+            m.endpoint_id = want_ep
+    if "model_type" in data and data["model_type"] is not None:
+        m.model_type = data["model_type"]
     if "price_in_per_1m" in data:
         m.price_in_per_1m = data["price_in_per_1m"]
     if "price_out_per_1m" in data:
         m.price_out_per_1m = data["price_out_per_1m"]
+    if "supports_vision" in data and data["supports_vision"] is not None:
+        m.supports_vision = data["supports_vision"]
+    if "supports_tools" in data and data["supports_tools"] is not None:
+        m.supports_tools = data["supports_tools"]
 
     await db.commit()
     p = (
@@ -221,17 +258,17 @@ async def delete_model(
 
 
 @router.get(
-    "/providers/{provider_id}/available-models",
+    "/endpoints/{endpoint_id}/available-models",
     response_model=dict,
     summary="拉取端点可用的模型列表",
 )
 async def available_models(
-    provider_id: str, db: AsyncSession = Depends(get_db)
+    endpoint_id: str, db: AsyncSession = Depends(get_db)
 ) -> dict[str, object]:
     """
     用已存的 base_url + Key 去拉模型列表。
 
-    ## 为什么需要这个而不是复用 /providers/probe
+    ## 为什么需要这个而不是复用 /endpoints/probe
 
     那个要求请求体里带 base_url 和 api_key。而这里的场景是"往【已有】
     端点下加模型"—— 端点和 Key 都已经存过了，让用户再填一遍
@@ -240,10 +277,10 @@ async def available_models(
     ## 返回值里标出已添加的
 
     前端要能把已加过的置灰或打勾。不标的话用户点了才知道重复，
-    而重复添加会撞 (provider_id, model_id) 唯一索引。
+    而重复添加会撞 (endpoint_id, model_id) 唯一索引。
     """
     p_ = (
-        await db.execute(select(Endpoint).where(Endpoint.id == provider_id))
+        await db.execute(select(Endpoint).where(Endpoint.id == endpoint_id))
         ).scalars().first()
     if p_ is None:
         raise NotFoundError("端点不存在", code="endpoint_not_found")
@@ -251,7 +288,7 @@ async def available_models(
     have = {
         m.model_id
         for m in (
-            await db.execute(select(Model).where(Model.endpoint_id == provider_id))
+            await db.execute(select(Model).where(Model.endpoint_id == endpoint_id))
         ).scalars()
     }
 
@@ -270,6 +307,7 @@ async def available_models(
                 "context_window": m.context_window,
                 "window_source": m.window_source,
                 "looks_non_chat": m.looks_non_chat,
+                "model_type": m.model_type,
                 # 已经加过的，前端置灰
                 "already_added": m.model_id in have,
             }

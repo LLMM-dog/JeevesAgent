@@ -12,17 +12,18 @@
 | 目录 | 内容 |
 | --- | --- |
 | [architecture/](architecture/) | 系统设计：后端分层、agent loop、工具/事件/上下文/技能/沙箱/安全、数据层、前端架构、多智能体 |
-| [architecture/tools.md](architecture/tools.md) | 20 个内置工具能做什么 |
+| [architecture/tools.md](architecture/tools.md) | 16 个内置工具能做什么 |
 | [architecture/execution.md](architecture/execution.md) | 命令执行与审批。**安全边界写在开头，动手前先看** |
 | [architecture/skills.md](architecture/skills.md) | 技能与宏：三级渐进披露、上传校验、模型自己建技能 |
 | [architecture/cron.md](architecture/cron.md) | 定时任务：调度、错过窗口、时区、无头执行 |
 | [architecture/context.md](architecture/context.md) | 上下文：占用计算、压缩时机与预算 |
+| [architecture/memory.md](architecture/memory.md) | 记忆系统：三层隔离（全局/智能体/会话）、peer、存储形态、merge 语义 |
+| [architecture/memory-schema.md](architecture/memory-schema.md) | 记忆类型 YAML：字段说明、内置 10 种类型、如何自己加一种 |
 | [architecture/multi-agent-roadmap.md](architecture/multi-agent-roadmap.md) | 多智能体路线图：验证增强、编排、技能进化 |
 | [api/](api/) | HTTP 接口、SSE 事件协议 |
 | [guides/](guides/) | 产品定位、术语表 |
 | [development/](development/) | 环境搭建、代码规范、测试策略 |
 | [adr/](adr/) | 架构决策记录（ADR）。为什么选了 A 而不是 B |
-| [research/harness/](research/harness/) | 驾驭工程开源项目调研。Pi/OpenCode/Claude Code/Aider/Goose/Cline/Codex CLI/Hermes 的架构对比 |
 
 ## 全局硬约束速查
 

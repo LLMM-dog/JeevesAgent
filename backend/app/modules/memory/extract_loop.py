@@ -118,12 +118,16 @@ class ExtractLoop:
         extract_context: ExtractContext,
         max_iterations: int | None = None,
         tool_runner: ToolRunner,
+        is_first_agent: bool = False,
+        archive_overview: str = "",
     ):
         self._call = llm_call
         self._schemas = [s for s in schemas if s.llm_fields()]
         self._pre = prefetched
         self._ctx = extract_context
         self._max = max_iterations or settings.memory.extract_max_iterations
+        self._is_first_agent = is_first_agent
+        self._archive_overview = archive_overview  # 上次归档的摘要
 
         # 工具永远可用（参考 OpenViking）
         self._tools = tool_runner
@@ -146,7 +150,7 @@ class ExtractLoop:
         outcome = ExtractOutcome()
 
         # System prompt
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt()},
         ]
 
@@ -168,31 +172,38 @@ class ExtractLoop:
 分析对话并探索已有记忆，然后输出所有记忆操作的 JSON。"""
         })
 
-        # 预取结果：tool call/result 形式注入
+        # 预取结果：以 OpenAI 兼容格式的 tool call/result 注入。
+        #
+        # 【不能用 Anthropic 格式】。下游 stream_chat 走 OpenAI 兼容协议，
+        # Anthropic 的 content=[{"type":"tool_use"}] 发给 OpenAI 端点会 400。
         prefetch_tool_calls = self._pre.render_as_tool_calls()
         for tc in prefetch_tool_calls:
             # Assistant 的 tool call
             messages.append({
                 "role": "assistant",
-                "content": [
+                "content": "",
+                # thinking mode 模型（DeepSeek 推理模型）要求 assistant 带
+                # tool_calls 时必须传回 reasoning_content，否则 400。
+                # 预取注入是伪造的工具调用历史，没有真实 reasoning，传空串。
+                "reasoning_content": "",
+                "tool_calls": [
                     {
-                        "type": "tool_use",
                         "id": tc["tool_call"]["id"],
-                        "name": tc["tool_call"]["name"],
-                        "input": tc["tool_call"]["arguments"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["tool_call"]["name"],
+                            "arguments": json.dumps(
+                                tc["tool_call"]["arguments"], ensure_ascii=False
+                            ),
+                        },
                     }
-                ]
+                ],
             })
             # Tool result
             messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tc["tool_result"]["call_id"],
-                        "content": tc["tool_result"]["content"],
-                    }
-                ]
+                "role": "tool",
+                "tool_call_id": tc["tool_result"]["call_id"],
+                "content": tc["tool_result"]["content"],
             })
 
         iteration = 0
@@ -212,11 +223,11 @@ class ExtractLoop:
             if not is_last:
                 self._disable_tools_this_round = False
 
-            raw, tool_calls = _split_reply(reply)
+            raw, tool_calls, reasoning = _split_reply(reply)
 
             # 分支 A：模型要调工具 → 执行、把结果拼回消息、继续
             if tool_calls:
-                results = await self._run_tools(messages, tool_calls)
+                results = await self._run_tools(messages, tool_calls, reasoning)
                 outcome.tools_used.extend(results)
                 outcome.steps.append(
                     LoopStep(iteration, "tool_call", ",".join(c.name for c in tool_calls))
@@ -316,7 +327,7 @@ class ExtractLoop:
     # ── 工具执行 ──────────────────────────────────
 
     async def _run_tools(
-        self, messages: list[dict[str, Any]], calls: list[ToolCall]
+        self, messages: list[dict[str, Any]], calls: list[ToolCall], reasoning: str = ""
     ) -> list[dict[str, Any]]:
         """
         并行执行工具调用，把 assistant + tool 消息拼回列表。
@@ -331,23 +342,30 @@ class ExtractLoop:
         assistant 消息带 tool_calls，后面【每个 call 都要有】对应的
         tool 消息。缺一条的话下一轮请求会被上游拒绝（400），
         而错误信息只说"messages 格式不对"，看不出是少了哪条。
+
+        ## reasoning_content
+
+        thinking mode 模型（DeepSeek 推理模型等）要求 assistant 带
+        tool_calls 时传回 reasoning_content，否则下一轮 400。所以这里把
+        上一轮模型产出的 reasoning 原样带上。
         """
         results = await asyncio.gather(*(self._tools.execute(c) for c in calls))
 
-        messages.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": c.call_id,
-                        "type": "function",
-                        "function": {"name": c.name, "arguments": c.arguments},
-                    }
-                    for c in calls
-                ],
-            }
-        )
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": c.call_id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": c.arguments},
+                }
+                for c in calls
+            ],
+        }
+        if reasoning:
+            assistant_msg["reasoning_content"] = reasoning
+        messages.append(assistant_msg)
         used: list[dict[str, Any]] = []
         for call, text in zip(calls, results, strict=True):
             messages.append({"role": "tool", "tool_call_id": call.call_id, "content": text})
@@ -360,8 +378,45 @@ class ExtractLoop:
         types_desc = "\n\n".join(
             f"### {s.memory_type}\n{s.description.strip()}" for s in self._schemas
         )
+
+        # 第一个智能体需要特殊说明
+        multi_agent_note = ""
+        if self._is_first_agent:
+            multi_agent_note = """
+
+# 多智能体协作说明
+
+你是本会话中【第一个】执行记忆提取的智能体。你的职责：
+- **Global 记忆**：系统级配置、全局设置，所有智能体共享
+- **Session 记忆**：会话级事件、摘要，本会话所有智能体共享
+- **Agent 记忆**：你自己的偏好、经验，只有你能访问
+
+其他智能体会并行提取他们自己的 Agent 记忆，但不会修改 Global 和 Session 记忆。
+你需要协调会话级的记忆，避免重复或冲突。"""
+
+        # 归档摘要（上次提取的工作记忆）
+        archive_section = ""
+        if self._archive_overview:
+            # 截断归档摘要避免占用过多 token
+            overview_preview = self._archive_overview[:2000]
+            if len(self._archive_overview) > 2000:
+                overview_preview += f"\n\n（摘要被截断，完整内容约 {len(self._archive_overview)} 字符）"
+
+            archive_section = f"""
+
+# 上次提取的工作记忆
+
+这是上次记忆提取后生成的工作记忆摘要，帮助你了解"已经记过什么"：
+
+{overview_preview}
+
+【重要】：基于这个摘要判断哪些内容已经记过、哪些是新的。
+避免重复提取已有的信息，专注于新增或变化的部分。"""
+
         return f"""\
 你是一个记忆提取器。从对话中提取值得【长期记住】的内容。
+{multi_agent_note}
+{archive_section}
 
 # 总原则
 - 宁缺勿滥。不确定是否值得记就不记
@@ -591,21 +646,27 @@ _FORMAT_ERROR = (
 )
 
 
-def _split_reply(reply: Any) -> tuple[str, list[ToolCall]]:
+def _split_reply(reply: Any) -> tuple[str, list[ToolCall], str]:
     """
-    把 llm_call 的返回拆成 (文本, 工具调用)。
+    把 llm_call 的返回拆成 (文本, 工具调用, reasoning)。
 
-    ## 为什么接受两种形状
+    ## 为什么接受多种形状
 
     - `str` —— 不支持/不需要工具的调用方（含测试里的假 LLM）
-    - `(text, tool_calls)` —— 支持工具的调用方
+    - `(text, tool_calls)` —— 旧式支持工具的调用方
+    - `(text, tool_calls, reasoning)` —— thinking mode 模型，reasoning 要
+      作为 reasoning_content 传回下一轮，否则 DeepSeek 等推理模型 400
 
-    兼容两种返回格式，让只测解析逻辑的测试能直接返回字符串。
+    兼容这些形状，让只测解析逻辑的测试能直接返回字符串或二元组。
     """
-    if isinstance(reply, tuple) and len(reply) == 2:
-        text, calls = reply
-        return str(text or ""), list(calls or [])
-    return str(reply or ""), []
+    if isinstance(reply, tuple):
+        if len(reply) == 3:
+            text, calls, reasoning = reply
+            return str(text or ""), list(calls or []), str(reasoning or "")
+        if len(reply) == 2:
+            text, calls = reply
+            return str(text or ""), list(calls or []), ""
+    return str(reply or ""), [], ""
 
 
 def _parse_json(raw: str) -> dict[str, Any] | None:

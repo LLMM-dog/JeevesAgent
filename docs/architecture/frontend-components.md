@@ -79,7 +79,6 @@ src/
 | `SkillsPanel` | 技能：上传 zip、删除、重扫、**逐项开关**、诊断展示 |
 | `MacroPanel` | 宏：新建、编辑、删除、重扫 |
 | `McpPanel` | MCP：服务器状态、工具清单与 token 成本、**逐项开关**、待确认命令 |
-| `MemoryPanel` | 记忆列表、在线编辑、变更历史、召回探针 |
 | `PersonaPanel` | 三份人设的在线编辑 |
 | `WhitelistPanel` | 路径白名单 |
 | `WorkDirPicker` | 工作目录选择，走 `GET /api/browse` |

@@ -126,6 +126,58 @@ def test_tool_schemas_use_page_id_not_uri() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prefetch_injected_as_openai_format(ready: AsyncSession) -> None:
+    """
+    预取结果必须用 OpenAI 格式注入，Anthropic 格式会让 OpenAI 端点返回 400。
+
+    下游 stream_chat 走 OpenAI 兼容协议，tool 调用必须是：
+      assistant: {tool_calls: [{type:"function", function:{arguments: "<json 字符串>"}}]}
+      tool:      {role:"tool", tool_call_id: "..."}
+    而不是 Anthropic 的 content=[{"type":"tool_use"}] / content=[{"type":"tool_result"}]。
+    """
+    pre = await prefetch(MemoryScope(agent_id=AGENT, session_id="ses_t"), eager=False)
+    runner = ToolRunner(scope=MemoryScope(agent_id=AGENT, session_id="ses_t"), pages=pre.pages)
+    llm = ToolLLM("{}")
+    await ExtractLoop(
+        llm_call=llm,
+        schemas=registry.get_schemas().enabled(),
+        prefetched=pre,
+        extract_context=from_messages([Msg(role="user", content="hi")], [1786608000000]),
+        tool_runner=runner,
+    ).run()
+
+    msgs = llm.calls[0]
+
+    # 1. 不允许出现 Anthropic 的 tool_use / tool_result 块。
+    for m in msgs:
+        content = m.get("content")
+        if isinstance(content, list):
+            for item in content:
+                assert isinstance(item, dict)
+                assert item.get("type") not in ("tool_use", "tool_result"), (
+                    "预取注入用了 Anthropic 格式，OpenAI 端点会返回 400"
+                )
+
+    # 2. 预取注入应产生带 tool_calls 的 assistant 消息，且 arguments 是 JSON 字符串。
+    assistant_tool_msgs = [
+        m for m in msgs if m.get("role") == "assistant" and m.get("tool_calls")
+    ]
+    assert assistant_tool_msgs, "预取注入应产生带 tool_calls 的 assistant 消息"
+    for m in assistant_tool_msgs:
+        for tc in m["tool_calls"]:
+            assert tc["type"] == "function"
+            args = tc["function"]["arguments"]
+            assert isinstance(args, str), "arguments 必须是 JSON 字符串，不能是 dict"
+            json.loads(args)
+
+    # 3. 结果必须是 role=tool + tool_call_id，而不是 role=user 的 tool_result。
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert tool_msgs, "预取注入应产生 role=tool 的结果消息"
+    for m in tool_msgs:
+        assert m.get("tool_call_id")
+
+
+@pytest.mark.asyncio
 async def test_list_memories_returns_titles_and_page_ids(runner: ToolRunner) -> None:
     out = await runner.execute(_tc("list_memories", memory_type="preferences"))
 
@@ -311,7 +363,7 @@ async def test_prefetch_reads_agent_and_session_tiers_separately(
     """
     会话提取要【同时】拿到 agent 级和 session 级的记忆，各从自己的目录读。
 
-    两者路径不同（agents/X/preferences vs agents/X/sessions/Y/entities），
+    两者路径不同（agents/X/preferences vs sessions/Y/entities），
     漏掉任一层都会让模型看不到已有记忆而新建重复的。
     """
     scope = MemoryScope(agent_id=AGENT, session_id="ses_t")
@@ -324,8 +376,8 @@ async def test_prefetch_reads_agent_and_session_tiers_separately(
     pre = await prefetch(scope)
 
     uris = {i.uri for items in pre.by_type.values() for i in items}
-    assert any("/sessions/ses_t/" in u for u in uris), "缺 session 级记忆"
-    assert any("/preferences/" in u and "/sessions/" not in u for u in uris), "缺 agent 级记忆"
+    assert any(u.startswith("sessions/ses_t/") for u in uris), "缺 session 级记忆"
+    assert any("/preferences/" in u and "sessions/" not in u for u in uris), "缺 agent 级记忆"
 
 
 @pytest.mark.asyncio
@@ -448,6 +500,9 @@ async def test_tool_call_messages_are_properly_paired(ready: AsyncSession) -> No
     """
     assistant(tool_calls) 后面每个 call 都要有对应的 tool 消息。
     缺一条的话下一轮请求会被上游拒绝（400），而错误只说"格式不对"。
+
+    预取注入和模型发起的工具调用都走 OpenAI 的 tool_calls 格式，
+    所以这里验证【整条序列】的配对完整性，而不是只看某一组。
     """
     pre = await prefetch(MemoryScope(agent_id=AGENT, session_id="ses_t"), eager=False)
     runner = ToolRunner(scope=MemoryScope(agent_id=AGENT, session_id="ses_t"), pages=pre.pages)
@@ -458,13 +513,32 @@ async def test_tool_call_messages_are_properly_paired(ready: AsyncSession) -> No
     )
     await _loop(llm, runner, pre)
 
-    second_round = llm.calls[1]
-    assistant = next(m for m in second_round if m.get("role") == "assistant" and m.get("tool_calls"))
-    tool_msgs = [m for m in second_round if m.get("role") == "tool"]
+    # 每一轮发给 LLM 的消息都必须满足配对约束
+    for round_msgs in llm.calls:
+        i = 0
+        n = len(round_msgs)
+        while i < n:
+            m = round_msgs[i]
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                ids = [c["id"] for c in m["tool_calls"]]
+                j = i + 1
+                following = []
+                while j < n and round_msgs[j].get("role") == "tool":
+                    following.append(round_msgs[j].get("tool_call_id"))
+                    j += 1
+                assert following == ids, f"tool 配对错误: 期望 {ids} 实际 {following}"
+                i = j
+                continue
+            assert m.get("role") != "tool", f"孤立的 tool 消息: {m.get('tool_call_id')}"
+            i += 1
 
-    assert len(assistant["tool_calls"]) == 2
-    assert len(tool_msgs) == 2
-    assert {m["tool_call_id"] for m in tool_msgs} == {c["id"] for c in assistant["tool_calls"]}
+    # 第二轮必须包含模型发起的两个 list_memories 调用
+    second_round = llm.calls[1]
+    last_assistant = next(
+        m for m in reversed(second_round)
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    assert len(last_assistant["tool_calls"]) == 2
 
 
 @pytest.mark.asyncio

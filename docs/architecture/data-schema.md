@@ -21,7 +21,6 @@ SQLite + SQLAlchemy 2.0 async + Alembic。
 | `prv_` | provider |
 | `mdl_` | model |
 | `bnd_` | model_binding |
-| `mem_` | memory |
 | `att_` | attachment |
 | `wsp_` | workspace |
 | `pth_` | path_whitelist |
@@ -50,9 +49,11 @@ class TimestampMixin:
     updated_at: int   # now_ms()，每次更新时刷新
 ```
 
-**不做软删除。** `deleted` 字段只在企业审计场景下有意义。个人项目里软删除只带来"每个查询都要记得加 `WHERE deleted=0`"的负担，忘一次就出 bug。真删。
+**默认真删，例外才软删除。** 个人项目里软删除只带来"每个查询都要记得加 `WHERE deleted=0`"的负担，忘一次就出 bug。
 
-例外：`todo` 有 `archived_at`（验收关闭后归档但可查历史）。
+例外：
+- `todo` 有 `archived_at`（验收关闭后归档但可查历史）。
+- `agent_defs` 有 `deleted_at`（用户删了智能体，历史会话消息还引用它的 id，留着行好显示名字）。
 
 ### 枚举存字符串
 
@@ -64,12 +65,16 @@ class TimestampMixin:
 CREATE TABLE session (
     id              TEXT PRIMARY KEY,
     title           TEXT NOT NULL DEFAULT '',
+    work_dir        TEXT NOT NULL DEFAULT '',      -- 会话级工作目录，空=跟随工作区默认
+    model_pk        TEXT NOT NULL DEFAULT '',      -- 会话选的模型，空=跟随功能位绑定
+    agent_ids       TEXT NOT NULL DEFAULT '[]',    -- JSON 数组，参与会话的智能体
     workspace_id    TEXT NOT NULL,
     pinned          INTEGER NOT NULL DEFAULT 0,
     approval_mode   TEXT NOT NULL DEFAULT 'manual',   -- manual | auto
     private_mode    INTEGER NOT NULL DEFAULT 0,
     amnesia_mode    INTEGER NOT NULL DEFAULT 0,
     vision_mode     INTEGER NOT NULL DEFAULT 0,
+    stream_enabled  INTEGER NOT NULL DEFAULT 1,
     last_message_at INTEGER NOT NULL DEFAULT 0,
     message_count   INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
@@ -220,8 +225,7 @@ CREATE TABLE agent_defs (
     permission_shell     INTEGER NOT NULL DEFAULT 0,
     permission_network   INTEGER NOT NULL DEFAULT 0,
     permission_subagent  INTEGER NOT NULL DEFAULT 0,
-    verification_enabled INTEGER NOT NULL DEFAULT 0,
-    strict_mode          INTEGER NOT NULL DEFAULT 0,
+    extra_llm_params     TEXT NOT NULL DEFAULT '',  -- 智能体级额外 LLM 参数（自由格式，解析后进请求 body）
     hidden         INTEGER NOT NULL DEFAULT 0,
     max_turns      INTEGER,
     created_at     INTEGER NOT NULL,

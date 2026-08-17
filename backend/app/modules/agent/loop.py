@@ -51,7 +51,13 @@ from app.modules.agent.hooks import (
     OnMessageContext,
     ShouldStopContext,
 )
-from app.modules.agent.messages import Msg, ToolCall, find_missing_tool_calls, repair_tool_pairing
+from app.modules.agent.messages import (
+    Msg,
+    ToolCall,
+    find_missing_tool_calls,
+    mark_stale_file_reads,
+    repair_tool_pairing,
+)
 from app.modules.agent.tokens import count_text, count_tools, estimate_tokens
 from app.modules.agent.tools.base import (
     ArtifactPayload,
@@ -201,6 +207,8 @@ class AgentLoop:
         system_prompt: str = "",
         depth: int = 0,
         journal_sink: list[Msg] | None = None,
+        stream_enabled: bool = True,
+        extra_params: dict[str, Any] | None = None,
     ) -> None:
         self.db = db
         self.llm = llm
@@ -208,6 +216,10 @@ class AgentLoop:
         self.registry = registry
         self.session_id = session_id
         self.run_id = run_id
+        # 会话级流式开关
+        self.stream_enabled = stream_enabled
+        # 智能体级额外 LLM 参数（已解析）。里若含 stream 则覆盖会话开关。
+        self.extra_params = dict(extra_params or {})
         # 工作区必须【显式传入】，取自该会话的 workspace 行。
         # 早先这里直接读 settings.workspace_dir，导致所有会话都用同一个目录 ——
         # 多工作区功能静默失效，而表现是"路径不在白名单内"，
@@ -251,14 +263,55 @@ class AgentLoop:
         不做"是否需要修复"的判断 —— 取消、进程崩溃、断电、手动改库都会
         产生不一致，而后三者走不到取消处理代码。只修取消路径的话，
         任何非正常退出都会留下一个每次打开都 400 的会话。
+
+        ## 归档水位线
+
+        记忆提取会把已提取的消息归档（seq <= watermark），这些消息不再
+        发回 LLM，改用归档的 .overview.md 摘要替代。这里读最新归档，
+        只加载 watermark 之后的消息，并在最前面注入摘要。
         """
-        rows = await repo.load_messages(self.db, self.session_id, agent_name=self.agent_name)
+        # 读归档水位线（文件系统是 source of truth，不是 memory_extraction 表）
+        watermark = -1
+        overview = ""
+        try:
+            from app.modules.memory.commit import get_latest_archive_summary
+
+            latest = await get_latest_archive_summary(self.session_id)
+            if latest is not None:
+                watermark = latest.last_seq
+                overview = latest.overview
+        except Exception as e:  # noqa: BLE001
+            # 归档读失败不能拖垮对话 —— 最多是没跳过已归档消息（多占 token）
+            log.warning("archive_read_failed", session_id=self.session_id, error=str(e))
+
+        rows = await repo.load_messages(
+            self.db,
+            self.session_id,
+            agent_name=self.agent_name,
+            after_seq=watermark if watermark >= 0 else None,
+        )
         msgs = [repo.row_to_msg(r) for r in rows]
         repaired, fixes = repair_tool_pairing(msgs)
         if fixes:
             log.warning("context_repaired", session_id=self.session_id, fixes=fixes)
             await self._persist_repairs(msgs, repaired)
         self.messages = repaired
+
+        # 折叠"读取后又被修改"的 read_file 结果，防止旧文件快照污染上下文。
+        stale = mark_stale_file_reads(self.messages)
+        if stale:
+            log.info("stale_file_reads_marked", session_id=self.session_id, count=stale)
+
+        # 注入归档摘要，替代已归档的原始消息。summary 角色在 to_api 里
+        # 映射成 user，作为"之前聊过什么"的历史放在最前面。
+        if overview.strip():
+            self.messages.insert(0, Msg(role="summary", content=overview))
+            log.info(
+                "archive_overview_injected",
+                session_id=self.session_id,
+                watermark=watermark,
+                chars=len(overview),
+            )
 
         # 恢复上一次的真实 prompt_tokens。
         #
@@ -905,8 +958,19 @@ class AgentLoop:
                 last = api_msgs[-1]
                 sink.input_text = str(last.get("content") or "")
 
+            # stream 优先级：智能体 extra_params 里显式写的 stream > 会话开关。
+            # 多智能体场景下不能因会话开关覆盖掉某个智能体自己的自定义。
+            extra = dict(self.extra_params)
+            stream_value = extra.pop("stream", None)
+            if stream_value is None:
+                stream_value = self.stream_enabled
+            else:
+                stream_value = bool(stream_value)
+
             stream = self.llm.stream_chat(
-                self.model, api_msgs, tools=specs if specs else None
+                self.model, api_msgs, tools=specs if specs else None,
+                stream=stream_value,
+                **extra,
             )
             async for chunk in stream:
                 accum.feed(chunk)
@@ -993,6 +1057,15 @@ class AgentLoop:
             scale = min(1.0, used / local_total)
             tools_tok = int(local_tools * scale)
             system_tok = int(local_system * scale)
+            # 本地 tiktoken(cl100k) 对中文系统提示词的估算偏高约 35%。used 小于
+            # local_total 时（归档后 held_back + overview 很少，或首轮只发一句话），
+            # 按比例分摊会把对话内容全吞掉 —— 前端显示"对话 token 归零"，
+            # 而 held_back + overview 真实存在，不该归零。
+            # 固定开销最多占 used 的 90%，至少留 10% 给对话内容。
+            if tools_tok + system_tok >= used:
+                ratio = (used * 0.9) / (tools_tok + system_tok)
+                tools_tok = int(tools_tok * ratio)
+                system_tok = int(system_tok * ratio)
         else:
             tools_tok = 0
             system_tok = 0

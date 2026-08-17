@@ -22,11 +22,11 @@ import { api } from "../lib/api";
  * 手填，否则这个端点就没法加模型了。
  */
 export function AddModelForm({
-  providerId,
+  endpointId,
   onDone,
   onCancel,
 }: {
-  providerId: string;
+  endpointId: string;
   onDone: () => void;
   onCancel: () => void;
 }) {
@@ -36,8 +36,8 @@ export function AddModelForm({
   const [err, setErr] = useState("");
 
   const probe = useQuery({
-    queryKey: ["availableModels", providerId],
-    queryFn: () => api.availableModels(providerId),
+    queryKey: ["availableModels", endpointId],
+    queryFn: () => api.availableModels(endpointId),
     // 只在展开表单时拉一次。每次输入都拉的话会打爆上游
     staleTime: 60_000,
     retry: false,
@@ -46,7 +46,7 @@ export function AddModelForm({
   const add = useMutation({
     mutationFn: (args: { modelId: string; window?: number }) =>
       api.addModel({
-        provider_id: providerId,
+        endpoint_id: endpointId,
         model_id: args.modelId,
         ...(args.window ? { context_window: args.window } : {}),
       }),

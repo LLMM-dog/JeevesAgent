@@ -57,20 +57,7 @@ def _not_found(name: str) -> ToolResult:
 
 class LoadSkillTool:
     name = "load_skill"
-    description = (
-        "读取一个技能的完整正文（SKILL.md）。\n"
-        "\n"
-        "系统提示词里的技能清单只有名字和描述。当前任务符合某条描述时，"
-        "用这个工具把它的正文读进来，再按正文里的流程动手。\n"
-        "\n"
-        "注意：\n"
-        "- 只在任务确实需要时加载，不要一次把所有技能都读进来\n"
-        "- 同一个技能不用重复加载，正文已经在对话历史里\n"
-        "- 正文可能提到附属文件（references/、scripts/ 等），"
-        "需要时用 load_skill_file 单独读"
-    )
-    # 只读操作，不需要审批。让只读工具弹框会把审批变成噪音，
-    # 用户很快就会全点通过。
+    description = "加载一个技能的完整正文（SKILL.md）。只在任务需要时加载。"
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:
@@ -120,12 +107,7 @@ class LoadSkillTool:
 
 class LoadSkillFileTool:
     name = "load_skill_file"
-    description = (
-        "读取某个技能的附属文件（参考文档、模板、脚本源码等）。\n"
-        "\n"
-        "文件路径相对于技能目录，取自 load_skill 返回的附件清单。\n"
-        "脚本文件读到的是源码，不会被执行；要执行请用 run_python / run_shell。"
-    )
+    description = "读取技能的附属文件（参考文档、脚本源码等）。路径相对于技能目录。"
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:

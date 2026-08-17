@@ -25,5 +25,5 @@ Accepted (2026-08-07)
 
 ## References
 
-- `docs/architecture/schema.md`
+- `docs/architecture/data-schema.md`
 - `docs/guides/product.md` — 形态决策 3

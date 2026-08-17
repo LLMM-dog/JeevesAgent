@@ -8,6 +8,7 @@
 import pytest
 from app.modules.endpoint.windows import (
     DEFAULT_WINDOW,
+    detect_model_type,
     looks_non_chat,
     lookup_window,
     normalize_model_name,
@@ -107,3 +108,30 @@ class TestNonChat:
     @pytest.mark.parametrize("name", ["gpt-4o", "deepseek-chat", "claude-3-5-sonnet"])
     def test_chat_models_pass(self, name: str) -> None:
         assert not looks_non_chat(name)
+
+
+class TestDetectModelType:
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("deepseek-reasoner", "reasoning"),
+            ("deepseek-ai/DeepSeek-R1", "reasoning"),
+            ("qwq-32b", "reasoning"),
+            ("o1", "reasoning"),
+            ("o3-mini", "reasoning"),
+            ("gpt-5", "reasoning"),
+            ("text-embedding-3-large", "embedding"),
+            ("bge-large-zh", "embedding"),
+            ("jina-embeddings-v3", "embedding"),
+            ("bge-reranker-v2-m3", "rerank"),
+            ("tts-1", "tts"),
+            ("whisper-1", "audio"),
+            ("dall-e-3", "image"),
+            ("deepseek-chat", "chat"),
+            ("gpt-4o", "chat"),
+            ("claude-3-5-sonnet", "chat"),
+            ("deepseek-v4-pro", "chat"),
+        ],
+    )
+    def test_cases(self, name: str, expected: str) -> None:
+        assert detect_model_type(name) == expected

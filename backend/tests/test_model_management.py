@@ -146,6 +146,52 @@ class TestEnableDisable:
         r2 = await client.patch(f"/api/models/{model.id}", json={"enabled": True})
         assert r2.json()["enabled"] is True
 
+    async def test_disable_auto_unbinds(
+        self, client: AsyncClient, db: AsyncSession, model: Model
+    ) -> None:
+        """禁用被绑定的模型 → 自动解绑，功能位变空，而不是报错。"""
+        db.add(
+            ModelBinding(id=binding_id(), agent_name="", purpose="chat", model_pk=model.id)
+        )
+        db.add(
+            ModelBinding(id=binding_id(), agent_name="", purpose="memory", model_pk=model.id)
+        )
+        await db.flush()
+
+        r = await client.patch(f"/api/models/{model.id}", json={"enabled": False})
+        assert r.status_code == 200
+        assert r.json()["enabled"] is False
+
+        remaining = (
+            await db.execute(select(ModelBinding).where(ModelBinding.model_pk == model.id))
+        ).scalars().all()
+        assert remaining == []
+
+    async def test_list_returns_bindings(
+        self, client: AsyncClient, db: AsyncSession, model: Model
+    ) -> None:
+        """模型卡片要显示被配置成了什么功能，列表接口需返回 bindings。"""
+        db.add(
+            ModelBinding(id=binding_id(), agent_name="", purpose="chat", model_pk=model.id)
+        )
+        db.add(
+            ModelBinding(
+                id=binding_id(), agent_name="", purpose="memory_rerank", model_pk=model.id
+            )
+        )
+        await db.flush()
+
+        items = (await client.get("/api/models")).json()["items"]
+        m = next(x for x in items if x["id"] == model.id)
+        assert sorted(m["bindings"]) == ["chat", "memory_rerank"]
+
+    async def test_list_bindings_empty_when_unbound(
+        self, client: AsyncClient, model: Model
+    ) -> None:
+        items = (await client.get("/api/models")).json()["items"]
+        m = next(x for x in items if x["id"] == model.id)
+        assert m["bindings"] == []
+
     async def test_enabled_only_filters(
         self, client: AsyncClient, db: AsyncSession, endpoint: Endpoint, model: Model
     ) -> None:
@@ -363,6 +409,167 @@ async def test_binding_purposes_unchanged(
         "/api/bindings", json={"purpose": purpose, "model_pk": model.id}
     )
     assert r.status_code in (200, 201), r.text
+
+
+class TestGuessEndpointName:
+    """"添加模型"自动分组的名字从地址推断。"""
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://api.deepseek.com/v1", "DeepSeek"),
+            ("https://api.siliconflow.cn/v1", "SiliconFlow"),
+            ("https://api.openai.com/v1", "OpenAI"),
+            ("https://open.bigmodel.cn/api/paas/v4", "智谱"),
+            ("http://localhost:11434", "本地"),
+            ("https://api.moonshot.cn/v1", "Moonshot"),
+            # 未知主机取第一个非通用段
+            ("https://api.somevendor.io/v1", "Somevendor"),
+            ("https://foo.bar.example.co/v1", "Foo"),
+        ],
+    )
+    def test_cases(self, url: str, expected: str) -> None:
+        from app.modules.endpoint import service as ps
+
+        assert ps.guess_endpoint_name(url) == expected
+
+    def test_unparseable_falls_back(self) -> None:
+        from app.modules.endpoint import service as ps
+
+        assert ps.guess_endpoint_name("not a url") == "自定义"
+
+
+class TestMoveModelAcrossGroups:
+    """拖动改分组 = PATCH 模型的 endpoint_id。绑定不受影响。"""
+
+    async def test_move_to_other_endpoint(
+        self, client: AsyncClient, endpoint: Endpoint, model: Model
+    ) -> None:
+        r = await client.post(
+            "/api/endpoints",
+            json={
+                "name": "另一组",
+                "base_url": "https://other.example.com/v1",
+                "api_key": "sk-other",
+            },
+        )
+        other_id = r.json()["id"]
+
+        r2 = await client.patch(
+            f"/api/models/{model.id}", json={"endpoint_id": other_id}
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["endpoint_id"] == other_id
+        assert r2.json()["endpoint_name"] == "另一组"
+
+    async def test_move_rejects_unknown_group(
+        self, client: AsyncClient, model: Model
+    ) -> None:
+        r = await client.patch(
+            f"/api/models/{model.id}", json={"endpoint_id": "prv_nope"}
+        )
+        assert r.status_code == 404
+
+    async def test_move_rejects_duplicate(
+        self, client: AsyncClient, db: AsyncSession, endpoint: Endpoint, model: Model
+    ) -> None:
+        """目标分组已有同名模型时拒绝，避免撞唯一索引。"""
+        from app.core.crypto import encrypt
+
+        other = Endpoint(
+            id=endpoint_id(),
+            name="另一组",
+            base_url="https://dup.example.com/v1",
+            api_key_cipher=encrypt("sk-dup-key-00000001"),
+        )
+        db.add(other)
+        db.add(
+            Model(
+                id=model_id(),
+                endpoint_id=other.id,
+                model_id=model.model_id,
+                context_window=8192,
+            )
+        )
+        await db.flush()
+
+        r = await client.patch(
+            f"/api/models/{model.id}", json={"endpoint_id": other.id}
+        )
+        assert r.status_code == 409
+
+    async def test_move_keeps_binding(
+        self, client: AsyncClient, db: AsyncSession, model: Model
+    ) -> None:
+        """绑定引用 model_pk，跨组移动后绑定仍指向同一个模型。"""
+        db.add(
+            ModelBinding(
+                id=binding_id(), agent_name="", purpose="chat", model_pk=model.id
+            )
+        )
+        await db.flush()
+
+        r = await client.post(
+            "/api/endpoints",
+            json={
+                "name": "另一组",
+                "base_url": "https://keep.example.com/v1",
+                "api_key": "sk-keep",
+            },
+        )
+        other_id = r.json()["id"]
+
+        r2 = await client.patch(
+            f"/api/models/{model.id}", json={"endpoint_id": other_id}
+        )
+        assert r2.status_code == 200
+
+        bindings = (await client.get("/api/bindings")).json()["items"]
+        chat = next(b for b in bindings if b["purpose"] == "chat")
+        assert chat["model_pk"] == model.id
+
+
+class TestUpdateEndpoint:
+    """编辑分组：改名字 / 地址 / Key，Key 留空等于不改。"""
+
+    async def test_update_name_and_url(
+        self, client: AsyncClient, endpoint: Endpoint
+    ) -> None:
+        r = await client.patch(
+            f"/api/endpoints/{endpoint.id}",
+            json={"name": "新名字", "base_url": "https://new.example.com/v1"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "新名字"
+        assert body["base_url"] == "https://new.example.com/v1"
+
+    async def test_empty_key_keeps_existing(
+        self, client: AsyncClient, endpoint: Endpoint
+    ) -> None:
+        """Key 留空不能把原 Key 清掉 —— 前端拿不到明文。"""
+        before = (await client.get("/api/endpoints")).json()["items"]
+        hint = next(p["key_hint"] for p in before if p["id"] == endpoint.id)
+
+        r = await client.patch(
+            f"/api/endpoints/{endpoint.id}", json={"name": "改名", "api_key": ""}
+        )
+        assert r.status_code == 200
+        assert r.json()["key_hint"] == hint
+
+    async def test_update_key_rotates_hint(
+        self, client: AsyncClient, endpoint: Endpoint
+    ) -> None:
+        before = (await client.get("/api/endpoints")).json()["items"]
+        old = next(p["key_hint"] for p in before if p["id"] == endpoint.id)
+
+        r = await client.patch(
+            f"/api/endpoints/{endpoint.id}", json={"api_key": "sk-brand-new-key-99"}
+        )
+        assert r.status_code == 200
+        assert r.json()["key_hint"] == "y-99"
+        assert r.json()["key_hint"] != old
+
 
 class TestOverrideReachesRealCall:
     """

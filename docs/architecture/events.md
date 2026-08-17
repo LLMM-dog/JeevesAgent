@@ -225,8 +225,8 @@ def sse_encode(event: str, data: dict) -> str:
 四者不一致就测试失败。
 
 这个测试之前**不存在**（虽然本文件和 `events.py` 的 docstring 都声称它存在），
-于是四个事件悄悄漏出了文档表：`approval_resolved` / `compacting` /
-`memory_recalled` / `refs_expanded`。前端处理了、后端在发，只有那份
+于是几个事件悄悄漏出了文档表：`approval_resolved` / `compacting` /
+`refs_expanded`。前端处理了、后端在发，只有那份
 "唯一真源"不知道。
 
 漏文档的后果不是文档难看 —— 是下一个改这块的人会照着过时的表去改前端 switch，

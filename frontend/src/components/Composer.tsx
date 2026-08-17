@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   BrainCircuit,
   Eye,
@@ -15,15 +16,17 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  TriangleAlert,
+  Type,
   Wrench,
   X,
   Zap,
 } from "lucide-react";
 import clsx from "clsx";
-import { MacroPicker } from "@/components/MacroPicker";
 import { RefPicker, type RefCandidate, type RefKind } from "@/components/RefPicker";
 import { ContextBar } from "@/components/ContextBar";
 import { WorkDirPicker } from "@/components/WorkDirPicker";
+import { api } from "@/lib/api";
 import { useChatStore } from "@/store/chat";
 import { speechUploadsAudio, useSpeechInput } from "@/hooks/useSpeechInput";
 
@@ -105,7 +108,7 @@ function fileToDataUrl(file: File): Promise<string> {
 
 /** 一个已确认的引用，UI 上是个 chip */
 interface Chip {
-  type: "file" | "skill" | "tool" | "macro";
+  type: "file" | "skill" | "tool";
   label: string;
   /** file 用 path，其余用 name */
   path?: string;
@@ -124,12 +127,15 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const send = useChatStore((s) => s.send);
   const visionMode = useChatStore((s) => s.visionMode);
   const setVisionMode = useChatStore((s) => s.setVisionMode);
+  const streamEnabled = useChatStore((s) => s.streamEnabled);
+  const setStreamEnabled = useChatStore((s) => s.setStreamEnabled);
   const privateMode = useChatStore((s) => s.privateMode);
   const setPrivateMode = useChatStore((s) => s.setPrivateMode);
   const amnesiaMode = useChatStore((s) => s.amnesiaMode);
   const setAmnesiaMode = useChatStore((s) => s.setAmnesiaMode);
   const stop = useChatStore((s) => s.stop);
   const sessionId = useChatStore((s) => s.sessionId);
+  const modelPk = useChatStore((s) => s.modelPk);
   const workDir = useChatStore((s) => s.workDir);
   // 没有 usage 时也要能显示窗口大小，所以单独存一份
   const contextWindow = useChatStore((s) => s.contextWindow);
@@ -140,6 +146,15 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const usage = useChatStore((s) => s.usage);
 
   const busy = pending || streaming !== null;
+
+  // 当前模型的视觉能力，用于发图时给"未知"轻量提示。
+  // 复用对话页切换菜单的同一份缓存（["models", "enabled"]）。
+  const { data: modelList } = useQuery({
+    queryKey: ["models", "enabled"],
+    queryFn: () => api.models({ enabledOnly: true }),
+  });
+  const currentModel = modelList?.items.find((m) => m.id === modelPk);
+  const visionUnknown = currentModel?.supports_vision === "unknown";
 
   // 语音输入。
   //
@@ -265,39 +280,16 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
     if (accepted.length > 0) setImages((prev) => [...prev, ...accepted]);
   };
 
-  // 以 ! 或 ！开头时弹宏提词器。
-  //
-  // 全角 ！ 必须支持：中文输入法下打感叹号默认出来的就是全角。只认半角的话
-  // 中文用户按了没反应，而且完全想不到是因为标点宽度。
-  const macroTrigger = /^[!！]/.test(text);
-  const macroQuery = macroTrigger ? text.slice(1) : "";
-
   return (
     <div className="border-t border-[var(--color-border)] bg-[var(--color-surface)]/50 px-4 py-3">
       <div className="relative mx-auto max-w-3xl">
-        {/* 引用提词器。宏提词器只在开头触发，引用可以在任意位置 */}
-        {trigger && !busy && !macroTrigger && (
+        {/* 引用提词器，可以在任意位置触发 */}
+        {trigger && !busy && (
           <RefPicker
             kind={trigger.kind}
             query={trigger.query}
             onPick={(item) => pickRef(trigger, item)}
             onClose={() => setTrigger(null)}
-          />
-        )}
-
-        {macroTrigger && !busy && (
-          <MacroPicker
-            query={macroQuery}
-            onPick={(body) => {
-              // 宏正文直接填进输入框，让用户能看见、能改再发。
-              //
-              // 不直接发送：宏是流程模板，用户通常要补充具体参数
-              //（"整理日报" 得说清是哪一天）。直接发出去等于逼他在
-              // 下一轮再补，白烧一轮。
-              setText(body);
-              ref.current?.focus();
-            }}
-            onClose={() => setText("")}
           />
         )}
 
@@ -382,6 +374,14 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
           </div>
         )}
 
+        {/* 视觉能力未知的轻量提示：模型未核验，发图后果自负 */}
+        {visionMode && visionUnknown && (
+          <p className="mb-2 flex items-center gap-1.5 text-xs text-[var(--color-warn)]">
+            <TriangleAlert size={12} className="shrink-0" />
+            当前模型视觉能力未核验，发图可能失败。可在「设置 → 模型」里核验。
+          </p>
+        )}
+
         {/* 已选图片的缩略图 */}
         {images.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
@@ -458,7 +458,7 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
             placeholder={
               disabled
                 ? "请先在设置页配置模型"
-                : "输入消息…… @文件 · #工具 · !宏，Enter 发送"
+                : "输入消息…… @文件 · #工具，Enter 发送"
             }
             aria-label="消息输入框"
             className="max-h-[200px] min-h-[24px] flex-1 resize-none bg-transparent px-1.5 py-1 text-sm outline-none placeholder:text-[var(--color-muted)] disabled:cursor-not-allowed"
@@ -598,6 +598,26 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
           >
             <Eye size={11} aria-hidden />
             视觉
+          </button>
+
+          {/* 流式开关：控制 LLM 的 stream 参数。会话级，逐字输出 vs 一次性返回 */}
+          <button
+            type="button"
+            onClick={() => void setStreamEnabled(!streamEnabled)}
+            aria-pressed={streamEnabled}
+            title={
+              streamEnabled
+                ? "流式已开：回复逐字输出"
+                : "流式已关：回复一次性返回"
+            }
+            className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition ${
+              streamEnabled
+                ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                : "text-[var(--color-muted)] hover:bg-[var(--color-surface)]"
+            }`}
+          >
+            <Type size={11} aria-hidden />
+            流式
           </button>
 
           {/* 私密模式：这轮不写记忆。

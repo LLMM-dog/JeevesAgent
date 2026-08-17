@@ -1,7 +1,7 @@
 """cron
 
 Revision ID: de45134363a1
-Revises: 6a8e34f770cf
+Revises: 7ae06613a752
 Create Date: 2026-08-05 06:14:38.683881
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision: str = 'de45134363a1'
-down_revision: str | None = '6a8e34f770cf'
+down_revision: str | None = '7ae06613a752'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -28,5 +28,5 @@ Accepted (2026-08-07)
 ## References
 
 - `docs/README.md` — 全局硬约束
-- `docs/architecture/architecture.md` — 为什么不用 camelCase
+- `docs/architecture/frontend.md` — 为什么不用 camelCase
 - `docs/development/conventions.md` — 命名规范

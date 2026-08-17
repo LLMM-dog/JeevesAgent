@@ -64,9 +64,9 @@ class TestFrontmatterParsing:
         """
         `description: >-` 必须能解析。
 
-        手写正则解析器不支持块标量，而它自家 macro-creator
-        推荐的模板恰好用的就是 `>-` —— 按自家规范写的宏，描述在提示词里
-        会变成字面的 ">-"。用 yaml.safe_load 就没这个问题。
+        手写正则解析器不支持块标量，而有些技能模板恰好用的就是 `>-` ——
+        按那个规范写的技能，描述在提示词里会变成字面的 ">-"。
+        用 yaml.safe_load 就没这个问题。
         """
         text = "---\nname: a\ndescription: >-\n  第一行\n  第二行\n---\n\n正文"
         meta, _ = parse_frontmatter(text)

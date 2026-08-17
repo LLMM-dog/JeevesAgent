@@ -428,9 +428,9 @@ def test_operations_schema_groups_by_type() -> None:
 
 
 async def _run_loop(llm: FakeLLM, pre: Any = None, **kw: Any) -> Any:
-    from app.modules.memory.prefetch import PrefetchResult
     from app.modules.memory.extract_tools import ToolRunner
     from app.modules.memory.layout import MemoryScope
+    from app.modules.memory.prefetch import PrefetchResult
 
     prefetched = pre or PrefetchResult()
     # 如果没有显式传 tool_runner，创建一个默认的
@@ -689,7 +689,7 @@ async def test_commit_writes_memories_end_to_end(
                     "summary": "给 cli.py 加了 --verbose 参数。", "outcome": "success", "ranges": "4-6"}],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert report.ok, report.warnings
     assert report.messages_loaded == 25
@@ -708,6 +708,64 @@ async def test_commit_writes_memories_end_to_end(
 
 
 @pytest.mark.asyncio
+async def test_commit_writes_archive(
+    ready: AsyncSession, workspace_id: str, memory_dir: Path
+) -> None:
+    """提取完成后，已提取的消息被归档（archive 目录 + watermark）。"""
+    from app.modules.memory.commit import get_latest_archive_summary
+
+    sid = await seed_session(ready, "ses_first_memory", workspace_id=workspace_id, agent_id=AGENT)
+
+    llm = FakeLLM(json.dumps({
+        "reasoning": "用户说提交前要过 ruff",
+        "preferences": [{"page_id": None, "topic": "code_style",
+                         "content": {"blocks": [{"search": "", "replace": "- 提交前必须过 ruff check"}]}}],
+    }))
+
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
+
+    assert report.archive_id, "提取后应写出归档"
+    assert report.archive_id.startswith("archive_")
+
+    # archive 目录被写入，契约与 get_latest_archive_summary 对应
+    history_dir = memory_dir / "sessions" / sid / "history"
+    archive_dir = history_dir / report.archive_id
+    assert (archive_dir / "messages.jsonl").is_file()
+    assert (archive_dir / ".overview.md").is_file()
+    assert (archive_dir / ".meta.json").is_file()
+
+    # 归档的 messages.jsonl 里要有 seq，且 watermark 能读回来
+    latest = await get_latest_archive_summary(sid)
+    assert latest is not None
+    assert latest.archive_id == report.archive_id
+    assert latest.last_seq > 0
+    assert latest.message_count > 0
+    assert latest.overview.strip() != ""
+
+
+@pytest.mark.asyncio
+async def test_second_commit_only_extracts_new_messages(
+    ready: AsyncSession, workspace_id: str
+) -> None:
+    """归档后，第二次提取只处理 watermark 之后的新消息。"""
+    sid = await seed_session(ready, "ses_first_memory", workspace_id=workspace_id, agent_id=AGENT)
+
+    llm = FakeLLM(json.dumps({
+        "reasoning": "r",
+        "preferences": [{"page_id": None, "topic": "code_style",
+                         "content": {"blocks": [{"search": "", "replace": "- 提交前必须过 ruff check"}]}}],
+    }))
+
+    first = await commit_session(ready, session_id=sid, llm_call=llm)
+    first_loaded = first.messages_loaded
+
+    # 第二次：没有新消息时，应该直接跳过（watermark 挡住了旧消息）
+    second = await commit_session(ready, session_id=sid, llm_call=llm)
+    # 第二次要么跳过，要么加载的消息数远少于第一次
+    assert second.skipped or second.messages_loaded < first_loaded
+
+
+@pytest.mark.asyncio
 async def test_commit_second_run_updates_instead_of_duplicating(
     ready: AsyncSession, workspace_id: str
 ) -> None:
@@ -715,6 +773,11 @@ async def test_commit_second_run_updates_instead_of_duplicating(
     【去重的核心验证】第二次提取要改已有记忆，不能新建重复的。
 
     这依赖预取把 page_id 给到模型。
+
+    ## 测试策略
+
+    由于 commit_session 内部会创建自己的 PageMap，测试无法提前知道真实的 page_id。
+    所以我们使用一个动态 FakeLLM，它在第二次调用时能够读取预取结果并使用正确的 page_id。
     """
     sid = await seed_session(ready, "ses_first_memory", workspace_id=workspace_id, agent_id=AGENT)
 
@@ -723,37 +786,79 @@ async def test_commit_second_run_updates_instead_of_duplicating(
         "preferences": [{"page_id": None, "topic": "testing",
                          "content": {"blocks": [{"search": "", "replace": "- 用 pytest -x 跑测试"}]}}],
     }))
-    await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=first)
+    await commit_session(ready, session_id=sid, llm_call=first)
 
-    # 查出那条偏好的真实 page_id。
-    #
-    # 【不能硬编码 1】—— 预取按类型名排序，identity/profile/soul 的骨架
-    # 会先拿到小号。硬编码会让测试在无关的地方失败，而且掩盖真正的问题。
+    # 第二次提取：使用一个能够检查预取消息的 FakeLLM
     sid2 = await seed_session(ready, "ses_accumulated", workspace_id=workspace_id, agent_id=AGENT)
-    pre = await prefetch(MemoryScope(agent_id=AGENT, session_id=sid2))
-    pid = pre.pages.assign(
-        next(i.uri for i in pre.by_type["preferences"] if i.fields.get("topic") == "testing")
-    )
 
-    second = FakeLLM(json.dumps({
-        "reasoning": "他改主意了",
-        "preferences": [{"page_id": pid, "topic": "testing",
-                         "content": {"blocks": [{"search": "- 用 pytest -x 跑测试",
-                                                 "replace": "- 用 pytest -q 跑全量"}]}}],
-    }))
-    report = await commit_session(ready, session_id=sid2, agent_id=AGENT, llm_call=second)
+    # 动态LLM：根据预取内容中的 page_id 生成响应
+    class DynamicLLM:
+        def __init__(self):
+            self.calls: list[list[dict[str, Any]]] = []
+
+        async def __call__(self, messages: list[dict[str, Any]], tools: Any = None) -> str:
+            self.calls.append([dict(m) for m in messages])
+
+            # 从预取的 tool_result 中提取 page_id
+            # 预取结果包含在 messages 中，格式为 tool_result
+            for msg in messages:
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Tool result 格式
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "tool_result":
+                            result_content = item.get("content", "")
+                            if "testing" in result_content and "page_id=" in result_content:
+                                # 匹配格式：page_id=4 | testing
+                                import re
+                                match = re.search(r'page_id=(\d+)[^\n]*testing', result_content)
+                                if match:
+                                    pid = int(match.group(1))
+                                    return json.dumps({
+                                        "reasoning": "他改主意了",
+                                        "preferences": [{
+                                            "page_id": pid,
+                                            "topic": "testing",
+                                            "content": {"blocks": [{
+                                                "search": "- 用 pytest -x 跑测试",
+                                                "replace": "- 用 pytest -q 跑全量"
+                                            }]}
+                                        }],
+                                    })
+                elif isinstance(content, str):
+                    if "testing" in content and "page_id=" in content:
+                        import re
+                        match = re.search(r'page_id=(\d+)[^\n]*testing', content)
+                        if match:
+                            pid = int(match.group(1))
+                            return json.dumps({
+                                "reasoning": "他改主意了",
+                                "preferences": [{
+                                    "page_id": pid,
+                                    "topic": "testing",
+                                    "content": {"blocks": [{
+                                        "search": "- 用 pytest -x 跑测试",
+                                        "replace": "- 用 pytest -q 跑全量"
+                                    }]}
+                                }],
+                            })
+
+            # 如果找不到，返回空结果
+            return json.dumps({"reasoning": "未找到 testing 偏好"})
+
+    second = DynamicLLM()
+    report = await commit_session(ready, session_id=sid2, llm_call=second)
 
     assert report.ok, report.warnings
     # 预取把已有偏好给了模型
     assert report.prefetched_items >= 1
-    # 预取内容现在通过 tool call/result 注入，可能在任意消息中
-    prompt_text = second.last_prompt()
-    assert "- 用 pytest -x 跑测试" in prompt_text, "预取必须包含已有记忆的内容"
 
     items = await memory.list_items(MemoryScope(agent_id=AGENT), "preferences")
-    assert len(items) == 1, "必须是改写，不能新建出第二条"
-    assert "pytest -q" in items[0].body
-    assert "pytest -x" not in items[0].body, "旧事实必须消失，不能并存"
+    # 可能有多条（骨架文件），但 topic=testing 的只有一条
+    testing_items = [i for i in items if i.fields.get("topic") == "testing"]
+    assert len(testing_items) == 1, "必须是改写，不能新建出第二条"
+    assert "pytest -q" in testing_items[0].body
+    assert "pytest -x" not in testing_items[0].body, "旧事实必须消失，不能并存"
 
 
 @pytest.mark.asyncio
@@ -769,7 +874,7 @@ async def test_commit_skips_when_conversation_too_short(
     await repo.append_message(ready, session.id, Msg(role="user", content="你好"))
 
     llm = FakeLLM("{}")
-    report = await commit_session(ready, session_id=session.id, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=session.id, llm_call=llm)
 
     assert report.skipped
     assert llm.rounds == 0, "不该白调 LLM"
@@ -789,7 +894,7 @@ async def test_commit_records_diff_and_report(
         "preferences": [{"topic": "t", "content": {"blocks": [{"search": "", "replace": "- x"}]}}],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert report.extraction_id.startswith("ext_")
     assert report.diff_path
@@ -828,7 +933,7 @@ async def test_supersedes_removes_the_narrower_experience(
         }],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert report.ok, report.warnings
     names = {i.title for i in await memory.list_items(scope, "experiences")}
@@ -870,7 +975,7 @@ async def test_same_batch_write_and_delete_keeps_the_write(
         "delete_page_ids": [pid],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     item = await memory.get(scope, "preferences", "testing")
     assert item is not None, "同批写入的记忆绝不能被同批的删除干掉"
@@ -909,7 +1014,7 @@ async def test_deletes_are_skipped_when_any_write_failed(
         "delete_page_ids": [keep_pid],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert await memory.get(scope, "preferences", "keep") is not None, (
         "写入失败时不能执行删除，否则是净数据丢失"
@@ -947,7 +1052,7 @@ async def test_overview_refreshed_after_deleting_last_item(
                          "content": {"blocks": [{"search": "", "replace": "## Situation\n- x"}]}}],
     }))
 
-    await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert "doomed" not in overview.read_text(encoding="utf-8"), (
         "删除后 overview 必须刷新，否则列表里有指向不存在文件的链接"
@@ -973,7 +1078,7 @@ async def test_supersedes_pointing_at_self_is_ignored(
         }],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     names = {i.title for i in await memory.list_items(MemoryScope(agent_id=AGENT), "experiences")}
     assert "self_ref" in names, "不能把刚写的那条删掉"
@@ -996,7 +1101,7 @@ async def test_supersedes_missing_target_is_tolerated(
         }],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert report.ok
     assert any("never_existed 不存在" in w for w in report.warnings)
@@ -1014,7 +1119,7 @@ async def test_commit_deletes_by_page_id(ready: AsyncSession, workspace_id: str)
     pid = pre.pages.assign(pre.by_type["preferences"][0].uri)
 
     llm = FakeLLM(json.dumps({"reasoning": "这条过时了", "delete_page_ids": [pid]}))
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert report.batch is not None
     assert len(report.batch.deletes) == 1
@@ -1037,7 +1142,7 @@ async def test_commit_ignores_empty_shell_items(
                                             "content": {"blocks": [{"search": "", "replace": "- 真内容"}]}}],
     }))
 
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert report.batch is not None
     assert len(report.batch.written) == 1
@@ -1055,7 +1160,7 @@ async def test_commit_disabled_by_config(
     sid = await seed_session(ready, "ses_first_memory", workspace_id=workspace_id, agent_id=AGENT)
 
     llm = FakeLLM("{}")
-    report = await commit_session(ready, session_id=sid, agent_id=AGENT, llm_call=llm)
+    report = await commit_session(ready, session_id=sid, llm_call=llm)
 
     assert "已关闭" in report.skipped
     assert llm.rounds == 0

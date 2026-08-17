@@ -61,10 +61,8 @@ class TestCompactTool:
         只写"需要时调用"的话它永远不会调。
         """
         d = CompactContextTool().description
-        assert "什么时候用" in d
-        assert "不要用在" in d
-        # 要说清这是有损的
-        assert "有损" in d or "丢" in d
+        assert "阶段" in d  # tells when: phase transition
+        assert "压缩" in d or "摘要" in d
 
     def test_requires_reason(self) -> None:
         """

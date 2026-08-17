@@ -85,7 +85,7 @@ export function ModelSwitcher({
         }}
         title={
           current
-            ? `${current.provider_name} / ${current.model_id}`
+            ? `${current.endpoint_name} / ${current.model_id}`
             : "这个对话用功能位绑定的默认模型"
         }
         aria-expanded={open}
@@ -164,7 +164,7 @@ export function ModelSwitcher({
                     className="flex items-center gap-1.5 truncate"
                     style={{ color: "var(--color-muted)" }}
                   >
-                    <span>{m.provider_name}</span>
+                    <span>{m.endpoint_name}</span>
                     <span>·</span>
                     <span>{Math.round(m.context_window / 1000)}K</span>
                     {m.supports_vision === "true" && <span>· 看图</span>}

@@ -31,8 +31,7 @@ class AgentCreate(BaseModel):
     permission_shell: bool = False
     permission_network: bool = False
     permission_subagent: bool = False
-    verification_enabled: bool = False
-    strict_mode: bool = False
+    extra_llm_params: str = ""
 
 
 class AgentUpdate(BaseModel):
@@ -47,9 +46,8 @@ class AgentUpdate(BaseModel):
     permission_shell: bool | None = None
     permission_network: bool | None = None
     permission_subagent: bool | None = None
-    verification_enabled: bool | None = None
-    strict_mode: bool | None = None
     hidden: bool | None = None
+    extra_llm_params: str | None = None
 
 
 def _to_dict(agent: Any) -> dict[str, Any]:
@@ -69,8 +67,7 @@ def _to_dict(agent: Any) -> dict[str, Any]:
         "permission_shell": bool(agent.permission_shell),
         "permission_network": bool(agent.permission_network),
         "permission_subagent": bool(agent.permission_subagent),
-        "verification_enabled": bool(agent.verification_enabled),
-        "strict_mode": bool(agent.strict_mode),
+        "extra_llm_params": agent.extra_llm_params or "",
         "hidden": bool(agent.hidden),
         "is_default": agent.id == agent_service.DEFAULT_AGENT_ID,
         "created_at": agent.created_at,
@@ -111,8 +108,7 @@ async def create_agent(
         permission_shell=body.permission_shell,
         permission_network=body.permission_network,
         permission_subagent=body.permission_subagent,
-        verification_enabled=body.verification_enabled,
-        strict_mode=body.strict_mode,
+        extra_llm_params=body.extra_llm_params,
     )
     await db.commit()
     return _to_dict(agent)

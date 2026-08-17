@@ -76,6 +76,11 @@ class Session(Base, TimestampMixin):
     amnesia_mode: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     vision_mode: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # 流式开关（会话级）。控制后端调用 LLM 时 stream: true/false。
+    # 默认开 —— 流式是对话的默认体验，关闭只是少数需要"一次性拿完整回复"的场景。
+    # 注意：智能体的 extra_llm_params 里若显式写了 stream，以智能体为准（见 loop）。
+    stream_enabled: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
     # 冗余字段。可以从 message 表算出来，但会话列表需要按最后活动时间排序
     # 并显示条数，每次列表查询都做子查询聚合在几百个会话时就明显变慢。
     # 代价：写消息时必须在同一事务里同步更新这两个字段。

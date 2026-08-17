@@ -205,16 +205,41 @@ def render_overview(schema: MemoryTypeSchema, items: list[MemoryItem], directory
         return ""
 
 
-def render_embedding_text(schema: MemoryTypeSchema, item: MemoryItem) -> str:
-    """向量化用的文本。没有 embedding_template 时用正文。"""
+def render_embedding_text(schema: MemoryTypeSchema, item: MemoryItem, *, level: int = 2) -> str:
+    """
+    向量化用的文本。没有 embedding_template 时用正文。
+
+    对于 L2 详细层级，会截断过长的文本以：
+    1. 降低嵌入 API 成本
+    2. 提高召回准确性（避免关键信息被稀释）
+    3. 避免超过嵌入模型的 token 限制
+
+    截断策略：取开头 + 结尾，保留关键信息和结论。
+    """
+    from app.core.config import settings
+
+    # 先渲染出完整文本
     if not schema.embedding_template:
-        return item.body
-    context: dict[str, Any] = dict(item.fields)
-    context["content"] = item.body
-    try:
-        return render_template(schema.embedding_template, context).strip()
-    except RenderError:
-        return item.body
+        text = item.body
+    else:
+        context: dict[str, Any] = dict(item.fields)
+        context["content"] = item.body
+        try:
+            text = render_template(schema.embedding_template, context).strip()
+        except RenderError:
+            text = item.body
+
+    # L2 层级需要截断
+    if level == 2 and len(text) > settings.memory.embedding_l2_max_chars:
+        limit = settings.memory.embedding_l2_max_chars
+        # 取开头 70% + 结尾 30%，保留开头的背景和结尾的结论
+        head_len = int(limit * 0.7)
+        tail_len = limit - head_len
+        head = text[:head_len]
+        tail = text[-tail_len:] if tail_len > 0 else ""
+        text = f"{head}\n\n[... 中间省略 {len(text) - limit} 字符 ...]\n\n{tail}"
+
+    return text
 
 
 def serialize(item: MemoryItem, *, source_extraction_id: str = "", trace_id: str = "") -> str:
@@ -423,7 +448,9 @@ def build_item(
         version=(old.version + 1) if old else 1,
         created_at=old.created_at if old and old.created_at else now,
         updated_at=now,
-        agent_id=scope.agent_id if schema.scope is not MemoryScopeKind.GLOBAL else "",
+        agent_id=(
+            scope.agent_id if schema.scope is MemoryScopeKind.AGENT else ""
+        ),
         session_id=scope.session_id if schema.scope is MemoryScopeKind.SESSION else "",
         peer_agent_id=(
             scope.peer_agent_id

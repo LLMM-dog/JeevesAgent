@@ -34,7 +34,7 @@ class MemoryScopeKind(str, Enum):
 
     GLOBAL = "global"    # 所有智能体共享。目前只有 profile
     AGENT = "agent"      # 单个智能体的全部会话
-    SESSION = "session"  # 单个会话内，且限定该智能体
+    SESSION = "session"  # 单个会话内（属于会话本身，不按智能体隔离）
 
 
 class FieldType(str, Enum):

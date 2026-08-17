@@ -22,6 +22,28 @@ def to_datetime(ms: int) -> _dt.datetime:
     return _dt.datetime.fromtimestamp(ms / 1000, tz=_dt.UTC)
 
 
+def to_local(ms: int | None = None) -> _dt.datetime:
+    """
+    UTC 毫秒 → 本地时区的 datetime。ms 为 None 或 0 时取当前时间。
+
+    ## 为什么记忆的日期路径必须用本地时间
+
+    事件按 <年>/<月>/<日> 分目录。用 UTC 的话，本地时间晚上 8 点之后
+    发生的事会被归到"明天"的目录里（UTC+8 时区）—— 用户按日期找事件时
+    在他记得的那天里找不到。
+
+    时区相关的判断都该走这个函数，不要在业务模块里自己做时区换算。
+    """
+    if not ms:
+        return _dt.datetime.now()
+    return to_datetime(ms).astimezone()
+
+
+def weekday_cn(dt: _dt.datetime) -> str:
+    """中文星期。给记忆正文用 —— 事件里标"星期几"比标日期更容易对上记忆。"""
+    return "星期" + "一二三四五六日"[dt.weekday()]
+
+
 def local_stamp() -> str:
     """
     给模型看的当前本地时间，如「（2026-08-02 Sun 14:30）」。

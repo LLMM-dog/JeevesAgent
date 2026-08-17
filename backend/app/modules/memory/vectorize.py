@@ -66,6 +66,32 @@ log = structlog.get_logger(__name__)
 # 被它索引的那些记忆竞争相似度 —— 而命中一个目录索引对召回毫无价值。
 SKIP_SUFFIXES = (".overview.md", "/.abstract.md")
 
+# 层级识别（对齐 OpenViking LEVEL_URI_SUFFIX）
+# L0 (Abstract): .abstract.md - 一句话摘要
+# L1 (Overview): .overview.md - 概览索引
+# L2 (Details): 普通 .md 文件 - 完整详情
+LEVEL_SUFFIXES = {
+    ".abstract.md": 0,
+    ".overview.md": 1,
+}
+
+
+def get_level_from_uri(uri: str) -> int:
+    """
+    从 URI 推断记忆层级。
+
+    对齐 OpenViking hierarchical_retriever.py:58 LEVEL_URI_SUFFIX
+
+    Returns:
+        0 - L0 (Abstract)
+        1 - L1 (Overview)
+        2 - L2 (Details, 默认)
+    """
+    for suffix, level in LEVEL_SUFFIXES.items():
+        if uri.endswith(suffix):
+            return level
+    return 2  # 默认 L2
+
 
 def pack(vector: list[float]) -> bytes:
     """float 列表 → float32 紧凑二进制。"""
@@ -143,7 +169,7 @@ async def vectorize_uris(
         return report
 
     # 读正文并渲染 embedding_template
-    items: list[tuple[str, MemoryItem, str]] = []
+    items: list[tuple[str, MemoryItem, str, int]] = []
     for uri in targets:
         item = await read_item(uri)
         if item is None:
@@ -153,18 +179,23 @@ async def vectorize_uris(
         if schema is None:
             report.errors.append(f"{uri}: 未知记忆类型 {item.memory_type}")
             continue
-        text = render.render_embedding_text(schema, item)
+
+        # 识别记忆层级（在渲染前，因为截断逻辑需要它）
+        level = get_level_from_uri(uri)
+
+        # 渲染向量化文本（L2 层级会自动截断）
+        text = render.render_embedding_text(schema, item, level=level)
         if not text.strip():
             report.skipped += 1
             continue
-        items.append((uri, item, text))
+        items.append((uri, item, text, level))
 
     if not items:
         return report
 
     report.attempted = len(items)
     try:
-        result = await embed_texts(model, [t for _, _, t in items])
+        result = await embed_texts(model, [t for _, _, t, _ in items])
     except ProviderError as e:
         # 嵌入失败【不能让提取失败】—— 记忆已经写进文件了，
         # 缺的只是向量。下次 revectorize 能补上。
@@ -174,7 +205,8 @@ async def vectorize_uris(
 
     report.model, report.dim = result.model, result.dim
 
-    for (uri, item, _), vector in zip(items, result.vectors, strict=True):
+    for (uri, item, _, level), vector in zip(items, result.vectors, strict=True):
+
         await index_mod.set_embedding(
             db,
             uri,
@@ -182,6 +214,7 @@ async def vectorize_uris(
             model=result.model,
             dim=result.dim,
             content_hash=index_mod.content_hash(item),
+            level=level,
         )
         report.succeeded += 1
 
@@ -234,10 +267,9 @@ def visible_scopes(scope: MemoryScope) -> list[tuple[str, str, str, str]]:
     if scope.agent_id:
         out.append((MemoryScopeKind.AGENT.value, scope.agent_id, "", peer))
         if scope.session_id:
-            # session 域不进 peer 目录（schema 层强制 peer_enabled=false），
-            # 所以这里的 peer 恒为空。
+            # session 域记忆的 agent_id 恒为空（会话记忆不按智能体隔离）。
             out.append(
-                (MemoryScopeKind.SESSION.value, scope.agent_id, scope.session_id, "")
+                (MemoryScopeKind.SESSION.value, "", scope.session_id, "")
             )
     return out
 
@@ -251,10 +283,17 @@ async def search(
     limit: int = 10,
     memory_type: str = "",
     min_score: float | None = None,
+    level: list[int] | None = None,
 ) -> list[SearchHit]:
     """
     语义搜索。model 为 None 或查询向量算不出来时返回空列表 ——
     调用方负责回落关键词搜索。
+
+    Args:
+        level: 过滤记忆层级（对齐 OpenViking）
+            - None: 搜索所有层级（默认）
+            - [0, 1]: 只搜索 L0/L1（目录层，用于分层召回）
+            - [2]: 只搜索 L2（详细内容）
 
     ## 为什么在 Python 里算余弦而不用 SQL
 
@@ -283,9 +322,24 @@ async def search(
         return []
     qvec = qresult.vectors[0]
 
-    rows = await _candidates(db, scope, memory_type=memory_type)
+    rows = await _candidates(db, scope, memory_type=memory_type, level=level)
+
+    log.debug(
+        "memory_search_candidates",
+        query=query[:50],
+        memory_type=memory_type,
+        candidates=len(rows),
+        model=qresult.model,
+        level=level,
+    )
 
     hits: list[SearchHit] = []
+    skipped_model_mismatch = 0
+
+    # 收集所有候选的 URI 和密集向量分数
+    dense_scores: dict[str, float] = {}
+    uri_to_row: dict[str, Any] = {}  # 保存 row 信息用于构建 SearchHit
+
     for row in rows:
         # 【模型不一致的行直接跳过】而不是参与比较。
         #
@@ -293,34 +347,141 @@ async def search(
         # 而那个数值毫无意义 —— 这正是最难发现的一类 bug：
         # 召回还在返回结果，只是结果没有意义。
         if row.embedding_model != qresult.model or row.embedding_dim != qresult.dim:
+            skipped_model_mismatch += 1
             continue
         vec = unpack(row.embedding)
         if not vec:
             continue
         score = cosine(qvec, vec)
         if score >= min_score:
-            hits.append(
-                SearchHit(
-                    uri=row.uri,
-                    memory_type=row.memory_type,
-                    title=row.title,
-                    score=score,
-                    scope=row.scope,
-                )
+            dense_scores[row.uri] = score
+            uri_to_row[row.uri] = row
+
+    # ── 混合搜索：密集向量 + BM25（如果启用）──
+    final_scores = dense_scores
+
+    if settings.memory.recall_enable_hybrid_search and dense_scores:
+        try:
+            from app.infra.bm25 import BM25Config, BM25Index, normalize_scores
+            from app.infra.hybrid_search import (
+                HybridSearchConfig,
+                adaptive_hybrid_search,
+                hybrid_search,
             )
+
+            # 构建临时 BM25 索引（只索引候选文档）
+            bm25_config = BM25Config(
+                k1=settings.memory.bm25_k1,
+                b=settings.memory.bm25_b,
+            )
+            bm25_index = BM25Index(bm25_config)
+
+            # 为每个候选文档添加到 BM25 索引
+            for uri, row in uri_to_row.items():
+                # 使用标题作为文档内容（简化，生产环境应该包含 body）
+                text = row.title or ""
+                bm25_index.add_document(uri, text)
+
+            # BM25 搜索
+            bm25_scores_raw = bm25_index.search(query, list(dense_scores.keys()))
+
+            # 归一化 BM25 分数到 [0, 1]
+            bm25_scores = normalize_scores(bm25_scores_raw)
+
+            # 混合策略
+            if settings.memory.hybrid_search_strategy == "adaptive":
+                final_scores = await adaptive_hybrid_search(
+                    query=query,
+                    dense_scores=dense_scores,
+                    sparse_scores=bm25_scores,
+                )
+            else:  # "query_based" 或 "balanced"
+                hybrid_config = HybridSearchConfig(
+                    default_dense_weight=settings.memory.hybrid_default_dense_weight,
+                    default_sparse_weight=settings.memory.hybrid_default_sparse_weight,
+                    keyword_dense_weight=settings.memory.hybrid_keyword_dense_weight,
+                    keyword_sparse_weight=settings.memory.hybrid_keyword_sparse_weight,
+                    semantic_dense_weight=settings.memory.hybrid_semantic_dense_weight,
+                    semantic_sparse_weight=settings.memory.hybrid_semantic_sparse_weight,
+                )
+                final_scores = await hybrid_search(
+                    query=query,
+                    dense_scores=dense_scores,
+                    sparse_scores=bm25_scores,
+                    config=hybrid_config,
+                )
+
+            log.debug(
+                "hybrid_search_applied",
+                dense_hits=len(dense_scores),
+                bm25_hits=len(bm25_scores),
+                mixed_hits=len(final_scores),
+            )
+        except Exception as e:
+            log.warning(
+                "hybrid_search_failed",
+                error=str(e),
+                fallback_to_dense=True,
+            )
+            # 失败时回退到纯密集向量
+            final_scores = dense_scores
+
+    # 构建 SearchHit 列表
+    for uri, score in final_scores.items():
+        row = uri_to_row[uri]
+        hits.append(
+            SearchHit(
+                uri=row.uri,
+                memory_type=row.memory_type,
+                title=row.title,
+                score=score,
+                scope=row.scope,
+            )
+        )
+
+    log.debug(
+        "memory_search_done",
+        hits=len(hits),
+        candidates=len(rows),
+        skipped_model=skipped_model_mismatch,
+        min_score=min_score,
+    )
 
     hits.sort(key=lambda h: (-h.score, h.uri))
     return hits[:limit]
 
 
 async def _candidates(
-    db: AsyncSession, scope: MemoryScope, *, memory_type: str = ""
+    db: AsyncSession,
+    scope: MemoryScope,
+    *,
+    memory_type: str = "",
+    level: list[int] | None = None,
 ) -> list[MemoryIndex]:
-    """按三层隔离取候选行。只取有向量的。"""
+    """
+    按三层隔离取候选行。只取有向量的。
+
+    Args:
+        level: 过滤记忆层级（对齐 OpenViking）
+            - None: 搜索所有层级
+            - [0, 1]: 只搜索 L0/L1（目录层）
+            - [2]: 只搜索 L2（详细内容）
+    """
     from sqlalchemy import and_, or_
 
+    scopes_list = visible_scopes(scope)
+
+    log.debug(
+        "memory_candidates_query",
+        scope_agent=scope.agent_id,
+        scope_session=scope.session_id,
+        scope_peer=scope.peer_agent_id,
+        memory_type=memory_type,
+        level=level,
+    )
+
     conditions = []
-    for scope_kind, agent_id, session_id, peer_agent_id in visible_scopes(scope):
+    for scope_kind, agent_id, session_id, peer_agent_id in scopes_list:
         conditions.append(
             and_(
                 MemoryIndex.scope == scope_kind,
@@ -338,6 +499,11 @@ async def _candidates(
     )
     if memory_type:
         stmt = stmt.where(MemoryIndex.memory_type == memory_type)
+
+    # 添加 level 过滤（对齐 OpenViking）
+    if level is not None:
+        stmt = stmt.where(MemoryIndex.level.in_(level))
+
     return list((await db.execute(stmt)).scalars())
 
 

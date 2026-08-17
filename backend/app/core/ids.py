@@ -59,10 +59,6 @@ def binding_id() -> str:
     return new_id("bnd")
 
 
-def memory_id() -> str:
-    return new_id("mem")
-
-
 def attachment_id() -> str:
     return new_id("att")
 
@@ -80,3 +76,7 @@ def cron_task_id() -> str:
 
 def cron_run_id() -> str:
     return new_id("crr")
+
+
+def extraction_id() -> str:
+    return new_id("ext")

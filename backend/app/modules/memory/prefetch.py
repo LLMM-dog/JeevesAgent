@@ -703,7 +703,7 @@ async def prefetch_multi_agent(
 
     result = MultiAgentPrefetchResult()
     _eager = eager if eager is not None else True
-    _topn = topn or settings.memory.prefetch_search_topn
+    _topn = topn or settings.memory.prefetch_search_limit
 
     # ── 第一阶段：提取共享记忆（global + session）──
     if not agent_ids:

@@ -1,8 +1,5 @@
-# 多智能体系统架构设计 v2
+﻿# 多智能体系统架构设计 v2
 
-> 状态：实施中 | 日期：2026-08-10
-> v2 变更：验证增强改为每智能体属性、智能体可自管理 skills、记忆隔离
-> 阶段 1-2（智能体定义 CRUD + 单智能体链路）已完成。后续计划见 [multi-agent-roadmap.md](multi-agent-roadmap.md)。
 
 ---
 
@@ -29,8 +26,6 @@ AgentDefinition
 │   ├── network: bool   # 联网搜索
 │   └── subagent: bool  # 能否生成子智能体
 ├── 验证增强  ←── 每智能体独立开关
-│   ├── verification_enabled: bool  # 默认 false
-│   └── strict_mode: bool           # true=卡住不通过不让继续
 └── 元数据
     ├── created_at / updated_at
     └── skills_dir  # 该智能体的私有 skill 目录（自动派生）
@@ -40,10 +35,8 @@ AgentDefinition
 
 ### 1.2 验证智能体 — 每智能体一个
 
-不是全局共享的配置——每个智能体定义自带 `verification_enabled` 属性。开启后在创建 AgentLoop 时自动挂载一个内置的轻量验证智能体：
 
 ```
-智能体「代码审查员」(verification_enabled=true)
   │
   ├── 主 AgentLoop (代码审查员)
   │     todo_write → 完成步骤 2
@@ -171,7 +164,6 @@ SELECT * FROM memory WHERE agent_id='adf_xxx' AND session_id='ses_xxx';
 ### 4.2 单智能体 + 验证增强
 
 ```
-用户选择智能体(verification_enabled=true) → 创建 AgentLoop
 
 主 Agent 执行 todo 步骤:
   │
@@ -186,7 +178,6 @@ SELECT * FROM memory WHERE agent_id='adf_xxx' AND session_id='ses_xxx';
   │
   ├── 验证通过 → 主 Agent 继续步骤 N+1
   ├── 建议改进 → 反馈注入主 Agent（不阻止）
-  └── 未通过 → 反馈注入主 Agent + strict_mode 时阻止
 ```
 
 ---
@@ -195,8 +186,6 @@ SELECT * FROM memory WHERE agent_id='adf_xxx' AND session_id='ses_xxx';
 
 ```sql
 -- agent_defs 新增字段
-ALTER TABLE agent_defs ADD COLUMN verification_enabled INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE agent_defs ADD COLUMN strict_mode INTEGER NOT NULL DEFAULT 0;
 
 -- memory 表新增 agent_id
 ALTER TABLE memory ADD COLUMN agent_id TEXT;

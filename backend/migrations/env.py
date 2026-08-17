@@ -29,10 +29,13 @@ from app.core.config import settings  # noqa: E402
 from app.infra.db.base import Base  # noqa: E402
 
 # 必须全部导入 —— 少一个模块，autogenerate 就会认为那些表该被删掉
+from app.modules.agent import models as agent_models  # noqa: E402,F401
 from app.modules.cron import models as cron_models  # noqa: E402,F401
-from app.modules.memory import models as memory_models  # noqa: E402,F401
 from app.modules.endpoint import models as provider_models  # noqa: E402,F401
+from app.modules.memory import models as memory_extraction_models  # noqa: E402,F401
+from app.modules.memory import models_db as memory_models  # noqa: E402,F401
 from app.modules.session import models as session_models  # noqa: E402,F401
+from app.modules.settings import models as settings_models  # noqa: E402,F401
 from app.modules.skill import models as skill_models  # noqa: E402,F401
 from app.modules.todo import models as todo_models  # noqa: E402,F401
 from app.modules.trace import models as trace_models  # noqa: E402,F401

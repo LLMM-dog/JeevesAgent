@@ -1,4 +1,4 @@
-﻿"""
+"""
 引用展开。把前端传来的 refs 变成模型能读的上下文。
 
 ## 为什么必须真的展开
@@ -7,8 +7,8 @@
 
 - ****：refs 序列化成 `__refs__[JSON]__/refs__` 拼在消息尾部，
   后端**零解析**（全后端搜 `__refs__` 无命中）。模型看到的是一段私有格式的
-  JSON，而系统提示词里没教它这是什么。`skill`/`tool`/`macro` 三种等于只传了
-  个名字 —— **宏正文完全没进上下文**，而宏的全部价值就在正文。
+  JSON，而系统提示词里没教它这是什么。`skill`/`tool` 等于只传了个名字 ——
+  技能正文完全没进上下文，而技能的全部价值就在正文。
 - **一种常见实现**：`@file` 会展开成正文（`file-processor.ts:77`），但**没有任何大小
   上限** —— 搜 MAX/limit/truncat 全部零命中。引用一个 5MB 日志会整个塞进请求。
 - ****：没有引用机制。
@@ -155,8 +155,6 @@ async def expand(
                 piece = _expand_skill(ref, res)
             elif kind == "tool":
                 piece = _expand_tool(ref, res, registry)
-            elif kind == "macro":
-                piece = _expand_macro(ref, res)
             elif kind == "url":
                 piece = await _expand_url(ref, res, fetch_url)
             else:
@@ -316,34 +314,6 @@ def _expand_tool(ref: dict[str, Any], res: ExpandResult, registry: Any) -> str:
     body = f"用户希望优先使用工具 {name}。若它不适合当前任务，说明原因后改用合适的工具。"
     res.used_bytes += len(body.encode("utf-8"))
     return f"<tool_hint name=\"{_xml_escape_attr(name)}\">{body}</tool_hint>"
-
-
-def _expand_macro(ref: dict[str, Any], res: ExpandResult) -> str:
-    """
-    宏引用 → 注入正文。
-
-    ## 这条是 漏得最狠的地方
-
-    它的宏引用只传名字，后端零解析 —— 宏的**全部价值就是那段正文**，
-    不展开等于这个功能完全不存在，而用户看到 chip 会以为生效了。
-    """
-    from app.modules.skill import macros as macro_registry
-    from app.modules.skill.macros import read_macro_body
-
-    name = str(ref.get("name") or "")
-    if not name:
-        raise ValueError("macro 引用缺少 name")
-    meta = macro_registry.get_index().get(name)
-    if meta is None:
-        raise ValueError(f"宏 {name} 不存在")
-    body, truncated, original = _truncate(
-        read_macro_body(meta), min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - res.used_bytes)
-    )
-    res.used_bytes += len(body.encode("utf-8"))
-    attrs = f'name="{_xml_escape_attr(name)}"'
-    if truncated:
-        attrs += f' truncated="true" original_bytes="{original}"'
-    return f"<macro {attrs}>\n{body}\n</macro>"
 
 
 async def _expand_url(ref: dict[str, Any], res: ExpandResult, fetch_url: Any) -> str:

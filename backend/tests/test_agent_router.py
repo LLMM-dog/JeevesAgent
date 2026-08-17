@@ -97,8 +97,6 @@ class TestAgentCreateAPI:
                 "permission_shell": True,
                 "permission_network": True,
                 "permission_subagent": True,
-                "verification_enabled": True,
-                "strict_mode": True,
                 "skill_names": ["code-review"],
                 "mcp_servers": ["github"],
             },
@@ -107,8 +105,6 @@ class TestAgentCreateAPI:
         data = r.json()
         assert data["permission_write"] is True
         assert data["permission_shell"] is True
-        assert data["verification_enabled"] is True
-        assert data["strict_mode"] is True
         assert "code-review" in data["skill_names"]
         assert "github" in data["mcp_servers"]
 
@@ -207,18 +203,6 @@ class TestAgentUpdateAPI:
         assert r2.json()["hidden"] is True
         r3 = await client.get("/api/agents?hidden=false")
         assert aid not in [a["id"] for a in r3.json()]
-
-    async def test_update_verification(self, client: AsyncClient) -> None:
-        r = await client.post("/api/agents", json={"name": "验证测试"})
-        aid = r.json()["id"]
-        r2 = await client.patch(
-            f"/api/agents/{aid}",
-            json={"verification_enabled": True, "strict_mode": True},
-        )
-        assert r2.status_code == 200
-        data = r2.json()
-        assert data["verification_enabled"] is True
-        assert data["strict_mode"] is True
 
     async def test_update_nonexistent_returns_404(self, client: AsyncClient) -> None:
         r = await client.patch(

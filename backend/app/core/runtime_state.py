@@ -23,7 +23,7 @@ update_auto_approve 消息时写入的值能立即被正在运行的 Agent 任�
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 ApprovalMode = Literal["manual", "auto"]
 
@@ -47,6 +47,10 @@ class SessionRuntime:
     approval_mode: ApprovalMode = "manual"
     approvals: dict[str, PendingApproval] = field(default_factory=dict)
     interacts: dict[str, PendingInteract] = field(default_factory=dict)
+
+    # 记忆提取状态
+    memory_extracting: bool = False  # 是否正在提取
+    memory_extraction_id: str = ""   # 当前提取的 ID
 
 
 _sessions: dict[str, SessionRuntime] = {}
@@ -89,6 +93,19 @@ def set_approval_mode(session_id: str, mode: ApprovalMode) -> None:
     立即对正在运行的 run 生效。这是本模块存在的全部理由。
     """
     get_runtime(session_id).approval_mode = mode
+
+
+def restore_approval_mode(session_id: str, mode: str) -> None:
+    """
+    从持久化层恢复审批模式到运行时状态。
+
+    与 set_approval_mode 的区别：DB 里的值是 str（不保证是合法 Literal），
+    这里做防御性校验，非法值回落 manual。用于应用重启后 / 加载会话时
+    把 DB 的 approval_mode 同步回 runtime_state。
+    """
+    get_runtime(session_id).approval_mode = cast(
+        ApprovalMode, mode if mode in ("manual", "auto") else "manual"
+    )
 
 
 def get_approval_mode(session_id: str) -> ApprovalMode:
@@ -155,3 +172,43 @@ def drop_session(session_id: str) -> None:
     """
     cancel_all_pending(session_id)
     _sessions.pop(session_id, None)
+
+
+# ── 记忆提取状态 ──
+
+
+def set_memory_extracting(session_id: str, extracting: bool, extraction_id: str = "") -> None:
+    """
+    设置会话的记忆提取状态。
+
+    提取开始时调用 set_memory_extracting(session_id, True, extraction_id)
+    提取结束时调用 set_memory_extracting(session_id, False)
+    """
+    rt = get_runtime(session_id)
+    rt.memory_extracting = extracting
+    rt.memory_extraction_id = extraction_id if extracting else ""
+
+
+def is_memory_extracting(session_id: str) -> bool:
+    """检查会话是否正在进行记忆提取。"""
+    rt = _sessions.get(session_id)
+    return rt.memory_extracting if rt else False
+
+
+def get_memory_extraction_status(session_id: str) -> dict[str, Any]:
+    """
+    获取会话的记忆提取状态。
+
+    返回：
+    {
+        "extracting": bool,
+        "extraction_id": str
+    }
+    """
+    rt = _sessions.get(session_id)
+    if not rt:
+        return {"extracting": False, "extraction_id": ""}
+    return {
+        "extracting": rt.memory_extracting,
+        "extraction_id": rt.memory_extraction_id,
+    }

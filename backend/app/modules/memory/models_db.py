@@ -51,6 +51,20 @@ class MemoryIndex(Base, TimestampMixin):
     # 召回命中次数。热度分的频率分量。
     active_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # 记忆层级（对齐 OpenViking）。
+    #
+    # - 0 (L0): Abstract - 一句话摘要（.abstract.md），用于快速判断相关性
+    # - 1 (L1): Overview - 概览（.overview.md），包含关键信息
+    # - 2 (L2): Details - 完整详情（普通 .md 文件）
+    #
+    # 分层召回策略：
+    # 1. 向量搜索先在 L0/L1 层查找（快速筛选）
+    # 2. 命中的目录/摘要对应的 L2 详细内容按需加载
+    # 3. 递归搜索只在 L0/L1 层进行，L2 是终点
+    #
+    # 对齐 OpenViking hierarchical_retriever.py:58 LEVEL_URI_SUFFIX
+    level: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+
     # 正文 + 业务字段的哈希。
     #
     # 【幂等写入靠它】：合并后哈希不变就不写盘、version 不递增。
