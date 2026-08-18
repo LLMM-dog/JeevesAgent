@@ -1,4 +1,4 @@
-﻿"""
+"""
 请求/响应模型。
 
 字段名 snake_case，与数据库列和前端 TypeScript interface 完全一致 ——
@@ -94,8 +94,6 @@ class MessageOut(BaseModel):
     is_error: bool
     refs: list[dict[str, Any]] | None
     attachments: list[str] | None
-    artifact_kind: str | None
-    artifact_path: str | None
     run_id: str | None
     span_id: str | None
     prompt_tokens: int | None

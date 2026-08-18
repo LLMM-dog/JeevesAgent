@@ -249,28 +249,13 @@ async def append_message(
     span_id: str | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
-    artifact_kind: str | None = None,
-    artifact_path: str | None = None,
     refs: list[dict[str, Any]] | None = None,
     attachments: list[str] | None = None,
     display: dict[str, Any] | None = None,
 ) -> str:
     """
     写一条消息，返回 message_id。同时更新会话的冗余计数字段。
-
-    artifact 走 upsert：每个 (session_id, agent_name) 只保留最新一版。
     """
-    if msg.role == "artifact":
-        # 先删旧版。DB 层有部分唯一索引兜底，但显式删除能让"替换"语义明确,
-        # 且避免依赖 IntegrityError 做控制流。
-        await db.execute(
-            delete(Message).where(
-                Message.session_id == session_id,
-                Message.agent_name == msg.agent_name,
-                Message.role == "artifact",
-            )
-        )
-
     mid = new_message_id()
     seq = await _next_seq(db, session_id)
     ts = now_ms()
@@ -292,8 +277,6 @@ async def append_message(
         is_error=1 if msg.is_error else 0,
         refs=_dumps(refs),
         attachments=_dumps(attachments),
-        artifact_kind=artifact_kind,
-        artifact_path=artifact_path,
         run_id=run_id,
         span_id=span_id,
         prompt_tokens=prompt_tokens,

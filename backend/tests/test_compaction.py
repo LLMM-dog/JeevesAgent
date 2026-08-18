@@ -49,10 +49,6 @@ def result(call_id: str, name: str, text: str = "ok", is_error: bool = False) ->
     )
 
 
-def artifact(text: str = "产出") -> Msg:
-    return Msg(role="artifact", content=text)
-
-
 def summary(text: str = "更早的摘要") -> Msg:
     return Msg(role="summary", content=text)
 
@@ -212,38 +208,6 @@ class TestTailPreserved:
         assert any(m.content == "回答9" for m in kept)
         # 最早的轮次必须被压掉
         assert not any(m.content == "问题0" for m in kept)
-
-
-class TestArtifact:
-    def test_artifact_excluded_from_victims(self) -> None:
-        """
-        artifact 是"当前工作成果"，压缩掉之后用户说
-        "把刚才那份代码改一下"就没法接。
-        """
-        msgs = [sys_msg()]
-        for i in range(8):
-            msgs.extend(turn(i))
-        msgs.insert(3, artifact("一份重要代码"))
-
-        plan = plan_compaction(msgs, keep_tail_turns=2)
-        assert plan is not None
-        assert all(m.role != "artifact" for m in plan.victims)
-        assert len(plan.pinned) == 1
-        assert plan.pinned[0].content == "一份重要代码"
-
-    def test_artifact_does_not_consume_tail_budget(self) -> None:
-        """artifact 不该占 tail 的名额。"""
-        msgs = [sys_msg()]
-        for i in range(10):
-            msgs.extend(turn(i))
-        with_art = msgs[:5] + [artifact()] + msgs[5:]
-
-        p1 = plan_compaction(msgs, keep_tail_turns=3)
-        p2 = plan_compaction(with_art, keep_tail_turns=3)
-        assert p1 is not None and p2 is not None
-        u1 = sum(1 for m in msgs[p1.tail_start :] if m.role == "user")
-        u2 = sum(1 for m in with_art[p2.tail_start :] if m.role == "user")
-        assert u1 == u2 == 3
 
 
 class TestPromptPlaceholder:

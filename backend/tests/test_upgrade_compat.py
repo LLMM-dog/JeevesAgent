@@ -21,6 +21,31 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# 已审查的删列清单。key 是 (迁移文件名, 表名, 列名)，value 是删它的理由。
+#
+# 删列默认禁止 —— 它可能丢掉用户升级前就在对话里的数据。只有两类能进这个
+# 清单：数据已迁移到新列，或功能已整体删除。加新条目前必须想清楚数据去哪了。
+_ALLOWED_DROP_COLUMNS: dict[tuple[str, str, str], str] = {
+    # agent_id 单值升级为 agent_ids 数组：数据已通过 op.execute UPDATE 搬走，
+    # 删旧列不丢数据。
+    (
+        "20260814_2026_a334ba3b9193_add_agent_ids_to_session.py",
+        "session",
+        "agent_id",
+    ): "单值 agent_id 已迁移为 agent_ids 数组",
+    # artifact（工作成果钉住）功能已整体移除，两列从此不再写入。
+    (
+        "20260818_0922_8b72cef0a935_drop_artifact_columns.py",
+        "message",
+        "artifact_kind",
+    ): "artifact 功能已删除，列不再写入",
+    (
+        "20260818_0922_8b72cef0a935_drop_artifact_columns.py",
+        "message",
+        "artifact_path",
+    ): "artifact 功能已删除，列不再写入",
+}
+
 
 class TestUserDataNotTracked:
     """
@@ -185,23 +210,37 @@ class TestUpgradePreservesData:
 
     def test_no_drop_column_on_message(self) -> None:
         """
-        message 表是对话历史。删列等于丢历史的一部分，
-        而用户升级时不会被问"你同意丢掉推理内容吗"。
+        message / session 表是对话历史。删列默认禁止 —— 可能丢历史。
+
+        但有两种删列是【合法】的，必须在这里显式列出理由：
+          1. 数据已迁移到新列（旧列内容先搬走再删，如 agent_id → agent_ids）
+          2. 功能已整体删除、列从此不再写入（如 artifact_kind / artifact_path）
+
+        除此之外的任何 drop_column 都是破坏性操作，测试直接失败 ——
+        不能静默删掉用户升级前就在对话里的数据。
         """
         vdir = ROOT / "backend" / "migrations" / "versions"
         bad = []
         for f in vdir.glob("*.py"):
             txt = f.read_text(encoding="utf-8")
             up = txt[txt.index("def upgrade()") : txt.index("def downgrade()")]
-            if "drop_column" in up and ("message" in up or "session" in up):
-                # batch_alter_table("message") 里的 drop_column 才算
-                for m in re.finditer(
-                    r'batch_alter_table\(\s*["\'](\w+)["\'][\s\S]{0,600}?drop_column',
-                    up,
-                ):
-                    if m.group(1) in {"message", "session"}:
-                        bad.append(f"{f.name}: {m.group(1)}.drop_column")
-        assert not bad, f"删了对话历史的列：{bad}"
+            if "drop_column" not in up:
+                continue
+            for m in re.finditer(
+                r'batch_alter_table\(\s*["\'](\w+)["\'][\s\S]{0,600}?'
+                r'drop_column\(\s*["\'](\w+)["\']',
+                up,
+            ):
+                table, column = m.group(1), m.group(2)
+                if table not in {"message", "session"}:
+                    continue
+                if (f.name, table, column) in _ALLOWED_DROP_COLUMNS:
+                    continue
+                bad.append(f"{f.name}: {table}.drop_column({column})")
+        assert not bad, (
+            f"删了对话历史的列，且不在已审查清单里：{bad}\n"
+            "若确需删列，在 _ALLOWED_DROP_COLUMNS 里加条目并写清理由"
+        )
 
     def test_added_columns_have_defaults(self) -> None:
         """

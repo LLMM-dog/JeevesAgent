@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 对话状态。
  *
  * ## 事件流 → UI 状态的映射
@@ -137,8 +137,6 @@ interface ChatState {
    * 聊敏感话题时要私密但仍然需要之前的上下文。
    */
   amnesiaMode: boolean;
-  /** 当前工作成果的元信息（内容太大不放 store，需要时拉接口） */
-  artifact: { kind: string; path: string | null; chars: number } | null;
   todos: TodoItem[];
   todoStats: TodoStats | null;
   title: string;
@@ -188,8 +186,6 @@ const blankMessage = (id: string): MessageOut => ({
   is_error: false,
   refs: null,
   attachments: null,
-  artifact_kind: null,
-  artifact_path: null,
   run_id: null,
   span_id: null,
   prompt_tokens: null,
@@ -285,7 +281,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   streamEnabled: true,
   privateMode: false,
   amnesiaMode: false,
-  artifact: null,
   todos: [],
   todoStats: null,
   title: "",
@@ -306,7 +301,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeAgents: [],
       compacting: null,
       approval: null,
-      artifact: null,
       cancelStream: null,
       // 【必须清掉】。usage 是上一个会话的上下文占用，
       // 不清的话切会话后计数不变 —— 用户看到的是上一个会话的数字，
@@ -993,12 +987,6 @@ function handleEvent<K extends SseEventName>(
           },
         ],
       }));
-      break;
-    }
-
-    case "artifact_updated": {
-      const d = data as SseEventMap["artifact_updated"];
-      set({ artifact: { kind: d.kind, path: d.path, chars: d.chars } });
       break;
     }
 

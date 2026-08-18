@@ -20,7 +20,7 @@ from app.core.config import settings
 
 log = structlog.get_logger(__name__)
 
-Role = Literal["user", "assistant", "tool", "system", "summary", "artifact"]
+Role = Literal["user", "assistant", "tool", "system", "summary"]
 
 
 def _norm_path(raw: str) -> str:
@@ -78,11 +78,10 @@ class Msg:
         """
         转成 OpenAI 兼容格式。
 
-        summary / artifact 是本地专用角色，发给 LLM 时要映射成标准角色：
-        - summary → user。它是【模型对用户内容的转述】，源自用户输入，
-          放 system 位等于给注入开了升格通道（用户说"忽略之前的指令"，
-          被摘要进去后就变成了系统级指令）。
-        - artifact → assistant。它就是模型自己的产出。
+        summary 是本地专用角色，发给 LLM 时要映射成标准角色：
+        summary → user。它是【模型对用户内容的转述】，源自用户输入，
+        放 system 位等于给注入开了升格通道（用户说"忽略之前的指令"，
+        被摘要进去后就变成了系统级指令）。
         """
         if self.role == "tool":
             return {
@@ -119,9 +118,6 @@ class Msg:
                 if self.reasoning and settings.llm.send_reasoning_back:
                     out["reasoning_content"] = self.reasoning
             return out
-
-        if self.role == "artifact":
-            return {"role": "assistant", "content": self.content}
 
         if self.role == "summary":
             return {"role": "user", "content": self.content}

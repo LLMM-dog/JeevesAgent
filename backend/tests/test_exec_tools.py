@@ -141,17 +141,6 @@ class TestRunShell:
         assert r.is_error is True
         assert "不是目录" in r.content
 
-    async def test_no_artifact_produced(self, ws: Path) -> None:
-        """
-        命令输出不是 artifact。
-
-        artifact 是"当前工作成果"且常驻上下文。命令输出是过程信息，
-        每次都不一样，把它钉在上下文里只会挤掉真正需要的历史。
-        """
-        cmd = "Write-Output x" if WIN else "echo x"
-        r = await RunShellTool().run(mk_ctx(ws), command=cmd)
-        assert r.artifact is None
-
     async def test_description_warns_about_stdin(self) -> None:
         """
         工具描述必须告诉模型"不能读标准输入"。

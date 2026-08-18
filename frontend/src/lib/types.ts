@@ -58,8 +58,7 @@ export type MessageRole =
   | "assistant"
   | "tool"
   | "system"
-  | "summary"
-  | "artifact";
+  | "summary";
 
 export interface ToolCallRef {
   id: string;
@@ -81,8 +80,6 @@ export interface MessageOut {
   is_error: boolean;
   refs: Record<string, unknown>[] | null;
   attachments: string[] | null;
-  artifact_kind: string | null;
-  artifact_path: string | null;
   run_id: string | null;
   span_id: string | null;
   prompt_tokens: number | null;
@@ -117,12 +114,10 @@ export type SseEventName =
   | "approval_resolved"
   | "compacting"
   | "compacted"
-  | "artifact_updated"
   | "refs_expanded"
   | "interact_required"
   | "sandbox_fallback"
   | "mcp_unavailable"
-  | "artifact"
   | "title"
   | "model_fallback"
   | "cancelled"
@@ -281,12 +276,6 @@ export interface CompactedEvent extends EventCommon {
   summary_chars: number;
 }
 
-export interface ArtifactUpdatedEvent extends EventCommon {
-  kind: string;
-  path: string | null;
-  chars: number;
-}
-
 export interface SseEventMap {
   meta: MetaEvent;
   message: DeltaEvent;
@@ -301,7 +290,6 @@ export interface SseEventMap {
   approval_resolved: ApprovalResolvedEvent;
   compacting: CompactingEvent;
   compacted: CompactedEvent;
-  artifact_updated: ArtifactUpdatedEvent;
   /**
    * 引用展开结果。
    *
@@ -329,7 +317,6 @@ export interface SseEventMap {
     options: string[] | null;
     multi: boolean;
   };
-  artifact: EventCommon & { kind: string; path: string | null };
   title: TitleEvent;
   model_fallback: ModelFallbackEvent;
   cancelled: CancelledEvent;

@@ -49,32 +49,6 @@ class ToolResult:
     content: str
     display: dict[str, Any] | None = None
     is_error: bool = False
-    # 工具产出的"工作成果"。非 None 时 loop 会写一条 role=artifact 的消息。
-    #
-    # ## 由工具决定，不由模型决定
-    #
-    # write_file 写出的完整文件算 artifact，edit_file 的零散改动不算。
-    # 让模型决定的话它会把一切都标成产物（它倾向于认为自己做的都重要），
-    # artifact 就失去了"只留最新一版"的意义。
-    artifact: "ArtifactPayload | None" = None
-
-
-@dataclass
-class ArtifactPayload:
-    """
-    一份工作成果。
-
-    ## 为什么要专门的角色而不是普通 assistant 消息
-
-    artifact 有三条特殊待遇，普通消息给不了：
-      1. 排除在压缩之外 —— 用户说"把刚才那份代码改一下"时它必须还在
-      2. 每个 (session, agent) 只留最新一版 —— 否则改 5 次会累积 5 份
-      3. 钉在上下文末尾 —— 按时序插入会埋在中间，模型注意不到
-    """
-
-    kind: str
-    content: str
-    path: str | None = None
 
 
 @dataclass

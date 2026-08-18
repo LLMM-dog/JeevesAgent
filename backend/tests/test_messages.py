@@ -312,9 +312,6 @@ class TestToApi:
         """
         assert Msg(role="summary", content="s").to_api()["role"] == "user"
 
-    def test_artifact_maps_to_assistant(self) -> None:
-        assert Msg(role="artifact", content="code").to_api()["role"] == "assistant"
-
     def test_reasoning_not_sent_upstream(self) -> None:
         api = Msg(role="assistant", content="x", reasoning="think").to_api()
         assert "reasoning" not in api and "reasoning_content" not in api

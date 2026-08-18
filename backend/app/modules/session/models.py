@@ -1,17 +1,13 @@
-﻿"""
+"""
 会话与消息模型。
 
 字段与 docs/02-data/schema.md 一一对应，那份文档是唯一真源。
 """
 
-from typing import Literal
-
-from sqlalchemy import BigInteger, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import BigInteger, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infra.db.base import Base, TimestampMixin
-
-MessageRole = Literal["user", "assistant", "tool", "system", "summary", "artifact"]
 
 
 class Workspace(Base, TimestampMixin):
@@ -152,8 +148,7 @@ class Message(Base, TimestampMixin):
     # 空串 = 用户可见主线；有值 = 该智能体的私有记忆线。
     # 这是"每个智能体有自己的记忆"的全部实现。
     # 必须 NOT NULL DEFAULT ''，不能允许 NULL ——
-    # 否则 artifact 的部分唯一索引对 NULL 不生效（NULL 互不相等），
-    # 主线的多条 artifact 都能插进去。
+    # 否则部分唯一索引对 NULL 不生效（NULL 互不相等）。
     agent_name: Mapped[str] = mapped_column(String(64), default="", nullable=False)
 
     content: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -173,9 +168,6 @@ class Message(Base, TimestampMixin):
     refs: Mapped[str | None] = mapped_column(Text, nullable=True)
     attachments: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    artifact_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    artifact_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-
     run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     span_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -184,17 +176,4 @@ class Message(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_message_seq", "session_id", "seq", unique=True),
         Index("ix_message_session", "session_id", "seq"),
-        # 部分唯一索引（带 WHERE）。SQLite 支持，语义与 Postgres 一致
-        # （NULL 互不相等，所以 agent_name 必须 NOT NULL DEFAULT ''）。
-        # 保证每个 (session, agent) 只有一条 artifact。
-        #
-        # 注意：alembic autogenerate【检测不到】WHERE 子句，也可能在重新生成时
-        # 丢掉它。这个索引需要在迁移文件里手动确认。见 docs/02-data/migrations.md
-        Index(
-            "ix_message_artifact",
-            "session_id",
-            "agent_name",
-            unique=True,
-            sqlite_where=text("role = 'artifact'"),
-        ),
     )

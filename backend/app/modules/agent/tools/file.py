@@ -17,9 +17,8 @@ from typing import Any
 
 import structlog
 
-from app.core.config import settings
 from app.modules.agent.pathguard import get_guard
-from app.modules.agent.tools.base import ArtifactPayload, ToolContext, ToolResult
+from app.modules.agent.tools.base import ToolContext, ToolResult
 
 log = structlog.get_logger(__name__)
 
@@ -187,16 +186,6 @@ class WriteFileTool:
         return ToolResult(
             content=f"{'已覆盖' if existed else '已创建'} {rel}（{lines} 行）",
             display={"path": rel, "lines": lines, "created": not existed},
-            # 写出的完整文件是工作成果：压缩后用户说"把刚才那份代码改一下"
-            # 时它必须还在上下文里。
-            #
-            # 超过一定大小就不当 artifact —— artifact 常驻上下文，
-            # 一个几万行的文件会把窗口占满，反而挤掉真正需要的历史。
-            artifact=(
-                ArtifactPayload(kind="file", content=text, path=rel)
-                if len(text) <= settings.agent.artifact_max_chars
-                else None
-            ),
         )
 
 

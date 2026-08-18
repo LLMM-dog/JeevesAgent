@@ -282,22 +282,3 @@ class TestEvents:
         loop = await _loop(db, session_id, llm, _registry(), [])
         result = await loop.run()  # 没有 set_bus，不应抛异常
         assert result.stop_reason == "final"
-
-
-class TestArtifactPinnedLast:
-    async def test_artifact_goes_to_end(self, db: AsyncSession, session_id: str) -> None:
-        """
-        artifact 钉在末尾而非按时序插入 —— 产物是"当前工作成果",
-        模型每轮都要能看到最新版。
-        """
-        await repo.append_message(db, session_id, Msg(role="user", content="q1"))
-        await repo.append_message(db, session_id, Msg(role="artifact", content="CODE"))
-        await repo.append_message(db, session_id, Msg(role="user", content="q2"))
-
-        llm = FakeLLM([text_chunks("ok")])
-        loop = await _loop(db, session_id, llm, _registry(), [])
-        api = loop.build_api_messages()
-
-        assert api[-1]["content"] == "CODE"
-        # artifact 映射成 assistant 角色
-        assert api[-1]["role"] == "assistant"

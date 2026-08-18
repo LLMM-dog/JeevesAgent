@@ -8,8 +8,8 @@
 - **载体**：jsonl。人可读、可 diff、评审时能看清改了哪句话。
   一个 SQL dump 或 pickle 做不到这些。
 - **被测存储**：`message` 表。测试必须走 `repo.append_message` 的真实路径，
-  否则 seq 唯一索引、artifact upsert、ON DELETE CASCADE 一个都没被验证过 ——
-  而那三件正是"消息为什么留在 SQL"的全部理由。
+  否则 seq 唯一索引、ON DELETE CASCADE 一个都没被验证过 ——
+  而那正是"消息为什么留在 SQL"的全部理由。
 
 所以 jsonl 只是【输入源】，导入后就不再被读。测试从数据库读。
 

@@ -54,7 +54,6 @@ _ROLE_LABEL = {
     "assistant": "助手",
     "system": "系统",
     "summary": "上下文摘要",
-    "artifact": "工作产物",
 }
 
 
@@ -152,10 +151,6 @@ def to_markdown(session: Session, messages: list[Message]) -> str:
 
         lines.append((m.content or "").strip())
         lines.append("")
-
-        if m.artifact_kind:
-            lines.append(f"*工作产物：{m.artifact_kind} {m.artifact_path or ''}*")
-            lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -282,8 +277,6 @@ def to_json(session: Session, messages: list[Message]) -> dict[str, Any]:
                 # 一张图几百 KB，几张就让 JSON 文件大到无法处理。
                 # 只留个数，让导入方知道原来有图。
                 "attachment_count": len(_loads(m.attachments, []) or []),
-                "artifact_kind": m.artifact_kind,
-                "artifact_path": m.artifact_path,
                 "run_id": m.run_id,
                 "span_id": m.span_id,
                 "prompt_tokens": m.prompt_tokens,

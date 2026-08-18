@@ -130,8 +130,6 @@ def _msg_out(m: Message) -> MessageOut:
         is_error=bool(m.is_error),
         refs=_loads(m.refs),
         attachments=_loads(m.attachments),
-        artifact_kind=m.artifact_kind,
-        artifact_path=m.artifact_path,
         run_id=m.run_id,
         span_id=m.span_id,
         prompt_tokens=m.prompt_tokens,

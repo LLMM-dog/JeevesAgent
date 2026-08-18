@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Archive, Brain, ChevronRight, Loader2, RotateCcw } from "lucide-react";
 import clsx from "clsx";
 import Markdown from "./Markdown";
@@ -205,9 +205,7 @@ export default function MessageList() {
     }
   });
 
-  const visible = messages.filter(
-    (m) => m.role !== "system" && m.role !== "artifact",
-  );
+  const visible = messages.filter((m) => m.role !== "system");
 
   return (
     <div ref={containerRef} className="min-h-0 flex-1 overflow-y-auto">

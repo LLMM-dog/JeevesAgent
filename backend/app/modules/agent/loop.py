@@ -1,4 +1,4 @@
-﻿"""
+"""
 Agent loop。
 
 ## 为什么 M0 不用 LangGraph
@@ -60,7 +60,6 @@ from app.modules.agent.messages import (
 )
 from app.modules.agent.tokens import count_text, count_tools, estimate_tokens
 from app.modules.agent.tools.base import (
-    ArtifactPayload,
     ToolContext,
     ToolRegistry,
     ToolResult,
@@ -343,21 +342,15 @@ class AgentLoop:
 
     def build_api_messages(self) -> list[dict[str, Any]]:
         """
-        组装顺序固定：system → 历史（压缩后）→ artifact 钉在末尾。
-
-        artifact 钉末尾而非按时序插入：产物是"当前工作成果"，模型每轮都要能
-        看到最新版。按时序插入的话产物会被后续对话推远，注意力衰减。
+        组装顺序固定：system → 历史（压缩后）。
         """
         out: list[dict[str, Any]] = []
         if self.system_prompt:
             out.append({"role": "system", "content": self.system_prompt})
 
-        artifacts = [m for m in self.messages if m.role == "artifact"]
         for m in self.messages:
-            if m.role in ("system", "artifact"):
+            if m.role == "system":
                 continue
-            out.append(m.to_api())
-        for m in artifacts:
             out.append(m.to_api())
         return out
 
@@ -737,55 +730,6 @@ class AgentLoop:
             )
 
         return True
-
-    async def _save_artifact(self, payload: "ArtifactPayload") -> None:
-        """
-        保存一份工作成果。
-
-        ## 三条特殊待遇
-
-        1. 排除在压缩之外（compaction.plan_compaction 里 pinned）
-        2. 每个 (session, agent) 只留最新一版（repo.append_message 里 upsert）
-        3. 钉在上下文末尾（压缩时重排到最后）
-
-        ## 为什么不进 journal
-
-        journal 是"这一轮产生了什么消息"的记录，用于落库。artifact 走
-        upsert 语义，不是追加 —— 混进 journal 会导致同一份产物被写两次。
-
-        工作副本里也要同步替换，否则本轮后续的 LLM 调用看不到最新版。
-        """
-        msg = Msg(
-            role="artifact",
-            content=payload.content,
-            agent_name=self.agent_name,
-        )
-        await repo.append_message(
-            self.db,
-            self.session_id,
-            msg,
-            run_id=self.run_id,
-            artifact_kind=payload.kind,
-            artifact_path=payload.path,
-        )
-        # 工作副本里替换掉旧版，并放到末尾
-        self.messages = [
-            m for m in self.messages if not (m.role == "artifact" and m.agent_name == self.agent_name)
-        ]
-        self.messages.append(msg)
-        await emit(
-            Ev.ARTIFACT_UPDATED,
-            kind=payload.kind,
-            path=payload.path,
-            chars=len(payload.content),
-        )
-        log.info(
-            "artifact_saved",
-            run_id=self.run_id,
-            kind=payload.kind,
-            path=payload.path,
-            chars=len(payload.content),
-        )
 
     def _tail_budget(self) -> int:
         """
@@ -1192,9 +1136,6 @@ class AgentLoop:
                     agent_name=self.agent_name,
                 )
             await self._persist(tool_msg, display=result.display)
-
-            if result.artifact is not None:
-                await self._save_artifact(result.artifact)
 
             await emit(
                 Ev.TOOL_END,

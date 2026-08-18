@@ -396,10 +396,9 @@ class TestAssetToolGivesAbsolutePath:
     模型回复"已完成"，而 reload 之后附件不在 files 白名单里。
     用户看到的是"技能建好了但读不到附件"，而日志里一切正常。
 
-    真实验证时的现场：
-        artifact_saved path=skills/多文件技能-1074/references/detail.md
-        实际落盘 workspace/skills/多文件技能-1074/references/detail.md
-        skills/多文件技能-1074/ 里只有 SKILL.md
+    真实验证时的现场：模型返回"已创建"后，实际落盘却在
+        workspace/skills/多文件技能-1074/references/detail.md
+        而 skills/多文件技能-1074/ 里只有 SKILL.md。
     """
 
     async def _make(self, tmp: Path) -> tuple[object, object]:

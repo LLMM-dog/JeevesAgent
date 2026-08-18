@@ -49,7 +49,6 @@ class CompactPlan:
     cut: int
     tail_start: int
     victims: tuple[Msg, ...]
-    pinned: tuple[Msg, ...]
 
     def is_worth_doing(self, *, urgent: bool = False) -> bool:
         """
@@ -109,10 +108,7 @@ def plan_compaction(
     while head_end < len(messages) and messages[head_end].role == "system":
         head_end += 1
 
-    # artifact 单独钉住，不参与压缩也不占 tail 名额。
-    # 它是"当前工作成果"，压缩掉之后用户说"把刚才那份代码改一下"就没法接。
-    pinned = tuple(m for m in messages[head_end:] if m.role == "artifact")
-    body = [m for m in messages[head_end:] if m.role != "artifact"]
+    body = messages[head_end:]
 
     if not body:
         return None
@@ -153,7 +149,6 @@ def plan_compaction(
         cut=cut_abs,
         tail_start=tail_abs,
         victims=victims,
-        pinned=pinned,
     )
 
 
@@ -163,8 +158,7 @@ def _abs_index(
     """
     把 body 里的下标换算成 messages 里的偏移。
 
-    body 是 messages[head_end:] 去掉 artifact 后的结果，所以下标会错位。
-    用对象身份匹配而不是下标算术 —— 后者在有 artifact 时一定算错。
+    body 是 messages[head_end:] 的切片，用对象身份匹配而不是下标算术。
     """
     if body_index >= len(body):
         return len(messages) - head_end
@@ -448,15 +442,11 @@ async def compact(
         agent_name=agent_name,
     )
 
-    # 新列表 = head + summary + 保留段（含 tail）+ 钉住的 artifact
-    #
-    # artifact 放【最末尾】而不是按时序插入：它是"当前工作成果"，
-    # 放在最后模型最容易注意到。按时序插入会让它埋在中间。
+    # 新列表 = head + summary + 保留段（含 tail）
     new_messages = (
         messages[: plan.head_end]
         + [summary]
-        + [m for m in messages[plan.cut :] if m.role != "artifact"]
-        + list(plan.pinned)
+        + messages[plan.cut :]
     )
 
     after_tokens = estimate_tokens([m.to_api() for m in new_messages], tool_specs)
