@@ -233,7 +233,7 @@ stdio 服务器等同于任意代码执行，规范要求执行前让用户看�
 
 ### GET /api/personas
 
-返回全部三份（`SOUL` / `USER` / `AGENTS`）的内容。
+返回行为规则（`AGENTS`）的内容。
 
 ### PUT /api/personas/{key}
 

@@ -80,19 +80,6 @@ paths:
     critical: false
     note: 默认不存在。不配的话不连任何 MCP 服务器
 
-  - path: personas/SOUL.md
-    kind: config
-    description: 助手的人设
-    created_by: scripts/setup.py 第 6 步
-    template: personas/SOUL.example.md
-    critical: false
-
-  - path: personas/USER.md
-    kind: config
-    description: 关于使用者的信息
-    created_by: scripts/setup.py 第 6 步
-    template: personas/USER.example.md
-    critical: false
 
   - path: .env.verify
     kind: config

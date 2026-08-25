@@ -545,11 +545,10 @@ class TestSetupNonInteractive:
 
     def test_default_skips_interactive_steps(self) -> None:
         src = (ROOT / "scripts" / "setup.py").read_text(encoding="utf-8")
-        # 两个交互步骤必须在 args.interactive 分支里
+        # 交互步骤必须在 args.interactive 分支里
         idx = src.index("if args.interactive:")
         branch = src[idx : idx + 400]
         assert "step5_model()" in branch, "配模型没放进 --interactive 分支"
-        assert "step6_persona()" in branch, "填个人信息没放进 --interactive 分支"
 
     def test_interactive_flag_exists(self) -> None:
         """要保留命令行配置的入口 —— 有人就想在终端里做完。"""

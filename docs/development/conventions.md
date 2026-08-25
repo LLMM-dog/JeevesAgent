@@ -243,7 +243,7 @@ feat: 模型探测支持中转站前缀剥离
 
 见 [../architecture/data-files.md](../architecture/data-files.md#什么进-git什么不进)。
 
-特别注意：`.env`、`config/mcp_servers.yaml`、`personas/SOUL.md`、`personas/USER.md`、`data/`、`workspace/`。
+特别注意：`.env`、`config/mcp_servers.yaml`、`personas/AGENTS.md`、`data/`、`workspace/`。
 
 提交前 `git status` 扫一眼，别用 `git add .`。
 

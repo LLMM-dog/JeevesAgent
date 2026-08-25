@@ -80,19 +80,17 @@ class TestUserDataNotTracked:
         assert not self._tracked(".env")
 
     def test_persona_files_not_tracked(self) -> None:
-        """三个人格文件都能在设置页里改，都不能被跟踪。"""
-        for name in ("SOUL.md", "USER.md", "AGENTS.md"):
-            assert not self._tracked(f"personas/{name}"), (
-                f"personas/{name} 被跟踪 —— 用户改了它之后 git pull 会失败"
-            )
+        """AGENTS.md 能在设置页里改，不能被跟踪。"""
+        assert not self._tracked("personas/AGENTS.md"), (
+            "personas/AGENTS.md 被跟踪 —— 用户改了它之后 git pull 会失败"
+        )
 
     def test_examples_are_tracked(self) -> None:
         """
         .example.md 必须被跟踪 —— 首次启动靠它生成实际文件。
         不跟踪的话新用户装完没有人格设定，行为规则缺失会直接报错。
         """
-        for name in ("SOUL.example.md", "USER.example.md", "AGENTS.example.md"):
-            assert self._tracked(f"personas/{name}"), f"缺 {name}"
+        assert self._tracked("personas/AGENTS.example.md"), "缺 AGENTS.example.md"
 
     def test_workspace_not_tracked(self) -> None:
         r = subprocess.run(
@@ -105,21 +103,19 @@ class TestUserDataNotTracked:
 
 
 class TestFirstRunCopiesExamples:
-    def test_all_three_personas_copied(self) -> None:
+    def test_agent_rules_copied(self) -> None:
         src = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
         m = re.search(r'for name in \(([^)]*)\):', src)
         assert m, "找不到复制人格文件的循环"
-        names = m.group(1)
-        for want in ("SOUL", "USER", "AGENTS"):
-            assert want in names, f"首次启动没复制 {want}"
+        assert "AGENTS" in m.group(1), "首次启动没复制 AGENTS"
 
     def test_never_overwrites_existing(self) -> None:
         """
-        已有文件绝不覆盖 —— 否则每次升级都把用户的人格设定
+        已有文件绝不覆盖 —— 否则每次升级都把用户的行为规则
         重置回默认，而他不会想到是升级干的。
         """
         src = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
-        i = src.index('for name in ("SOUL"')
+        i = src.index('for name in ("AGENTS"')
         body = src[i : i + 500]
         assert "not target.exists()" in body, "没有'已存在就跳过'的判断"
 

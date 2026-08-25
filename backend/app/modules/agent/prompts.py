@@ -11,9 +11,8 @@ get_system_prompt_parts），后者少了一整段内容且没有缓存，导致
 
 ## 不加缓存
 
-用 @lru_cache(maxsize=1) 缓存提示词，结果改了 SOUL.md 必须重启,
-它因此专门做了一个重启端点。这里每次重读文件 —— 几 KB 的读取成本可忽略，
-换来"改完立即生效"。
+用 @lru_cache(maxsize=1) 缓存提示词，结果改了 AGENTS.md 必须重启。
+这里每次重读文件 —— 几 KB 的读取成本可忽略，换来"改完立即生效"。
 """
 
 from dataclasses import dataclass
@@ -93,10 +92,11 @@ def get_prompt_parts(
 
     skills 是 (name, description) 列表 —— 只有 L1，不含正文，不含文件名。
     """
+    # SOUL.md / USER.md 已删除：性格与用户画像改由记忆系统（soul / profile /
+    # identity / preferences 类型）动态召回注入，不再靠静态人设文件。
+    # AGENTS.md 保留：它是行为规则与安全约束（提示词注入防护），无可替代。
     parts = [
         PromptPart("behavior", "行为规则", _read("AGENTS.md", required=True)),
-        PromptPart("soul", "性格设定", _read("SOUL.md")),
-        PromptPart("user", "用户自述", _read("USER.md")),
         PromptPart("env", "运行环境", _env_part(workspace, tool_names or [])),
     ]
 

@@ -165,7 +165,7 @@ jeeves/
   workspace/        默认工作区（gitignore）
   skills/           技能包
   macros/           宏
-  personas/         SOUL.md / USER.md / AGENTS.md
+  personas/         AGENTS.md（行为规则）
   config/           mcp_servers.yaml 等运行时配置（gitignore）
   data/             jeeves.db、上传文件、日志（gitignore）
   docs/             本文档

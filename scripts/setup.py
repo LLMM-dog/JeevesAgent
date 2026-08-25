@@ -404,47 +404,6 @@ def step5_model() -> None:
         say("  可以稍后在设置页里重试")
 
 
-# ─────────────────────────── 6. 人设 ───────────────────────────
-
-
-def step6_persona() -> None:
-    step(6, "填写你的信息")
-
-    personas = ROOT / "personas"
-    personas.mkdir(exist_ok=True)
-    user_md = personas / "USER.md"
-
-    if user_md.is_file() and user_md.read_text(encoding="utf-8").strip():
-        say(f"  {user_md.name} 已有内容，保持不动")
-        say("  （想改的话直接编辑这个文件，或在设置页里改）")
-        return
-
-    say("  这些信息会进入系统提示词，让模型知道该怎么称呼你、按什么风格回答。")
-    say("  可以留空，之后再改。")
-    say()
-
-    name = ask("怎么称呼你", "")
-    role = ask("你的身份/职业（如：Python 后端开发）", "")
-    prefer = ask("回答偏好（如：简洁、多给代码、少解释）", "")
-
-    if not any((name, role, prefer)):
-        say("  （都没填，跳过）")
-        return
-
-    lines = ["# 用户信息", ""]
-    if name:
-        lines.append(f"- 称呼：{name}")
-    if role:
-        lines.append(f"- 身份：{role}")
-    if prefer:
-        lines.append(f"- 回答偏好：{prefer}")
-    lines.append("")
-    lines.append("<!-- 这个文件会进入系统提示词。可以随时编辑，或在设置页里改。 -->")
-
-    user_md.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-    say(f"  ✓ 已写入 {user_md.relative_to(ROOT)}")
-
-
 # ─────────────────────────── 收尾 ───────────────────────────
 
 
@@ -474,7 +433,7 @@ def main() -> int:
         "--interactive",
         "-i",
         action="store_true",
-        help="额外在命令行里配模型和个人信息（默认不问，去设置页配更方便）",
+        help="额外在命令行里配模型（默认不问，去设置页配更方便）",
     )
     args = ap.parse_args()
 
@@ -500,9 +459,8 @@ def main() -> int:
         if args.interactive:
             # 多两步，总数要跟着变
             global TOTAL
-            TOTAL = 6
+            TOTAL = 5
             step5_model()
-            step6_persona()
     except AbortError as e:
         say()
         say(f"中止：{e}")

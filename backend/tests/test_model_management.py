@@ -333,59 +333,7 @@ class TestSessionModelChoice:
 
 
 class TestPersonas:
-    """人格与偏好要能在界面里改。"""
-
-    @pytest.mark.skip(reason="人格 API 已移除，需重新设计后再恢复测试")
-    async def test_list_three_files(self, client: AsyncClient) -> None:
-        r = await client.get("/api/personas")
-        assert r.status_code == 200
-        keys = {i["key"] for i in r.json()["items"]}
-        assert keys == {"soul", "user", "behavior"}
-        # 每个都要有说明，否则用户不知道该写什么
-        assert all(i["hint"] for i in r.json()["items"])
-
-    @pytest.mark.skip(reason="人格 API 已移除，需重新设计后再恢复测试")
-    async def test_save_and_read_back(self, client: AsyncClient) -> None:
-        original = (await client.get("/api/personas")).json()["items"]
-        soul = next(i for i in original if i["key"] == "soul")
-        try:
-            r = await client.put(
-                "/api/personas/soul", json={"content": "# 测试性格\n\n直接、简短。\n"}
-            )
-            assert r.status_code == 200
-            again = (await client.get("/api/personas")).json()["items"]
-            got = next(i for i in again if i["key"] == "soul")
-            assert "测试性格" in got["content"]
-        finally:
-            await client.put("/api/personas/soul", json={"content": soul["content"]})
-
-    @pytest.mark.skip(reason="人格 API 已移除，需重新设计后再恢复测试")
-    async def test_unknown_key_404(self, client: AsyncClient) -> None:
-        """白名单而不是拼路径 —— 否则传 ../../.env 能读写任意文件。"""
-        r = await client.put("/api/personas/../../.env", json={"content": "x"})
-        assert r.status_code in (404, 400, 405)
-
-    @pytest.mark.skip(reason="人格 API 已移除，需重新设计后再恢复测试")
-    async def test_rejects_oversized(self, client: AsyncClient) -> None:
-        """
-        人格文件每轮都进提示词，太长会挤掉上下文预算。
-        """
-        r = await client.put(
-            "/api/personas/soul", json={"content": "x" * (70 * 1024)}
-        )
-        assert r.status_code == 400
-
-    @pytest.mark.skip(reason="人格 API 已移除，需重新设计后再恢复测试")
-    async def test_reset_restores_example(self, client: AsyncClient) -> None:
-        original = (await client.get("/api/personas")).json()["items"]
-        soul = next(i for i in original if i["key"] == "soul")
-        try:
-            await client.put("/api/personas/soul", json={"content": "临时内容"})
-            r = await client.post("/api/personas/soul/reset")
-            assert r.status_code == 200
-            assert "临时内容" not in r.json()["content"]
-        finally:
-            await client.put("/api/personas/soul", json={"content": soul["content"]})
+    """提示词读取无缓存。"""
 
     async def test_takes_effect_without_restart(self) -> None:
         """

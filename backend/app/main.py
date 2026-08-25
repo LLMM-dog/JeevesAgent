@@ -249,7 +249,7 @@ async def init_runtime() -> None:
     #
     # not target.exists() 是关键：已有文件绝不覆盖，否则每次升级
     # 都把用户的人格设定重置回默认，而他不会想到是升级干的。
-    for name in ("SOUL", "USER", "AGENTS"):
+    for name in ("AGENTS",):
         target = settings.personas_dir / f"{name}.md"
         example = settings.personas_dir / f"{name}.example.md"
         if not target.exists() and example.exists():

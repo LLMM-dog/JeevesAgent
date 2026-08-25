@@ -26,12 +26,11 @@ python scripts/setup.py
 
 | 步 | 内容 | 交互 |
 | --- | --- | --- |
-| 1/6 | 检查 Python / Node 版本 | 自动 |
-| 2/6 | `uv sync` 装后端依赖 | 自动 |
-| 3/6 | `npm install` 装前端依赖 | 自动 |
-| 4/6 | 生成 `.env`，**自动生成 `ENCRYPTION_KEY`** | 自动 |
-| 5/6 | **配置模型**：填 Base URL + Key → 自动拉模型列表 → 勾选 | **手动** |
-| 6/6 | 填你的称呼，生成 `personas/USER.md` | **手动** |
+| 1/5 | 检查 Python / Node 版本 | 自动 |
+| 2/5 | `uv sync` 装后端依赖 | 自动 |
+| 3/5 | `npm install` 装前端依赖 | 自动 |
+| 4/5 | 生成 `.env`，**自动生成 `ENCRYPTION_KEY`** | 自动 |
+| 5/5 | **配置模型**：填 Base URL + Key → 自动拉模型列表 → 勾选 | **手动** |
 
 ### 第 4 步必须自动生成 ENCRYPTION_KEY
 

@@ -49,10 +49,9 @@ def repair_tool_pairing(msgs: list[Msg]) -> list[Msg]:
 ## 系统提示词组装
 
 ```
-<人设>            personas/SOUL.md
-<用户信息>        personas/USER.md
 <行为规则>        personas/AGENTS.md
 <环境>            工作区路径、OS、当前时间、可用工具名列表
+<性格/画像>       记忆系统动态召回（soul / profile / identity / preferences）
 <技能清单>        技能 L1（name + description），追加在末尾
 ```
 
