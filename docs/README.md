@@ -12,7 +12,7 @@
 | 目录 | 内容 |
 | --- | --- |
 | [architecture/](architecture/) | 系统设计：后端分层、agent loop、工具/事件/上下文/技能/沙箱/安全、数据层、前端架构、多智能体 |
-| [architecture/tools.md](architecture/tools.md) | 16 个内置工具能做什么 |
+| [architecture/tools.md](architecture/tools.md) | 15 个内置工具能做什么 |
 | [architecture/execution.md](architecture/execution.md) | 命令执行与审批。**安全边界写在开头，动手前先看** |
 | [architecture/skills.md](architecture/skills.md) | 技能与宏：三级渐进披露、上传校验、模型自己建技能 |
 | [architecture/cron.md](architecture/cron.md) | 定时任务：调度、错过窗口、时区、无头执行 |

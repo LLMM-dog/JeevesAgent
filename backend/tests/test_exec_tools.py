@@ -1,5 +1,5 @@
 """
-run_shell / run_python 工具的测试。
+run_shell 工具的测试。
 
 进程层的行为（超时杀树、stdin、截断）在 test_sandbox_local.py 里测过了，
 这里测的是工具层：参数处理、cwd 白名单、错误转成给模型的文本。
@@ -13,11 +13,7 @@ import pytest
 from app.core.config import settings
 from app.modules.agent.pathguard import AllowedPath, set_allowed
 from app.modules.agent.tools.base import ToolContext
-from app.modules.agent.tools.exec import (
-    RunPythonTool,
-    RunShellTool,
-    _clamp_timeout,
-)
+from app.modules.agent.tools.exec import RunShellTool, _clamp_timeout
 
 WIN = sys.platform == "win32"
 
@@ -158,108 +154,3 @@ class TestRunShell:
         """
         desc = RunShellTool.description
         assert "cwd" in desc.lower()
-
-
-class TestRunPython:
-    async def test_runs_code(self, ws: Path) -> None:
-        r = await RunPythonTool().run(mk_ctx(ws), code="print(2 + 3)")
-        assert r.is_error is False
-        assert "5" in r.content
-
-    async def test_empty_code_rejected(self, ws: Path) -> None:
-        r = await RunPythonTool().run(mk_ctx(ws), code="\n  \n")
-        assert r.is_error is True
-
-    async def test_traceback_has_real_line_numbers(self, ws: Path) -> None:
-        """
-        报错要能看到真实行号。
-
-        用 `python -c` 传代码时 traceback 显示的是 "<string>"，
-        模型无法定位。写临时文件才有行号。
-        """
-        code = "x = 1\ny = 2\nraise ValueError('boom')\n"
-        r = await RunPythonTool().run(mk_ctx(ws), code=code)
-        assert r.is_error is True
-        assert "ValueError" in r.content
-        assert "boom" in r.content
-        assert "line 3" in r.content, "看不到真实行号，模型无法定位"
-
-    async def test_uses_project_interpreter(self, ws: Path) -> None:
-        """
-        必须用 sys.executable，不是 PATH 上的 python。
-
-        虚拟环境里 PATH 上的 python 可能是系统解释器，
-        那样 import 项目依赖会失败。
-        """
-        code = "import sys; print(sys.executable)"
-        r = await RunPythonTool().run(mk_ctx(ws), code=code)
-        assert r.is_error is False
-        # 至少是同一个解释器目录
-        assert Path(sys.executable).stem.lower() in r.content.lower()
-
-    async def test_can_import_project_deps(self, ws: Path) -> None:
-        """项目依赖要能 import —— 这是用 sys.executable 的实际收益。"""
-        r = await RunPythonTool().run(
-            mk_ctx(ws), code="import structlog; print('dep ok')"
-        )
-        assert r.is_error is False
-        assert "dep ok" in r.content
-
-    async def test_temp_script_cleaned_up(self, ws: Path) -> None:
-        """
-        临时脚本要清理，否则临时目录无限增长。
-
-        python_code_runner.py:214-220 同样放在 finally 里。
-        """
-        before = set(settings.temp_dir.glob("snippet_*.py"))
-        await RunPythonTool().run(mk_ctx(ws), code="print('x')")
-        after = set(settings.temp_dir.glob("snippet_*.py"))
-        assert after == before, "临时脚本没清理"
-
-    async def test_temp_script_cleaned_up_on_timeout(self, ws: Path) -> None:
-        """超时路径也要清理 —— finally 的意义就在这里。"""
-        before = set(settings.temp_dir.glob("snippet_*.py"))
-        await RunPythonTool().run(
-            mk_ctx(ws), code="import time; time.sleep(30)", timeout=2
-        )
-        after = set(settings.temp_dir.glob("snippet_*.py"))
-        assert after == before
-
-    async def test_utf8_code_and_output(self, ws: Path) -> None:
-        """
-        中文代码和输出都要正常。
-
-        Windows 上不设 PYTHONIOENCODING 会得到乱码或 UnicodeEncodeError。
-        """
-        r = await RunPythonTool().run(
-            mk_ctx(ws), code="print('中文输出正常')"
-        )
-        assert r.is_error is False
-        assert "中文输出正常" in r.content
-
-    async def test_not_in_process_exec(self, ws: Path) -> None:
-        """
-        必须是子进程，不是同进程 exec。
-
-        run_python 在同进程 exec，工具描述写着
-        "在隔离环境中执行"，但 get_safe_builtins 保留了 __import__ ——
-        一行 `import os; os.system(...)` 就绕过了它的路径白名单。
-
-        这里验证：代码里拿到的 PID 与当前进程不同。
-        """
-        import os
-
-        r = await RunPythonTool().run(mk_ctx(ws), code="import os; print(os.getpid())")
-        assert r.is_error is False
-        child_pid = int(r.content.strip().splitlines()[-1])
-        assert child_pid != os.getpid(), "在同进程里执行了 —— 崩溃会拖垮整个服务"
-
-    async def test_crash_does_not_kill_server(self, ws: Path) -> None:
-        """子进程崩溃不影响主进程。这是不用同进程 exec 的核心收益。"""
-        r = await RunPythonTool().run(
-            mk_ctx(ws), code="import os; os._exit(42)"
-        )
-        assert r.display is not None
-        assert r.display["exit_code"] == 42
-        # 主进程还活着才能跑到这里
-        assert r.is_error is True

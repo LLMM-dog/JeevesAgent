@@ -71,7 +71,7 @@ class PreparedChat:
 _TOOL_PERMISSION_MAP: dict[str, str] = {
     "read_file": "read", "grep": "read", "glob": "read", "list_dir": "read",
     "write_file": "write", "edit_file": "write",
-    "run_shell": "shell", "run_python": "shell",
+    "run_shell": "shell",
     "web_search": "network", "web_fetch": "network",
     "delegate_task": "subagent",
 }

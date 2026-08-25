@@ -180,8 +180,7 @@ registry.hooks.on(HookPoint.AFTER_TOOL, observe)
 
 | 工具 | 审批 | 说明 |
 | --- | --- | --- |
-| `run_shell` | **是** | 经 sandbox 执行 shell 命令 |
-| `run_python` | **是** | 经 sandbox 执行 Python 代码 |
+| `run_shell` | **是** | 经 sandbox 执行 shell 命令（可执行 python / java / c 等任意命令） |
 
 ### Todo（`tools/todo.py`）
 

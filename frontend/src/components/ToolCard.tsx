@@ -23,7 +23,6 @@ const ICONS: Record<string, typeof FileText> = {
   glob: Search,
   grep: Search,
   run_command: Terminal,
-  run_python: Terminal,
   todo_write: ListChecks,
   todo_read: ListChecks,
   compact_context: Archive,

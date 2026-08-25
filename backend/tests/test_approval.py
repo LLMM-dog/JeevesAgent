@@ -414,18 +414,16 @@ class TestModeSwitchTakesEffectImmediately:
 
 
 class TestExecToolsRequireApproval:
-    def test_run_shell_and_run_python_are_gated(self) -> None:
+    def test_run_shell_is_gated(self) -> None:
         """
         执行类工具必须标 requires_approval。
 
         一条命令能做的事没有上界：curl | sh、删库、把 SSH key 传出去。
-        路径白名单在这里帮不上忙，命令字符串的正则匹配也不是安全边界
-        （同类实现-mode 自己就把 curl 放在白名单里）。
+        路径白名单在这里帮不上忙，命令字符串的正则匹配也不是安全边界。
         """
-        from app.modules.agent.tools.exec import RunPythonTool, RunShellTool
+        from app.modules.agent.tools.exec import RunShellTool
 
         assert RunShellTool.requires_approval is True
-        assert RunPythonTool.requires_approval is True
 
     def test_write_and_edit_are_gated(self) -> None:
         """写文件同样要审批 —— 覆盖用户的文件是不可逆的。"""

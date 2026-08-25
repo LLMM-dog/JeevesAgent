@@ -617,41 +617,6 @@ class TestToolWiring:
         assert "get_sandbox" in src
         assert "run_process" not in src, "不该绕过 SandboxPort 直接调 run_process"
 
-    def test_run_python_uses_sandbox(self) -> None:
-        from app.modules.agent.tools.exec import RunPythonTool
-
-        src = inspect.getsource(RunPythonTool.run)
-        assert "get_sandbox" in src
-        assert "run_process" not in src
-
-    def test_run_python_handles_container_interpreter(self) -> None:
-        """
-        容器里不能用 sys.executable。
-
-        那是宿主的解释器路径（D:\\...\\.venv\\Scripts\\python.exe），
-        容器里根本不存在 —— 报 "no such file or directory"，
-        而错误信息里出现一个 Windows 路径会让人完全看不懂。
-        """
-        from app.modules.agent.tools.exec import RunPythonTool
-
-        src = inspect.getsource(RunPythonTool.run)
-        assert "python3" in src
-        assert 'sandbox.name == "docker"' in src
-
-    def test_run_python_script_inside_workspace_for_docker(self) -> None:
-        """
-        Docker 下脚本必须写在工作区内。
-
-        容器只挂载了工作区，data/tmp 在容器里不存在 ——
-        放外面的话报 "can't open file"，而真因是
-        "这个文件在宿主上，容器看不到"。
-        """
-        from app.modules.agent.tools.exec import RunPythonTool
-
-        src = inspect.getsource(RunPythonTool.run)
-        assert ".jeeves" in src
-        assert "temp_dir" in src, "本地后端仍该用 temp_dir"
-
     def test_session_delete_cleans_sandbox(self) -> None:
         """
         删会话要删容器。
@@ -731,11 +696,11 @@ class TestMultiWorkspaceMount:
         工具层必须传 ctx.workspace —— 那是从
         workspace.root_path 一路传下来的真实路径。
         """
-        from app.modules.agent.tools.exec import RunPythonTool, RunShellTool
+        from app.modules.agent.tools.exec import RunShellTool
 
         from tests.conftest import code_only
 
-        for tool in (RunShellTool, RunPythonTool):
+        for tool in (RunShellTool,):
             src = code_only(inspect.getsource(tool.run)).replace(" ", "")
             assert "ws_root=ctx.workspace" in src, f"{tool.__name__} 没传真实工作区"
 

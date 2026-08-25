@@ -143,3 +143,30 @@ class TestEditRequiresApproval:
 
         assert EditFileTool.requires_approval is True
         assert WriteFileTool.requires_approval is True
+
+
+class TestWriteFileInsert:
+    async def test_insert_after_line(self, ws: Path) -> None:
+        """write_file 的 insert_line 只写目标处，无需传整个文件。"""
+        from app.modules.agent.tools.file import WriteFileTool
+
+        (ws / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+        r = await WriteFileTool().run(mk_ctx(ws), path="a.py", content="z = 3", insert_line=1)
+        assert r.is_error is False
+        assert (ws / "a.py").read_text(encoding="utf-8") == "x = 1\nz = 3\ny = 2\n"
+
+    async def test_insert_at_start(self, ws: Path) -> None:
+        from app.modules.agent.tools.file import WriteFileTool
+
+        (ws / "a.py").write_text("y = 2\n", encoding="utf-8")
+        r = await WriteFileTool().run(mk_ctx(ws), path="a.py", content="x = 1", insert_line=0)
+        assert r.is_error is False
+        assert (ws / "a.py").read_text(encoding="utf-8") == "x = 1\ny = 2\n"
+
+    async def test_insert_out_of_range(self, ws: Path) -> None:
+        from app.modules.agent.tools.file import WriteFileTool
+
+        (ws / "a.py").write_text("y = 2\n", encoding="utf-8")
+        r = await WriteFileTool().run(mk_ctx(ws), path="a.py", content="z = 3", insert_line=99)
+        assert r.is_error is True
+        assert "超出范围" in r.content

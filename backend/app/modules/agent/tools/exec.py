@@ -1,35 +1,27 @@
 """
-执行类工具：run_shell / run_python。
+执行类工具：run_shell。
 
-## 为什么这两个都标 requires_approval
+## 为什么只有 run_shell、没有 run_python
 
-它们能做的事没有上界。文件工具受路径白名单约束，而一条 shell 命令可以
+run_shell 本身就能执行任意命令 —— `python script.py`、`java Main`、
+`gcc a.c && ./a.out` 都在其能力范围内。单独的 run_python 工具是冗余的：
+它只是"写临时脚本 + python 执行"的薄封装，而模型完全可以用
+write_file 写脚本再用 run_shell 执行（这条路径同样覆盖 java / c 等其它语言，
+一个工具比两个更简单、更不易选错）。
+
+## 为什么 run_shell 标 requires_approval
+
+它能做的事没有上界。文件工具受路径白名单约束，而一条 shell 命令可以
 `curl | sh`、可以删库、可以把 SSH key 传出去。白名单在这里帮不上忙 ——
 命令字符串的正则匹配不是安全边界（那是"防手滑"而非
-安全机制的例子，它自己都把 `curl` 放在白名单里）。
+安全机制的例子，它自己都把 curl 放在白名单里）。
 
 真正的边界只有两个：人工确认，或者容器/OS 级隔离。本项目默认前者
-（`approval_mode="manual"`），并在文档里明确说清这一点，不假装安全。
-
-## run_python 是个反面教材
-
-它的工具描述写着"在隔离环境中执行 Python 代码"，实现是同进程 `exec()`，
-而 `get_safe_builtins` 的 docstring 自己承认：
-
-    保留全部内置函数（包括 __import__、eval 等），
-    仅将 open() 替换为经过 check_path_whitelisted() 审查的包装版本。
-
-保留 `__import__` 意味着 `import os; os.system(...)` 完全可用 ——
-所谓的路径白名单只 hook 了 `open()`，一行 import 就绕过去了。
-
-所以本项目的 run_python **不在同进程 exec**，而是写临时文件 + 起子进程。
-这样超时能杀、输出能截断、崩溃不影响主进程。代价是启动慢一点（几十毫秒），
-换来的是行为可预测。
+（approval_mode="manual"），并在文档里明确说清这一点，不假装安全。
 """
 
 from __future__ import annotations
 
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -195,122 +187,3 @@ class RunShellTool:
             ws_root=ctx.workspace,
         )
         return _format(result, what="命令")
-
-
-class RunPythonTool:
-    name = "run_python"
-    description = "执行 Python 代码。子进程运行，变量与导入不跨调用保留。"
-    requires_approval = True
-
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "要执行的 Python 代码"},
-                "cwd": {
-                    "type": "string",
-                    "description": "工作目录，相对于工作区根目录",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": f"超时秒数，默认 {settings.sandbox.timeout_default}",
-                },
-            },
-            "required": ["code"],
-        }
-
-    async def run(self, ctx: ToolContext, **kw: Any) -> ToolResult:
-        code = str(kw.get("code") or "")
-        if not code.strip():
-            return ToolResult(content="code 不能为空", is_error=True)
-
-        try:
-            cwd = _resolve_cwd(ctx, kw.get("cwd"))
-        except NotADirectoryError as e:
-            return ToolResult(content=str(e), is_error=True)
-        except PathDeniedError as e:
-            return ToolResult(
-                content=f"工作目录被拒绝：{e.message}。请改用工作区内的相对路径",
-                is_error=True,
-            )
-
-        timeout = _clamp_timeout(kw.get("timeout"))
-
-        # 写临时脚本再执行，而不是 `python -c`。
-        #
-        # 三个理由：
-        # 1. `-c` 传长代码时会撞命令行长度上限（Windows 约 8191 字符）
-        # 2. traceback 里能看到真实行号，`-c` 显示的是 "<string>"
-        # 3. 代码里的引号不用转义 —— `-c` 要处理嵌套引号，很容易出错
-        #
-        # 脚本放哪取决于后端。
-        #
-        # 本地执行：放 temp_dir（data/tmp），不污染用户的项目目录。
-        #
-        # Docker：【必须放工作区内】—— 容器只挂载了工作区，
-        # data/tmp 在容器里根本不存在。放外面的话报
-        # "can't open file '/workspace/snippet_x.py'"，
-        # 而真因是"这个文件在宿主上，容器看不到"。
-        #
-        # 工作区内用 .jeeves/ 子目录（已在 PathGuard 的忽略列表里，
-        # 不会被 glob/grep 搜到，也不会让 agent 在自己的临时脚本里
-        # 搜到自己的代码）。
-        sandbox = await get_sandbox()
-        if sandbox.name == "docker":
-            script_dir = cwd / ".jeeves"
-        else:
-            script_dir = settings.temp_dir
-        try:
-            script_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            return ToolResult(content=f"无法创建临时目录：{e}", is_error=True)
-        script = script_dir / f"snippet_{uuid.uuid4().hex}.py"
-        try:
-            script.write_text(code, encoding="utf-8", newline="")
-        except OSError as e:
-            return ToolResult(content=f"无法写入临时脚本：{e}", is_error=True)
-
-        log.info(
-            "run_python",
-            run_id=ctx.run_id,
-            cwd=str(cwd),
-            timeout=timeout,
-            code_chars=len(code),
-        )
-        try:
-            if sandbox.name == "docker":
-                # 容器里不能用 sys.executable。
-                #
-                # 那是【宿主】的解释器路径（比如
-                # D:\...\.venv\Scripts\python.exe），容器里根本不存在 ——
-                # 报的是 "no such file or directory"，而错误信息里出现一个
-                # Windows 路径会让人完全看不懂发生了什么。
-                #
-                # 容器里用镜像自带的 python3（默认镜像是 python:3.12-slim）。
-                # 脚本写在 cwd/.jeeves/ 下，而 docker exec 的工作目录就是
-                # cwd 对应的容器路径 —— 所以用相对路径 .jeeves/xxx.py 即可。
-                command = f'python3 ".jeeves/{script.name}"'
-            else:
-                # 用 sys.executable 而不是 "python"：虚拟环境里 PATH 上的
-                # python 可能是系统解释器，那样 import 项目依赖会失败。
-                import sys
-
-                # PowerShell 里带引号的可执行文件路径必须用调用运算符 `&`，
-                # 否则它把引号内容当字符串字面量，报 "Unexpected token"。
-                # 实测：`"C:\...\python.exe" "script.py"` 直接 exit=1。
-                # bash 没有这个问题，但加了 & 也不影响 —— 所以不分平台处理。
-                prefix = "& " if sys.platform == "win32" else ""
-                command = f'{prefix}"{sys.executable}" "{script}"'
-
-            result = await sandbox.run(
-                command,
-                cwd=cwd,
-                session_id=ctx.session_id,
-                timeout=timeout,
-                ws_root=ctx.workspace,
-            )
-            return _format(result, what="脚本")
-        finally:
-            # 无论成功失败都清理。python_code_runner.py:214-220
-            # 同样放在 finally 里 —— 不清理的话临时目录会无限增长。
-            script.unlink(missing_ok=True)

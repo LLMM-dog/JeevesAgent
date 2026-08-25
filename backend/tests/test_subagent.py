@@ -71,7 +71,7 @@ class TestSpecLoading:
         reg = load_specs(Path("does-not-exist"))
         for name in ("researcher", "reviewer"):
             tools = set(reg.specs[name].tools)
-            assert not (tools & {"write_file", "edit_file", "run_shell", "run_python"}), (
+            assert not (tools & {"write_file", "edit_file", "run_shell"}), (
                 f"{name} 拿到了写入或执行权限"
             )
 

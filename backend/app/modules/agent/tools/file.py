@@ -145,7 +145,11 @@ class ReadFileTool:
 
 class WriteFileTool:
     name = "write_file"
-    description = "写文件，整体覆盖。主要用于新建文件。修改已有文件优先用 edit_file。"
+    description = (
+        "写文件。新建文件或整体覆盖时只传 path + content；"
+        "在已有文件的指定行后插入一段代码时传 insert_line + content"
+        "（只写目标处代码，无需重传整个文件）。修改已有代码优先用 edit_file。"
+    )
     requires_approval = True
 
     def parameters(self) -> dict[str, Any]:
@@ -153,7 +157,14 @@ class WriteFileTool:
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": '文件路径，如 "src/new.py"'},
-                "content": {"type": "string", "description": "完整文件内容"},
+                "content": {"type": "string", "description": "要写入的代码内容"},
+                "insert_line": {
+                    "type": "integer",
+                    "description": (
+                        "可选。1-based 行号，把 content 插入到该行之后。"
+                        "0 表示插入文件开头。只写目标处代码，不用传整个文件。"
+                    ),
+                },
             },
             "required": ["path", "content"],
         }
@@ -161,6 +172,7 @@ class WriteFileTool:
     async def run(self, ctx: ToolContext, **kw: Any) -> ToolResult:
         raw = str(kw.get("path", "")).strip()
         content = kw.get("content")
+        insert_line = kw.get("insert_line")
         if not raw:
             return ToolResult(content="path 不能为空", is_error=True)
         if content is None:
@@ -170,6 +182,45 @@ class WriteFileTool:
         if not target.is_absolute():
             target = ctx.workspace / target
         resolved = get_guard().check(target, write=True)
+
+        # 增量插入：只把 content 插到目标行之后，不需要重传整个文件
+        if insert_line is not None:
+            try:
+                n = int(insert_line)
+            except (TypeError, ValueError):
+                return ToolResult(content="insert_line 必须是整数", is_error=True)
+            if n < 0:
+                return ToolResult(content="insert_line 不能为负数", is_error=True)
+
+            if resolved.exists():
+                try:
+                    existing = resolved.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as e:
+                    return ToolResult(content=f"读取失败：{e}", is_error=True)
+                existing_lines = existing.split("\n")
+                if n > len(existing_lines):
+                    return ToolResult(
+                        content=f"insert_line {n} 超出范围（文件共 {len(existing_lines)} 行）",
+                        is_error=True,
+                    )
+                existing_lines[n:n] = str(content).split("\n")
+                new_text = "\n".join(existing_lines)
+                action = "已插入"
+            else:
+                new_text = str(content)
+                action = "已创建"
+
+            try:
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                resolved.write_text(new_text, encoding="utf-8", newline="")
+            except OSError as e:
+                return ToolResult(content=f"写入失败：{e}", is_error=True)
+
+            rel = _rel(resolved, ctx.workspace)
+            return ToolResult(
+                content=f"{action} {rel}（+{str(content).count(chr(10)) + 1} 行，插入到第 {n} 行后）",
+                display={"path": rel, "lines": str(content).count("\n") + 1, "insert_at": n},
+            )
 
         existed = resolved.exists()
         try:

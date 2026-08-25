@@ -232,14 +232,14 @@ tags: [pytest, asyncio]
 
 `skills/` 在可写白名单里，模型用的是它已经熟练的 `write_file` / `edit_file`，不是一套专门的 API。你跟它说"学一下这个规范"，它就写成技能存下来，下次自动想起来用。
 
-### 文件与命令：17 个内置工具
+### 文件与命令：15 个内置工具
 
-16 个内置工具，配了搜索后端是 17 个：
+15 个内置工具，配了搜索后端是 16 个：
 
 | 类别 | 工具 | 审批 |
 | --- | --- | --- |
 | 文件 | `read_file` / `write_file` / `edit_file` / `list_dir` / `glob` / `grep` | 写操作需要 |
-| 执行 | `run_shell` / `run_python` | 需要 |
+| 执行 | `run_shell`（可跑 python / java / c 等任意命令） | 需要 |
 | 任务 | `todo_write` / `todo_read` | 否 |
 | 技能 | `load_skill` / `load_skill_file` / `manage_asset` | 部分需要 |
 | 上下文 | `compact_context` | 否 |

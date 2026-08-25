@@ -389,7 +389,7 @@ def read_skill_file(meta: SkillMeta, rel_path: str) -> tuple[str | None, str]:
     if ext in _BINARY_EXTS:
         return None, (
             f"{rel_path} 是二进制文件（{ext}），不能作为文本读取。"
-            "如需处理它，用 run_python 之类的工具，路径见技能正文。"
+            "如需处理它，用 run_shell 之类的工具，路径见技能正文。"
         )
 
     try:
@@ -409,7 +409,7 @@ def read_skill_file(meta: SkillMeta, rel_path: str) -> tuple[str | None, str]:
         # 不加的话模型容易把脚本内容当成"要我照着执行的指令"。明确说清
         # 它是源码、执行要走沙箱和审批。
         content = (
-            "（以下是技能提供的脚本源码。如需执行，用 run_python / run_shell，"
+            "（以下是技能提供的脚本源码。如需执行，用 run_shell，"
             "并遵循审批流程。）\n\n" + content
         )
     return content, ""

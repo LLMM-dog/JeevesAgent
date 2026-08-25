@@ -50,7 +50,7 @@ from app.modules.agent.pathguard import AllowedPath, set_allowed
 from app.modules.agent.tools.asset import ManageAssetTool
 from app.modules.agent.tools.base import ToolRegistry
 from app.modules.agent.tools.context import CompactContextTool
-from app.modules.agent.tools.exec import RunPythonTool, RunShellTool
+from app.modules.agent.tools.exec import RunShellTool
 from app.modules.agent.tools.file import (
     EditFileTool,
     GlobTool,
@@ -116,7 +116,6 @@ def build_registry() -> ToolRegistry:
         GrepTool(),
         # 执行类工具都标了 requires_approval，manual 模式下每次都要人确认
         RunShellTool(),
-        RunPythonTool(),
         LoadSkillTool(),
         LoadSkillFileTool(),
         SubAgentTool(),
