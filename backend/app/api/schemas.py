@@ -100,6 +100,9 @@ class CreateSessionRequest(BaseModel):
 
 class PatchSessionRequest(BaseModel):
     title: str | None = None
+    # 切换工作区（决定根目录 + 执行环境）。切换时会同步把工作目录
+    # 改成新工作区的根目录。
+    workspace_id: str | None = None
     # 这次对话的工作目录。传空串表示清除。
     #
     # 用 str 而不是 Path：Path 在 JSON 里没有对应类型，

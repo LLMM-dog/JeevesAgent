@@ -467,6 +467,20 @@ export interface TailscaleAction {
   status: TailscaleStatus;
 }
 
+export interface WorkspaceItem {
+  id: string;
+  name: string;
+  root_path: string;
+  is_default: boolean;
+  sandbox_backend: "local" | "docker";
+  docker_container: string;
+  docker_image: string;
+  docker_network: "none" | "bridge";
+  container_status: "" | "running" | "stopped" | "not_found";
+  created_at: number;
+  updated_at: number;
+}
+
 export interface CpolarStatus {
   installed: boolean;
   authtoken_configured: boolean;

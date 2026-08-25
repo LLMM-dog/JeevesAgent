@@ -10,6 +10,7 @@ import TracePanel from "@/components/TracePanel";
 import ModelsPanel from "@/components/ModelsPanel";
 import AgentsPanel from "@/components/AgentsPanel";
 import WhitelistPanel from "@/components/WhitelistPanel";
+import WorkspacePanel from "@/components/WorkspacePanel";
 
 
 // URL 里用英文 key，中文只用于显示 —— 中文 key 进 query string 会被
@@ -181,6 +182,7 @@ export default function SettingsPage() {
 
         {active === "files" && (
           <div {...panelProps("files")}>
+            <WorkspacePanel />
             <WhitelistPanel />
           </div>
         )}

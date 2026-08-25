@@ -10,6 +10,7 @@ import type {
   AuthMeResponse,
   CpolarAction,
   CpolarStatus,
+  WorkspaceItem,
   DeploySettingsResponse,
   DeployStatus,
   EnableAuthResponse,
@@ -195,6 +196,30 @@ export const api = {
     request<UserItem>(`/auth/users/${id}`, { method: "PATCH", json: body }),
   deleteUser: (id: string) =>
     request<{ ok: boolean }>(`/auth/users/${id}`, { method: "DELETE" }),
+
+  // ── 工作区 ──
+
+  listWorkspaces: () => request<WorkspaceItem[]>("/workspaces"),
+  createWorkspace: (body: {
+    name: string;
+    root_path: string;
+    sandbox_backend?: "local" | "docker";
+    docker_container?: string;
+    docker_image?: string;
+    docker_network?: "none" | "bridge";
+  }) => request<WorkspaceItem>("/workspaces", { method: "POST", json: body }),
+  patchWorkspace: (
+    id: string,
+    body: Partial<{
+      name: string;
+      sandbox_backend: "local" | "docker";
+      docker_container: string;
+      docker_image: string;
+      docker_network: "none" | "bridge";
+    }>,
+  ) => request<WorkspaceItem>(`/workspaces/${id}`, { method: "PATCH", json: body }),
+  deleteWorkspace: (id: string) =>
+    request<{ ok: boolean }>(`/workspaces/${id}`, { method: "DELETE" }),
 
   // ── 部署 ──
 
@@ -761,6 +786,8 @@ export const api = {
       agent_id: string;
       /** 这次对话的工作目录。传空串清除 */
       work_dir: string;
+      /** 切换工作区（根目录 + 执行环境） */
+      workspace_id: string;
       title: string;
       pinned: boolean;
       approval_mode: "manual" | "auto";

@@ -406,6 +406,12 @@ async def patch_session(
 
     if "title" in data and data["title"] is not None:
         s.title = data["title"]
+    if "workspace_id" in data and data["workspace_id"] is not None:
+        ws = await repo.get_workspace(db, data["workspace_id"])
+        if ws.id != s.workspace_id:
+            s.workspace_id = ws.id
+            # 切工作区 = 换根目录，工作目录同步指到新根目录
+            s.work_dir = ws.root_path
     if "pinned" in data and data["pinned"] is not None:
         s.pinned = 1 if data["pinned"] else 0
     if "work_dir" in data and data["work_dir"] is not None:
