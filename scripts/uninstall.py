@@ -35,6 +35,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTAINER_PREFIX = "jeeves-"
+TAILSCALE_DIR = ROOT / ".tailscale"
 IMAGE = "python:3.12-slim"
 
 
@@ -72,6 +73,90 @@ def ask_yes(prompt: str, *, default: bool = True) -> bool:
     return got in ("y", "yes", "是")
 
 
+# ───────────────────────── 1. Tailscale 便携版 ─────────────────────────
+
+
+def _kill_tailscaled() -> None:
+    """停掉项目内的 tailscaled（便携版，socket/state 都在 .tailscale/）。"""
+    if sys.platform == "win32":
+        ps_cmd = (
+            'Get-CimInstance Win32_Process -Filter "Name=\'tailscaled.exe\'" | '
+            + f"Where-Object {{ $_.CommandLine -like '*{ROOT}*' }} | "
+            + "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+        )
+        code, _ = sh(["powershell", "-NoProfile", "-Command", ps_cmd], timeout=30)
+        if code == 0:
+            say("   ✓ 已停止 tailscaled 进程")
+        else:
+            say("   （没有在跑的 tailscaled）")
+    else:
+        code, _ = sh(["pkill", "-f", str(TAILSCALE_DIR)], timeout=30)
+        say("   ✓ 已停止 tailscaled 进程" if code == 0 else "   （没有在跑的 tailscaled）")
+
+
+def clean_tailscale(dry: bool) -> None:
+    """
+    清理便携版 Tailscale。
+
+    便携版用 --tun=userspace-networking（纯用户态），不装内核 TUN 驱动、
+    不写注册表、不装服务 —— 所以停进程 + 删 .tailscale/ 就彻底干净。
+    """
+    say("1. Tailscale 便携版")
+    if not TAILSCALE_DIR.exists():
+        say("   没有便携版（未安装或已清理）")
+        return
+
+    # 找便携 CLI
+    exe = None
+    for name in ("tailscale.exe", "tailscale"):
+        cand = TAILSCALE_DIR / "bin" / name
+        if cand.exists():
+            exe = cand
+            break
+
+    if exe is not None:
+        sock = TAILSCALE_DIR / "tailscaled.sock"
+        if dry:
+            say(f"   [dry-run] 会执行：{exe.name} --socket {sock.name} logout")
+        else:
+            code, _ = sh([str(exe), "--socket", str(sock), "logout"], timeout=30)
+            say("   ✓ 已从 Tailscale 账号移除该节点" if code == 0 else "   （节点未登录或已离线，跳过）")
+
+    if dry:
+        say(f"   [dry-run] 会停止 tailscaled 并删除 {TAILSCALE_DIR}")
+    else:
+        _kill_tailscaled()
+        shutil.rmtree(TAILSCALE_DIR, ignore_errors=True)
+        say("   ✓ 已删除项目内 .tailscale/（二进制、登录状态、socket）")
+
+
+def clean_system_tailscale(dry: bool) -> None:
+    """卸载【系统版】Tailscale（官方安装的）。
+
+    tailscale uninstall 会：登出该节点、停服务、卸载服务、删 TUN 驱动。
+    便携版（.tailscale/）不在这里处理，见 clean_tailscale。
+    """
+    exe = shutil.which("tailscale")
+    if exe is None and sys.platform == "win32":
+        for p in (r"C:\Program Files\Tailscale\tailscale.exe",):
+            if Path(p).exists():
+                exe = p
+                break
+    if exe is None:
+        return
+
+    code, _ = sh([exe, "version"], timeout=15)
+    if code != 0:
+        return  # 不是官方系统版，或不可用
+
+    say()
+    say("1b. 系统版 Tailscale")
+    if dry:
+        say(f"   [dry-run] 会执行：{exe} uninstall")
+        return
+    code, out = sh([exe, "uninstall"], timeout=120)
+    say("   ✓ 已卸载系统版 Tailscale" if code == 0 else f"   ⚠ 卸载返回非零（{out.strip()[:150]}），可用 winget uninstall Tailscale.Tailscale 再试")
+
 # ───────────────────────── 1. Docker 容器 ─────────────────────────
 
 
@@ -83,7 +168,7 @@ def clean_containers(dry: bool) -> int:
     而且删了项目文件夹之后就再也没有东西会去清理它们
     （启动时的 cleanup_orphans 依赖"下次启动"，而已经没有下次了）。
     """
-    say("1. Docker 容器（项目创建的）")
+    say("2. Docker 容器（项目创建的）")
     code, out = sh(["docker", "ps", "-aq", "--filter", f"name={CONTAINER_PREFIX}"])
     if code == 127:
         say("   跳过：没装 Docker")
@@ -118,7 +203,7 @@ def clean_image(dry: bool, force: bool) -> None:
     删镜像。默认不删 —— 别的项目可能也在用 python:3.12-slim。
     """
     say()
-    say("2. Docker 镜像")
+    say("3. Docker 镜像")
     code, out = sh(["docker", "images", "-q", IMAGE])
     if code == 127 or code != 0:
         say("   跳过：Docker 不可用")
@@ -148,7 +233,7 @@ def clean_caches(dry: bool, force: bool) -> None:
     清了别的项目也要重新下载。
     """
     say()
-    say("3. 包管理器缓存（uv / npm）")
+    say("4. 包管理器缓存（uv / npm）")
     if not force:
         say("   保留 —— 这是全局缓存，清了别的项目要重新下载")
         say("   要清：uv cache clean  且  npm cache clean --force")
@@ -173,7 +258,7 @@ def check_processes() -> None:
     会留下孤儿进程占着端口。
     """
     say()
-    say("4. 残留进程")
+    say("5. 残留进程")
     try:
         sys.path.insert(0, str(ROOT / "backend"))
         from app.core.config import settings
@@ -215,7 +300,7 @@ def warn_outside_files() -> None:
     而 run_shell 压根不受白名单约束 —— 它能做的事没有上界。
     """
     say()
-    say("5. agent 可能写到项目外的文件")
+    say("6. agent 可能写到项目外的文件")
     say("   默认只能写项目内的 workspace/。但两种情况会写到外面：")
     say("     · 你在设置页把别的目录加进了路径白名单")
     say("     · agent 用 run_shell 执行过命令（shell 不受白名单约束）")
@@ -247,6 +332,8 @@ def main() -> int:
         return 1
     say()
 
+    clean_tailscale(args.dry_run)
+    clean_system_tailscale(args.dry_run)
     clean_containers(args.dry_run)
     clean_image(args.dry_run, args.all)
     clean_caches(args.dry_run, args.all)
@@ -259,7 +346,7 @@ def main() -> int:
     say(f"  {ROOT}")
     say()
     say("已确认不会留在别处的：注册表、计划任务、系统服务、PATH、")
-    say("桌面快捷方式、浏览器 localStorage —— 项目压根没写这些。")
+    say("桌面快捷方式、浏览器 localStorage、Tailscale 内核驱动 —— 项目压根没写这些。")
     return 0
 
 

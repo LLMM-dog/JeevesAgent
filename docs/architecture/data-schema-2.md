@@ -339,6 +339,65 @@ CREATE TABLE app_setting (
 
 `file_updated_at` 与 `updated_at` 分开：后者是索引行的更新时间（重建索引时会变），前者跟着文件走。混用会让"哪些记忆最近变过"在重建后全部错乱。
 
+## auth_user
+
+远程访问鉴权的用户表（用户名 + 密码哈希）。
+
+```sql
+CREATE TABLE auth_user (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,     -- pbkdf2_sha256$iters$salt$hash
+    is_admin      INTEGER NOT NULL DEFAULT 1,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+```
+
+**密码绝不存明文。** 哈希格式自描述（算法 + 迭代数 + 盐 + 摘要），
+换算法时可平滑迁移。`enabled=0` 立即失效（中间件校验），不等会话过期。
+
+## auth_session
+
+登录会话。cookie 值是随机 token，**库里只存它的 SHA-256** ——
+数据库泄露不等于会话泄露；原始 token 只在登录响应里出现一次。
+
+```sql
+CREATE TABLE auth_session (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES auth_user(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,   -- SHA-256 hex
+    expires_at INTEGER NOT NULL,       -- UTC 毫秒
+    created_ip TEXT NOT NULL DEFAULT '',
+    user_agent TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+```
+
+过期由中间件惰性清理（读到过期行即删）。删用户时级联删会话。
+## memory_extraction
+
+记忆提取水位线：记录每个智能体在每个会话里已提取到哪条消息（seq），
+实现增量提取与多智能体隔离。
+
+```sql
+CREATE TABLE memory_extraction (
+    session_id        TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+    agent_id          TEXT NOT NULL,
+    last_seq          INTEGER NOT NULL,      -- 已提取到的最大消息 seq
+    extraction_count  INTEGER NOT NULL DEFAULT 0,
+    last_report       TEXT NOT NULL DEFAULT '{}',  -- 上次提取的 CommitReport 序列化
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    PRIMARY KEY (session_id, agent_id)
+);
+```
+
+复合主键 (session_id, agent_id)：每个智能体各自维护水位线，互不干扰。
+下次提取只处理 `seq > last_seq` 的消息。
+
 ## SQLite 特定配置
 
 ```python

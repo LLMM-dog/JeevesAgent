@@ -36,6 +36,27 @@ log = structlog.get_logger(__name__)
 # 每项是 (点分 key, 类型, 最小值, 最大值, 说明)。
 # 范围用于校验 —— 用户填 0 或负数会让截断逻辑崩掉。
 SETTABLE: dict[str, dict[str, Any]] = {
+    # 部署 / 远程访问（settings.security / settings.app 直接热更新到内存）。
+    # restart=True 表示改完要重启进程才真正生效（绑定地址类）。
+    "security.auth_enabled": {
+        "type": bool,
+        "label": "登录鉴权",
+        "hint": "开启后所有 API 需要用户名 + 密码登录。远程访问必须开启。",
+    },
+    "app.host": {
+        "type": str,
+        "label": "绑定地址",
+        "hint": "默认 127.0.0.1 仅本机。改成 0.0.0.0 前必须开启登录鉴权，否则拒绝启动。",
+        "restart": True,
+    },
+    "app.port": {
+        "type": int,
+        "min": 1,
+        "max": 65535,
+        "label": "端口",
+        "hint": "改端口需要重启服务。",
+        "restart": True,
+    },
     "memory.enabled": {
         "type": bool,
         "label": "启用记忆系统",
@@ -371,6 +392,7 @@ def describe() -> list[dict[str, Any]]:
                 "hint": spec.get("hint", ""),
                 "min": spec.get("min"),
                 "max": spec.get("max"),
+                "restart": spec.get("restart", False),
                 "value": _get_default(key),
             }
         )

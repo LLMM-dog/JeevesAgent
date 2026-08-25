@@ -26,7 +26,15 @@ from sqlalchemy import select
 # except 子类抓不到父类实例，而表现和没写这段代码一样。
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import routes_chat, routes_config, routes_cron, routes_files, routes_models
+from app.api import (
+    routes_auth,
+    routes_chat,
+    routes_config,
+    routes_cron,
+    routes_deploy,
+    routes_files,
+    routes_models,
+)
 from app.core.config import PROJECT_ROOT, settings
 from app.core.exceptions import AppError
 from app.core.ids import path_id
@@ -156,12 +164,23 @@ def check_config() -> None:
             "  【备份这个密钥】丢了以后已存的 API Key 全部无法解密。\n"
         )
 
+    if not settings.is_localhost and not settings.security.auth_enabled:
+        # 绑到非本机地址 = 把「能执行任意命令的接口」暴露到网络上。
+        # 原来是警告后继续跑；现在【拒绝启动】——
+        # 文档 security.md 的硬性要求：绑 0.0.0.0 之前必须先加鉴权。
+        raise SystemExit(
+            "\n启动失败：服务绑定到非本机地址（" + settings.app.host
+            + "）但未开启鉴权\n\n"
+            "  这个服务能执行任意命令、读写文件。暴露到网络前必须先开鉴权：\n"
+            "  1. 在 .env 里设置 JEEVES_SECURITY__AUTH_ENABLED=true\n"
+            "  2. （可选）JEEVES_SECURITY__ADMIN_USERNAME / ADMIN_PASSWORD\n"
+            "     不设密码则首次启动自动生成并打印到日志\n"
+        )
     if not settings.is_localhost:
-        # 本项目无鉴权。绑到非本机地址等于把「能执行任意命令的接口」暴露到网络上。
         log.warning(
-            "no_auth_non_localhost",
+            "remote_with_auth",
             host=settings.app.host,
-            msg="服务无鉴权却绑定到非本机地址，任何能访问该端口的人都能执行命令",
+            msg="服务绑定到非本机地址且已开启鉴权，请确认 HTTPS 已就绪（反代或隧道）",
         )
 
 
@@ -245,6 +264,21 @@ async def init_runtime() -> None:
         # （记忆初始化、工具注册）会读 settings 里的值，
         # 晚于它们加载的话第一次启动用的是默认值而不是用户设置。
         await settings_service.reload(db)
+
+        # 鉴权开启且用户表为空时创建管理员（密码可来自 env 或自动生成）。
+        # 自动生成的密码只在启动日志里出现一次，之后只能重置。
+        from app.modules.auth import service as auth_svc
+
+        generated = await auth_svc.ensure_bootstrap_admin(db)
+        if generated:
+            print(
+                "\n" + "=" * 64 + "\n"
+                "  Jeeves 远程访问已开启，首次启动创建了管理员账号：\n"
+                f"    用户名: {settings.security.admin_username or 'admin'}\n"
+                f"    初始密码: {generated}\n"
+                "  登录后请立即在 设置 → 部署 → 账户安全 里修改密码\n"
+                + "=" * 64 + "\n"
+            )
 
         ws = await repo.ensure_default_workspace(db, str(settings.workspace_dir))
 
@@ -376,6 +410,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 整个应用起不来。连不上的会在设置页显示具体原因。
     await _connect_mcp(app.state.registry)
 
+    # 鉴权中间件用同一个 sessionmaker（测试可替换成内存库）。
+    app.state.db_sessionmaker = get_sessionmaker()
+
     app.state.chat_service = ChatService(
         sessionmaker=get_sessionmaker(), base_registry=app.state.registry
     )
@@ -437,7 +474,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Jeeves",
-        version="0.2.0",
+        version="0.3.0",
         description="本地个人 Agent 工作台",
         lifespan=lifespan,
     )
@@ -456,6 +493,16 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         expose_headers=["X-Request-Id"],
     )
+
+    # 鉴权中间件（auth_enabled=True 时校验 /api/*；False 时零开销放行）。
+    #
+    # 【注意顺序】BaseHTTPMiddleware 按添加顺序从外向内包。
+    # 安全头在最外层（任何响应都带），鉴权在内层。
+    # 都放在 CORS 之后 —— CORS 是协议层，鉴权是应用层。
+    from app.modules.auth.middleware import AuthMiddleware, SecurityHeadersMiddleware
+
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(AuthMiddleware)
 
     @app.exception_handler(AppError)
     async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
@@ -479,6 +526,8 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(routes_chat.router, prefix=settings.api_prefix, tags=["chat"])
+    app.include_router(routes_deploy.router, prefix=settings.api_prefix, tags=["deploy"])
+    app.include_router(routes_auth.router, prefix=settings.api_prefix, tags=["auth"])
     app.include_router(routes_config.router, prefix=settings.api_prefix, tags=["config"])
     app.include_router(routes_cron.router, prefix=settings.api_prefix, tags=["cron"])
     app.include_router(routes_files.router, prefix=settings.api_prefix, tags=["files"])

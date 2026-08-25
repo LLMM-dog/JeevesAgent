@@ -3,18 +3,30 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import Sidebar from "@/components/Sidebar";
+import LoginPage from "@/components/LoginPage";
 import ChatPage from "@/pages/ChatPage";
 import SettingsPage from "@/pages/SettingsPage";
 import CronPage from "@/pages/CronPage";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
+import { useAuth } from "@/store/auth";
 
 export default function App() {
+  const authStatus = useAuth((s) => s.status);
+  const authEnabled = useAuth((s) => s.authEnabled);
+  const authenticated = useAuth((s) => s.authenticated);
+  const check = useAuth((s) => s.check);
+
   const { data: meta } = useQuery({
     queryKey: ["meta"],
     queryFn: api.meta,
     // 元信息在设置页改动后需要刷新，但不用轮询
     staleTime: 30_000,
   });
+
+  // 启动时确认鉴权状态（auth_enabled + 当前会话是否有效）。
+  useEffect(() => {
+    void check();
+  }, [check]);
 
   // 无鉴权却绑到非本机地址时警示。
   // 这个服务能执行任意命令，暴露到网络上等于把机器交出去。
@@ -25,6 +37,19 @@ export default function App() {
       );
     }
   }, [meta]);
+
+  if (authStatus === "checking") {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-[var(--color-muted)]">
+        正在确认访问权限…
+      </div>
+    );
+  }
+
+  // 鉴权开启且未登录 → 登录页（不渲染任何业务界面）。
+  if (authEnabled && !authenticated) {
+    return <LoginPage />;
+  }
 
   return (
     <div className="flex h-full">

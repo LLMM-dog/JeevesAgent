@@ -368,6 +368,7 @@ async def meta(
         websearch_backend=settings.websearch.backend,
         has_chat_model=await ps.has_chat_model(db),
         host_is_localhost=settings.is_localhost,
+        auth_enabled=settings.security.auth_enabled,
         # 与系统提示词读【同一个 index 对象】。
         #
         # /skills 端点实时扫描而系统提示词走 lru_cache，

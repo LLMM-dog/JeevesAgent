@@ -1,20 +1,48 @@
-﻿# 安全边界
+# 安全边界
 
 ## 诚实声明
 
-**本项目默认只绑 `127.0.0.1`，没有任何鉴权。** 任何能访问这个端口的进程都能完全控制 agent —— 读写白名单内的文件、执行命令、读取会话历史。
+**默认（本机模式）只绑 `127.0.0.1`、无鉴权。** 任何能访问这个端口的本机进程都能完全控制 agent —— 读写白名单内的文件、执行命令、读取会话历史。
 
-这是单机个人项目的显式取舍，不是遗漏。同类实现 项目也是同样的立场（"Pi does not include a built-in permission system... If you need stronger boundaries, containerize or sandbox Pi"）。假装安全比明确不安全更危险。
+这是单机个人项目的显式取舍，不是遗漏：本机模式下信任模型是"能碰到 9000 端口的人本来就能碰这台机器"。
 
-### 绑到 0.0.0.0 之前必须先做的事
+## 远程访问（v0.3+）：鉴权是硬性前置
 
-如果要局域网访问（比如从手机上用），**必须**先加上：
+要远程访问，先开鉴权（`.env`）：
 
-1. 鉴权（最简单：一个固定 token 走 `Authorization` 头 + 前端存 localStorage）
-2. HTTPS（否则 token 明文传输）
-3. 收紧路径白名单
+```bash
+JEEVES_SECURITY__AUTH_ENABLED=true
+JEEVES_SECURITY__ADMIN_USERNAME=admin
+# JEEVES_SECURITY__ADMIN_PASSWORD=xxx   # 不配则首次启动自动生成并打印
+```
 
-启动时如果 `host` 不是 `127.0.0.1`，日志里打醒目告警，前端顶部显示常驻警示条。
+**绑定到非本机地址（0.0.0.0 / 局域网 IP / 云服务器）而没开鉴权时，启动直接拒绝** —— 这是硬校验，不是警告。这个服务能执行任意命令，暴露到网络上等于把机器交出去。
+
+### 鉴权体系
+
+| 层 | 实现 |
+| --- | --- |
+| 身份 | 用户名 + 密码，PBKDF2-SHA256（60 万次迭代）加盐哈希，见 `modules/auth/` |
+| 会话 | HttpOnly + SameSite=Strict cookie；库里只存 token 的 SHA-256；30 天过期可吊销 |
+| 门禁 | 全 `/api/*` 中间件校验（登录/登出/me/health 白名单），SSE 流同样受保护 |
+| 命令行 | 登录响应返回 token，`Authorization: Bearer` 可用 |
+| 限流 | 进程内滑动窗口，默认 15 分钟 10 次失败，防暴力破解 |
+| CSRF | 非安全方法校验 Origin 同源；cookie SameSite=Strict 双保险 |
+| 安全头 | CSP / X-Frame-Options DENY / nosniff / Referrer-Policy 等，所有响应都带 |
+| HTTPS | 应用层不签发证书；由 Tailscale serve（隧道自带 TLS）或 Caddy 反代（自动 Let's Encrypt）提供 |
+
+前端登录页在 `components/LoginPage.tsx`，部署管理在 `设置 → 部署`（`DeployPanel.tsx`）：一键开启 Tailscale serve/funnel、账户与密码管理、状态展示。
+
+### 部署产物（deploy/）
+
+- `deploy/deploy.sh`：Linux 服务器一键部署（rsync + systemd + 可选 Caddy 自动 HTTPS）
+- `deploy/Dockerfile` + `deploy/docker-compose.yml`：容器化部署
+- `deploy/Caddyfile`：反代模板
+- `deploy/systemd/jeeves.service`：systemd 单元（最小权限加固）
+- `deploy/README.md`：完整部署指南
+
+详见 [部署指南](../guides/deployment.md) 与 [deploy/README.md](../../deploy/README.md)。
+
 
 ## 三道文件系统防线
 

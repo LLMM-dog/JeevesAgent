@@ -7,6 +7,16 @@
 
 import { ApiError } from "./sse";
 import type {
+  AuthMeResponse,
+  CpolarAction,
+  CpolarStatus,
+  DeploySettingsResponse,
+  DeployStatus,
+  EnableAuthResponse,
+  LoginResponse,
+  TailscaleAction,
+  TailscaleStatus,
+  UserItem,
   AgentItem,
   BindingOut,
   BrowseResult,
@@ -54,6 +64,14 @@ async function request<T>(
     headers,
     body: json !== undefined ? JSON.stringify(json) : rest.body,
   });
+
+  // 会话失效（过期/被吊销）→ 踢回登录页。
+  // login 自己的 401 是"密码错误"，不触发 —— 它本来就在登录页上。
+  if (resp.status === 401 && path !== "/auth/login") {
+    // 动态 import 避免循环依赖：api.ts ← store/auth.ts ← api.ts
+    const { useAuth } = await import("@/store/auth");
+    useAuth.getState().sessionExpired();
+  }
 
   if (!resp.ok) {
     let code = "http_error";
@@ -149,6 +167,86 @@ async function download(path: string, fallbackName: string): Promise<void> {
 
 export const api = {
   meta: () => request<MetaResponse>("/meta"),
+
+  // ── 鉴权 ──
+
+  authMe: () => request<AuthMeResponse>("/auth/me"),
+  login: (username: string, password: string) =>
+    request<LoginResponse>("/auth/login", {
+      method: "POST",
+      json: { username, password },
+    }),
+  logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+  changePassword: (old_password: string, new_password: string) =>
+    request<{ ok: boolean }>("/auth/password", {
+      method: "POST",
+      json: { old_password, new_password },
+    }),
+  listUsers: () => request<UserItem[]>("/auth/users"),
+  createUser: (body: {
+    username: string;
+    password: string;
+    is_admin?: boolean;
+  }) => request<UserItem>("/auth/users", { method: "POST", json: body }),
+  patchUser: (
+    id: string,
+    body: { password?: string; is_admin?: boolean; enabled?: boolean },
+  ) =>
+    request<UserItem>(`/auth/users/${id}`, { method: "PATCH", json: body }),
+  deleteUser: (id: string) =>
+    request<{ ok: boolean }>(`/auth/users/${id}`, { method: "DELETE" }),
+
+  // ── 部署 ──
+
+  deployStatus: () => request<DeployStatus>("/deploy/status"),
+  cpolarStatus: () => request<CpolarStatus>("/deploy/cpolar"),
+  cpolarInstall: () =>
+    request<CpolarAction>("/deploy/cpolar/install", { method: "POST" }),
+  cpolarAuthtoken: (token: string) =>
+    request<CpolarAction>("/deploy/cpolar/authtoken", {
+      method: "POST",
+      json: { token },
+    }),
+  cpolarStart: (port: number) =>
+    request<CpolarAction>("/deploy/cpolar/start", {
+      method: "POST",
+      json: { port },
+    }),
+  cpolarStop: () =>
+    request<CpolarAction>("/deploy/cpolar/stop", { method: "POST" }),
+  deploySettings: () =>
+    request<DeploySettingsResponse>("/deploy/settings"),
+  updateDeploySettings: (values: Record<string, unknown>) =>
+    request<DeploySettingsResponse>("/deploy/settings", {
+      method: "PUT",
+      json: { values },
+    }),
+  enableAuth: (username: string, password: string) =>
+    request<EnableAuthResponse>("/deploy/enable-auth", {
+      method: "POST",
+      json: { username, password },
+    }),
+  tailscaleInstall: () =>
+    request<TailscaleAction>("/deploy/tailscale/install", { method: "POST" }),
+  tailscaleLogin: () =>
+    request<TailscaleAction>("/deploy/tailscale/login", { method: "POST" }),
+  tailscaleDaemon: () =>
+    request<TailscaleAction>("/deploy/tailscale/daemon", { method: "POST" }),
+  tailscaleStatus: () => request<TailscaleStatus>("/deploy/tailscale"),
+  tailscaleServe: (port: number) =>
+    request<TailscaleAction>("/deploy/tailscale/serve", {
+      method: "POST",
+      json: { port },
+    }),
+  tailscaleServeStop: () =>
+    request<TailscaleAction>("/deploy/tailscale/serve/stop", { method: "POST" }),
+  tailscaleFunnel: (port: number) =>
+    request<TailscaleAction>("/deploy/tailscale/funnel", {
+      method: "POST",
+      json: { port },
+    }),
+  tailscaleFunnelStop: () =>
+    request<TailscaleAction>("/deploy/tailscale/funnel/stop", { method: "POST" }),
 
   listSessions: (params?: { page?: number; size?: number; q?: string }) => {
     const q = new URLSearchParams();

@@ -1,0 +1,24 @@
+# Jeeves 反代配置（Caddy 自动签发/续期 Let's Encrypt 证书）。
+#
+# 把 your-domain.com 换成你的域名，并确保 A 记录指向服务器。
+# 本机 IP 直连（无域名）时注释掉这块，改用 :9000 段。
+
+your-domain.com {
+    reverse_proxy jeeves:9000
+
+    # 告诉后端请求是 https 的（Secure cookie / CSRF Origin 判断依赖它）
+    header_up X-Forwarded-Proto https
+    header_up X-Forwarded-Host {host}
+
+    # 基础安全头（应用自己也发一份，这里兜底）
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+    }
+}
+
+# 无域名时：直接监听 9000（需要反向代理的场景极少，一般用 Tailscale serve 即可）
+#:9000 {
+#    reverse_proxy 127.0.0.1:9000
+#}

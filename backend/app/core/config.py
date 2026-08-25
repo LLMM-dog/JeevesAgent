@@ -35,6 +35,23 @@ class SecurityConfig(BaseModel):
     # 缺失时拒绝启动。见 main.py 的启动期校验。
     encryption_key: str = ""
 
+    # ── 远程访问鉴权 ────────────────────────────────────────────
+    #
+    # 默认 false：保持本机无鉴权模式（docs/architecture/security.md 的显式取舍）。
+    # 绑定到非本机地址（0.0.0.0 / 局域网 IP / 云服务器）时【必须】为 true，
+    # 否则拒绝启动 —— 这个服务能执行任意命令，暴露到网络上等于把机器交出去。
+    auth_enabled: bool = False
+    # 登录会话有效期（天）。到期后需要重新登录。
+    session_ttl_days: int = 30
+    # 登录限流：同一 IP 在一个窗口内最多允许失败的次数，防暴力破解。
+    login_rate_limit: int = 10
+    login_rate_window: int = 900
+    # 首次启动（用户表为空）时自动创建的管理员账号。
+    # admin_password 留空则自动生成随机密码并打印到启动日志 ——
+    # 首次部署到服务器时不要提前设密码，让脚本生成一个强的。
+    admin_username: str = "admin"
+    admin_password: str = ""
+
 
 class LLMConfig(BaseModel):
     # 300 秒。60s 会让代码生成必然失败：实测一次演示请求耗时 220s，

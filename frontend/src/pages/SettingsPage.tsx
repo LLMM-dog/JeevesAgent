@@ -1,7 +1,8 @@
-﻿import { useRef } from "react";
+import { useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 import McpPanel from "@/components/McpPanel";
+import DeployPanel from "@/components/DeployPanel";
 import WebSearchPanel from "@/components/WebSearchPanel";
 import MemoryPanel from "@/components/MemoryPanel";
 import SkillsPanel from "@/components/SkillsPanel";
@@ -22,6 +23,7 @@ const TABS = [
   { key: "files", label: "文件访问" },
   { key: "web", label: "联网" },
   { key: "trace", label: "追踪" },
+  { key: "deploy", label: "部署" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -192,6 +194,12 @@ export default function SettingsPage() {
         {active === "trace" && (
           <div {...panelProps("trace")}>
             <TracePanel />
+          </div>
+        )}
+
+        {active === "deploy" && (
+          <div {...panelProps("deploy")}>
+            <DeployPanel />
           </div>
         )}
       </div>

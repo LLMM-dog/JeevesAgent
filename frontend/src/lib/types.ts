@@ -406,6 +406,101 @@ export interface BindingOut {
 
 // ─────────────────────────── 元信息 ───────────────────────────
 
+// ── 鉴权 ──
+
+export interface AuthMeResponse {
+  auth_enabled: boolean;
+  authenticated: boolean;
+  username: string;
+  is_admin: boolean;
+  session_ttl_days: number;
+}
+
+export interface LoginResponse {
+  authenticated: boolean;
+  username: string;
+  is_admin: boolean;
+  token: string;
+}
+
+export interface UserItem {
+  id: string;
+  username: string;
+  is_admin: boolean;
+  enabled: boolean;
+  created_at: number;
+  last_login_at: number;
+}
+
+// ── 部署 ──
+
+export interface DeployStatus {
+  host: string;
+  port: number;
+  is_localhost: boolean;
+  auth_enabled: boolean;
+  https: boolean;
+}
+
+export interface TailscaleStatus {
+  installed: boolean;
+  installed_hint?: string;
+  /** 是否使用项目目录里的便携版（随项目删除即卸载） */
+  bundled?: boolean;
+  /** 待授权的登录链接（后台 tailscale login 抓到的） */
+  login_url?: string;
+  /** tailscaled 的错误输出（展示给用户，避免静默失败） */
+  daemon_error?: string;
+  backend_state?: string;
+  logged_in?: boolean;
+  device_name?: string;
+  ipv4?: string;
+  serve?: {
+    serve_on: boolean;
+    funnel_on: boolean;
+  };
+}
+
+export interface TailscaleAction {
+  ok: boolean;
+  detail: string;
+  status: TailscaleStatus;
+}
+
+export interface CpolarStatus {
+  installed: boolean;
+  authtoken_configured: boolean;
+  running: boolean;
+  url: string;
+}
+
+export interface CpolarAction {
+  ok: boolean;
+  detail: string;
+  status: CpolarStatus;
+}
+
+export interface DeploySettingItem {
+  key: string;
+  section: string;
+  type: "int" | "float" | "bool" | "str";
+  label: string;
+  hint: string;
+  min: number | null;
+  max: number | null;
+  restart: boolean;
+  value: number | boolean | string;
+}
+
+export interface DeploySettingsResponse {
+  items: DeploySettingItem[];
+}
+
+export interface EnableAuthResponse {
+  username: string;
+  token: string;
+}
+
 export interface MetaResponse {
   version: string;
   sandbox_backend: string;
@@ -424,6 +519,8 @@ export interface MetaResponse {
   sandbox_isolated: boolean;
   /** false 时显示无鉴权警示条 */
   host_is_localhost: boolean;
+  /** 远程访问鉴权是否开启。true 且未登录时前端显示登录页。 */
+  auth_enabled: boolean;
   skill_count: number;
   mcp_tool_count: number;
   tool_names: string[];

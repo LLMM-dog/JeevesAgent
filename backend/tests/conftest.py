@@ -17,7 +17,12 @@ from app.infra.db.base import Base
 # 单独运行别的文件时就不成立了。
 from app.modules.cron import models as _cron_models  # noqa: F401
 from app.modules.endpoint import models as _endpoint_models  # noqa: F401  # model_binding 表
+from app.modules.agent import models as _agent_models  # noqa: F401
+from app.modules.auth import models as _auth_models  # noqa: F401
+from app.modules.memory import models as _memory_models  # noqa: F401
+from app.modules.memory import models_db as _memory_db_models  # noqa: F401
 from app.modules.session import models  # noqa: F401  确保模型被注册到 metadata
+from app.modules.settings import models as _settings_models  # noqa: F401
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 

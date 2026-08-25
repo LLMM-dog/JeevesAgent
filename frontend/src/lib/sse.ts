@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SSE 客户端。
  *
  * ## 为什么不能用 EventSource
@@ -111,6 +111,11 @@ export function startChat(
       if (!resp.ok) {
         // 校验错误在流开始前返回（后端的 prepare 阶段），
         // 所以这里能拿到正常的 HTTP 错误码和结构化 detail
+        if (resp.status === 401) {
+          // 会话过期/被吊销 → 踢回登录页
+          const { useAuth } = await import("@/store/auth");
+          useAuth.getState().sessionExpired();
+        }
         throw await readErrorDetail(resp);
       }
       if (!resp.body) {

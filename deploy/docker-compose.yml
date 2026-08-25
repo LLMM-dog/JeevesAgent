@@ -1,0 +1,40 @@
+# docker compose 一键启动 Jeeves + Caddy（自动 HTTPS）。
+#
+# 用法：
+#   cp .env.example .env   # 并填好 ENCRYPTION_KEY / 鉴权配置
+#   docker compose up -d --build
+#
+# 需要域名时改 Caddyfile 里的 your-domain.com，
+# 并确保域名 A 记录指向服务器公网 IP。
+
+services:
+  jeeves:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # 数据、工作区、技能、人设必须持久化；代码不挂卷（镜像内置）
+      - ./data:/app/data
+      - ./workspace:/app/workspace
+      - ./skills:/app/skills
+      - ./personas:/app/personas
+      - ./config:/app/config
+    expose:
+      - "9000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - jeeves
+
+volumes:
+  caddy_data:
+  caddy_config:

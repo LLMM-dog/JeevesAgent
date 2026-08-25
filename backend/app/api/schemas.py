@@ -308,6 +308,112 @@ class PatchTodoRequest(BaseModel):
     order_index: int | None = None
 
 
+# ─────────────────────────── auth ───────────────────────────
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=64)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class LoginResponse(BaseModel):
+    authenticated: bool = True
+    username: str
+    is_admin: bool
+    # 会话 token。cookie 已经自动带上；这里再给一份是为了
+    # 命令行 / 脚本场景（curl -H "Authorization: Bearer <token>"）。
+    # 注意：这是原始 token 唯一一次出现在响应里。
+    token: str = ""
+
+
+class AuthMeResponse(BaseModel):
+    # 鉴权是否开启。false = 本机无鉴权模式。
+    auth_enabled: bool
+    # 当前请求是否已通过鉴权（auth_enabled=False 时恒为 False）。
+    authenticated: bool
+    username: str = ""
+    is_admin: bool = False
+    session_ttl_days: int = 0
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class UserOut(BaseModel):
+    id: str
+    username: str
+    is_admin: bool
+    enabled: bool
+    created_at: int
+    last_login_at: int
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_-]{2,32}$")
+    password: str = Field(..., min_length=8, max_length=128)
+    is_admin: bool = False
+
+
+class UserPatchRequest(BaseModel):
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+    is_admin: bool | None = None
+    enabled: bool | None = None
+
+
+# ─────────────────────────── deploy ───────────────────────────
+
+
+class DeployStatusResponse(BaseModel):
+    """远程访问的整体状态。"""
+
+    host: str
+    port: int
+    is_localhost: bool
+    auth_enabled: bool
+    # 当前请求是否走 https（反代/隧道转发时由 X-Forwarded-Proto 决定）。
+    https: bool = False
+
+
+class DeploySettingsUpdate(BaseModel):
+    values: dict[str, Any]
+
+
+class EnableAuthRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=32)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class EnableAuthResponse(BaseModel):
+    username: str
+    token: str
+
+
+class TailscaleRequest(BaseModel):
+    port: int = Field(default=9000, ge=1, le=65535)
+
+
+class CpolarRequest(BaseModel):
+    port: int = Field(default=9000, ge=1, le=65535)
+
+
+class CpolarAuthtokenRequest(BaseModel):
+    token: str = Field(..., min_length=8, max_length=256)
+
+
+class CpolarActionResponse(BaseModel):
+    ok: bool
+    detail: str = ""
+    status: dict = Field(default_factory=dict)
+
+
+class TailscaleActionResponse(BaseModel):
+    ok: bool
+    detail: str = ""
+    status: dict = Field(default_factory=dict)
+
+
 # ─────────────────────────── meta ───────────────────────────
 
 
@@ -332,6 +438,10 @@ class MetaResponse(BaseModel):
     has_chat_model: bool
     # false 时前端显示无鉴权警示条
     host_is_localhost: bool
+    # 远程访问鉴权是否开启。true 时前端显示登录页。
+    auth_enabled: bool = False
+    # 远程访问鉴权是否开启。true 时前端显示登录页。
+    auth_enabled: bool = False
     skill_count: int
     mcp_tool_count: int
     tool_names: list[str]

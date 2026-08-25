@@ -66,6 +66,9 @@ config/mcp_servers.yaml
 # 这些内容仍然有价值，所以保留在本地而不是删掉 —— 只是不进仓库。
 .dev/
 
+# ── Tailscale 便携版（随项目目录走，删除项目即彻底卸载）──
+.tailscale/
+
 # ── 子智能体调研产生的 clone 残留 ──
 *_src/
 *_repo/

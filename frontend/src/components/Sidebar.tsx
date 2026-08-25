@@ -16,11 +16,16 @@ import {
 import clsx from "clsx";
 import { api } from "@/lib/api";
 import { useChatStore } from "@/store/chat";
+import { useAuth } from "@/store/auth";
+import { LogOut } from "lucide-react";
 
 export default function Sidebar() {
   const nav = useNavigate();
   const { sessionId } = useParams();
   const qc = useQueryClient();
+  const authEnabled = useAuth((s) => s.authEnabled);
+  const username = useAuth((s) => s.username);
+  const logout = useAuth((s) => s.logout);
   const [q, setQ] = useState("");
   const [exportErr, setExportErr] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
@@ -440,6 +445,17 @@ export default function Sidebar() {
           <PanelLeftClose size={16} aria-hidden />
           收起
         </button>
+        {authEnabled && (
+          <button
+            type="button"
+            onClick={() => void logout()}
+            title="退出登录"
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-sm text-[var(--color-muted)] transition hover:bg-[var(--color-surface-2)]/60"
+          >
+            <LogOut size={16} aria-hidden />
+            退出登录（{username || "?"}）
+          </button>
+        )}
       </div>
     </aside>
   );
