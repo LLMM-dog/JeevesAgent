@@ -166,6 +166,8 @@ class DockerSandbox:
         timeout: int | None = None,  # noqa: ASYNC109
         env_extra: dict[str, str] | None = None,
         ws_root: Path | None = None,
+        image: str = "",
+        network: str = "",
     ) -> ExecResult:
         """
         在会话的容器里执行命令。永不抛异常。
@@ -177,7 +179,7 @@ class DockerSandbox:
         wait_timeout = timeout if timeout is not None else settings.sandbox.timeout_default
 
         try:
-            cid = await self._ensure_container(session_id, cwd, ws_root)
+            cid = await self._ensure_container(session_id, cwd, ws_root, image=image, network=network)
         except Exception as e:  # noqa: BLE001
             log.warning("docker_container_failed", err=str(e)[:300], session=session_id)
             return ExecResult(
@@ -233,7 +235,7 @@ class DockerSandbox:
             )
             await self.cleanup_session(session_id)
             try:
-                cid = await self._ensure_container(session_id, cwd, ws_root)
+                cid = await self._ensure_container(session_id, cwd, ws_root, image=image, network=network)
             except Exception as e:  # noqa: BLE001
                 return ExecResult(
                     output=(
@@ -311,7 +313,13 @@ class DockerSandbox:
             return lk
 
     async def _ensure_container(
-        self, session_id: str, cwd: Path, ws_root: Path | None = None
+        self,
+        session_id: str,
+        cwd: Path,
+        ws_root: Path | None = None,
+        *,
+        image: str = "",
+        network: str = "",
     ) -> str:
         """
         拿到可用的容器 id，不存在就创建。
@@ -340,7 +348,7 @@ class DockerSandbox:
                 log.info("docker_container_gone_recreate", session=session_id, cid=cid[:12])
                 self._containers.pop(session_id, None)
 
-            cid = await self._create(session_id, cwd, ws_root)
+            cid = await self._create(session_id, cwd, ws_root, image=image, network=network)
             self._containers[session_id] = {
                 "cid": cid,
                 "expire_at": time.time() + IDLE_TTL,
@@ -349,7 +357,13 @@ class DockerSandbox:
             return cid
 
     async def _create(
-        self, session_id: str, cwd: Path, ws_root: Path | None = None
+        self,
+        session_id: str,
+        cwd: Path,
+        ws_root: Path | None = None,
+        *,
+        image: str = "",
+        network: str = "",
     ) -> str:
         """
         创建容器。
@@ -362,6 +376,9 @@ class DockerSandbox:
         """
         ws = self._workspace_root(cwd, ws_root)
         cfg = settings.sandbox
+        # 工作区级配置优先（非空覆盖全局 settings）
+        image = image or cfg.docker_image
+        network = network or cfg.docker_network
         name = f"{NAME_PREFIX}{session_id}"
 
         # 同名容器可能还在（上次没清干净）。先删掉，
@@ -388,7 +405,7 @@ class DockerSandbox:
             # 文件系统隔离做了但网络没做，等于沙箱只有一半 ——
             # 而在云主机上网络恰恰是最危险的那一面。
             "--network",
-            cfg.docker_network,
+            network,
             # ── 资源限制 ──
             #
             # 完全没有这些。后果是容器里一个 while True 或 fork 炸弹
@@ -419,7 +436,7 @@ class DockerSandbox:
             f"{to_docker_path(ws)}:{CONTAINER_WORKSPACE}",
             "-w",
             CONTAINER_WORKSPACE,
-            cfg.docker_image,
+            image,
             *KEEPALIVE,
         ]
 
@@ -434,8 +451,8 @@ class DockerSandbox:
             "docker_container_created",
             session=session_id,
             cid=cid[:12],
-            image=cfg.docker_image,
-            network=cfg.docker_network,
+            image=image,
+            network=network,
         )
         return cid
 

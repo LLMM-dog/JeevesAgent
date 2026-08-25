@@ -34,6 +34,7 @@ from app.api import (
     routes_deploy,
     routes_files,
     routes_models,
+    routes_workspace,
 )
 from app.core.config import PROJECT_ROOT, settings
 from app.core.exceptions import AppError
@@ -525,6 +526,7 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(routes_chat.router, prefix=settings.api_prefix, tags=["chat"])
+    app.include_router(routes_workspace.router, prefix=settings.api_prefix, tags=["workspace"])
     app.include_router(routes_deploy.router, prefix=settings.api_prefix, tags=["deploy"])
     app.include_router(routes_auth.router, prefix=settings.api_prefix, tags=["auth"])
     app.include_router(routes_config.router, prefix=settings.api_prefix, tags=["config"])

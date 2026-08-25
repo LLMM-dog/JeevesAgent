@@ -20,6 +20,18 @@ class Workspace(Base, TimestampMixin):
     root_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     is_default: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # ── 执行环境（每个工作区独立设置）──
+    # local | docker。local = 直接在宿主执行（默认）。
+    sandbox_backend: Mapped[str] = mapped_column(String(16), default="local", nullable=False)
+    # 容器名。sandbox_backend=docker 时生效，必须唯一（应用层校验）。
+    # 空串表示还没配容器。
+    docker_container: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    docker_image: Mapped[str] = mapped_column(
+        String(128), default="python:3.12-slim", nullable=False
+    )
+    # none | bridge。默认 none（网络隔离）。
+    docker_network: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
+
 
 class Session(Base, TimestampMixin):
     __tablename__ = "session"

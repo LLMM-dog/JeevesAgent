@@ -66,6 +66,9 @@ class SandboxPort(Protocol):
         # workspace_dir —— 而那是硬编码的 PROJECT_ROOT/workspace，
         # 用户建了多个工作区时会挂错目录（且静默，无报错）。
         ws_root: Path | None = None,
+        # 工作区级的容器配置（Docker 后端用，非空覆盖全局 settings）。
+        image: str = "",
+        network: str = "",
     ) -> ExecResult: ...
 
     async def cleanup_session(self, session_id: str) -> None:

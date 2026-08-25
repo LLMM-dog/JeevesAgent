@@ -651,6 +651,8 @@ class LocalSandbox:
         timeout: int | None = None,  # noqa: ASYNC109
         env_extra: dict[str, str] | None = None,
         ws_root: Path | None = None,
+        image: str = "",
+        network: str = "",
     ) -> ExecResult:
         # session_id / ws_root 都用不上：本地执行没有 per-session 的
         # 资源要管，也没有挂载点的概念（cwd 就是真实路径）

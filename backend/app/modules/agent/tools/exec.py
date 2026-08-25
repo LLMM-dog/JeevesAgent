@@ -37,6 +37,33 @@ from app.modules.agent.tools.base import ToolContext, ToolResult
 log = structlog.get_logger(__name__)
 
 
+async def _workspace_sandbox_cfg(ctx: ToolContext) -> dict[str, str]:
+    """查当前工作区的执行环境配置。
+
+    默认 local。工作区在设置里选了 Docker 时，返回容器名 / 镜像 / 网络，
+    执行时据此创建/复用该工作区的容器。
+    """
+    cfg: dict[str, str] = {"backend": "local", "container": "", "image": "", "network": ""}
+    if ctx.db is None:
+        return cfg
+    from sqlalchemy import select
+
+    from app.modules.session.models import Workspace
+
+    row = (
+        await ctx.db.execute(
+            select(Workspace).where(Workspace.root_path == str(ctx.workspace))
+        )
+    ).scalar_one_or_none()
+    if row is None or row.sandbox_backend != "docker":
+        return cfg
+    cfg["backend"] = "docker"
+    cfg["container"] = row.docker_container or ""
+    cfg["image"] = row.docker_image or ""
+    cfg["network"] = row.docker_network or ""
+    return cfg
+
+
 def _clamp_timeout(value: Any) -> int:
     """
     把模型给的 timeout 夹到合理区间。
@@ -173,12 +200,17 @@ class RunShellTool:
             timeout=timeout,
             command=command[:200],
         )
-        sandbox = await get_sandbox()
+        # 工作区级执行环境：每个工作区可独立选本机 / Docker 容器。
+        ws_cfg = await _workspace_sandbox_cfg(ctx)
+        sandbox = await get_sandbox(ws_cfg)
         result = await sandbox.run(
             command,
             cwd=cwd,
-            session_id=ctx.session_id,
+            # Docker 后端用工作区容器名作隔离单元（同工作区多会话共享容器）
+            session_id=ws_cfg.get("container") or ctx.session_id,
             timeout=timeout,
+            image=ws_cfg.get("image", ""),
+            network=ws_cfg.get("network", ""),
             # 传【真实的工作区根】而不是让沙箱读全局配置。
             #
             # settings.workspace_dir 是硬编码的 PROJECT_ROOT/workspace，

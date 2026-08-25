@@ -34,33 +34,40 @@ from app.infra.sandbox.port import SandboxPort
 
 log = structlog.get_logger(__name__)
 
-_cached: SandboxPort | None = None
+_cached: dict[str, SandboxPort] = {}
 _fallback_reason: str = ""
 
 
-async def get_sandbox() -> SandboxPort:
+async def get_sandbox(ws_cfg: dict[str, str] | None = None) -> SandboxPort:
     """
-    按配置拿沙箱后端。结果缓存。
-    """
-    global _cached, _fallback_reason
-    if _cached is not None:
-        return _cached
+    按工作区配置拿沙箱后端。结果按 (backend, image) 缓存。
 
-    backend = (settings.sandbox.backend or "local").strip().lower()
+    ws_cfg 来自工作区（Workspace 表的 sandbox_* 字段）：
+    {"backend": "local"|"docker", "container": ..., "image": ..., "network": ...}
+    空则回落全局 settings。
+    """
+    global _fallback_reason
+    cfg = ws_cfg or {}
+    backend = (cfg.get("backend") or settings.sandbox.backend or "local").strip().lower()
+    image = cfg.get("image") or settings.sandbox.docker_image
 
     if backend == "docker":
+        key = f"docker:{image}"
+        if key in _cached:
+            return _cached[key]
+
         docker = DockerSandbox()
         ok, reason = await docker.health()
         if ok:
             log.info(
                 "sandbox_backend",
                 backend="docker",
-                image=settings.sandbox.docker_image,
-                network=settings.sandbox.docker_network,
+                image=image,
+                network=cfg.get("network") or settings.sandbox.docker_network,
             )
-            _cached = docker
+            _cached[key] = docker
             _fallback_reason = ""
-            return _cached
+            return docker
 
         # 【不能静默回落】。
         #
@@ -72,8 +79,9 @@ async def get_sandbox() -> SandboxPort:
         log.warning("sandbox_unknown_backend", backend=backend)
         _fallback_reason = f"未知的沙箱后端 {backend!r}，已用本地执行"
 
-    _cached = LocalSandbox()
-    return _cached
+    if "local" not in _cached:
+        _cached["local"] = LocalSandbox()
+    return _cached["local"]
 
 
 def fallback_reason() -> str:
@@ -88,5 +96,5 @@ def fallback_reason() -> str:
 def reset_cache() -> None:
     """测试用：清掉缓存，让下次 get_sandbox 重新探测。"""
     global _cached, _fallback_reason
-    _cached = None
+    _cached = {}
     _fallback_reason = ""

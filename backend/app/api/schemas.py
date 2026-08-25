@@ -17,6 +17,42 @@ class ErrorDetail(BaseModel):
     hint: str | None = None
 
 
+# ─────────────────────────── workspace ───────────────────────────
+
+
+class WorkspaceOut(BaseModel):
+    id: str
+    name: str
+    root_path: str
+    is_default: bool
+    # 执行环境：local | docker
+    sandbox_backend: str
+    docker_container: str
+    docker_image: str
+    docker_network: str
+    # 容器状态（docker 工作区）：running / stopped / not_found / ""
+    container_status: str = ""
+    created_at: int
+    updated_at: int
+
+
+class WorkspaceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    root_path: str = Field(..., min_length=1)
+    sandbox_backend: str = "local"
+    docker_container: str = Field(default="", max_length=64)
+    docker_image: str = Field(default="python:3.12-slim", max_length=128)
+    docker_network: str = "none"
+
+
+class WorkspacePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    sandbox_backend: str | None = None
+    docker_container: str | None = Field(default=None, max_length=64)
+    docker_image: str | None = Field(default=None, max_length=128)
+    docker_network: str | None = None
+
+
 # ─────────────────────────── session ───────────────────────────
 
 
