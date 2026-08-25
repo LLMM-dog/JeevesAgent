@@ -123,7 +123,6 @@ async def seed_session(
     *,
     workspace_id: str,
     agent_id: str = "",
-    work_dir: str = "",
 ) -> str:
     """
     建会话 + 把种子消息逐条写进 message 表。返回 session_id。
@@ -139,13 +138,10 @@ async def seed_session(
     """
     session = await repo.create_session(db, workspace_id=workspace_id)
 
-    # agent_id / work_dir 不是 create_session 的参数（它只收 workspace_id 和 title），
-    # 所以建完再设。这两个字段在生产里由路由层的 update 设置。
+    # agent_id 不是 create_session 的参数（它只收 workspace_id 和 title），
+    # 所以建完再设。
     if agent_id:
         session.set_agent_ids([agent_id])
-    if work_dir:
-        session.work_dir = work_dir
-    if agent_id or work_dir:
         await db.commit()
 
     rows = sorted(load_seed(seed_name), key=lambda r: int(r.get("seq", 0)))

@@ -69,7 +69,6 @@ class SessionBrief(BaseModel):
 class SessionDetail(SessionBrief):
     approval_mode: str
     # 空串 = 未设置。前端据此显示"选择工作目录"的提示
-    work_dir: str = ""
     # 空串表示跟随功能位绑定
     model_pk: str = ""
     # 这次对话实际生效的模型窗口。
@@ -103,11 +102,6 @@ class PatchSessionRequest(BaseModel):
     # 切换工作区（决定根目录 + 执行环境）。切换时会同步把工作目录
     # 改成新工作区的根目录。
     workspace_id: str | None = None
-    # 这次对话的工作目录。传空串表示清除。
-    #
-    # 用 str 而不是 Path：Path 在 JSON 里没有对应类型，
-    # pydantic 会把 Windows 反斜杠当转义符处理。
-    work_dir: str | None = None
     # 这次对话用哪个模型。传空串 = 回到默认绑定
     model_pk: str | None = None
     pinned: bool | None = None

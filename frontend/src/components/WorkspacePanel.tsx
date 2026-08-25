@@ -85,7 +85,7 @@ export default function WorkspacePanel() {
   );
 }
 
-function WorkspaceEditor({ ws, onClose }: { ws: WorkspaceItem | null; onClose: () => void }) {
+export function WorkspaceEditor({ ws, onClose }: { ws: WorkspaceItem | null; onClose: () => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState(ws?.name ?? "");
   const [root, setRoot] = useState(ws?.root_path ?? "");

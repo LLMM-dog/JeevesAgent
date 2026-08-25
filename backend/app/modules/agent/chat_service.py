@@ -270,7 +270,7 @@ class ChatService:
             # agent 仍能读写文件，但只能在项目自己的沙箱目录里 ——
             # 这是最小权限的合理默认。要它操作你的代码，在对话页指定工作目录。
             workspace = await repo.get_workspace(db, session.workspace_id)
-            work_root = session.work_dir or workspace.root_path
+            work_root = workspace.root_path
 
             # 图片校验在这里做，不在流里做。
             #

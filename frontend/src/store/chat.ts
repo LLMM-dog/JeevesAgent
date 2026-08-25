@@ -105,7 +105,6 @@ interface ChatState {
    * 放 store 而不是每个组件各自查：Composer 要显示它，
    * RefPicker 的文件搜索也依赖它，两处必须看到同一个值。
    */
-  workDir: string;
   /** 这次对话用哪个模型。空串 = 跟随功能位绑定 */
   modelPk: string;
   /** 这次对话用哪个智能体。空串 = 未选择（直接用模型对话） */
@@ -153,7 +152,6 @@ interface ChatState {
   respondApproval: (approved: boolean) => Promise<void>;
   setApprovalMode: (mode: "manual" | "auto") => Promise<void>;
   /** 设置这次对话的工作目录。传空串清除 */
-  setWorkDir: (dir: string) => Promise<void>;
   /** 设置这次对话用哪个模型。传空串回到默认绑定 */
   setWorkModel: (pk: string) => Promise<void>;
   /** 设置这次对话用哪个智能体。传空串清除选择 */
@@ -272,7 +270,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeAgents: [],
   compacting: null,
   approval: null,
-  workDir: "",
   modelPk: "",
   agentId: "",
   contextWindow: 0,
@@ -320,7 +317,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       //
       // 快速连点侧栏（A→B→C）时三个 openSession 并发飞行，Promise.all
       // 的完成顺序不保证与发起顺序一致。早发起的响应后到就会把它的
-      // messages/title/workDir 写进 store，而路由指向最后点的那个 ——
+      // messages/title 写进 store，而路由指向最后点的那个 ——
       // 界面显示 A 的内容但 URL 是 C。
       if (get().sessionId !== sessionId) return;
       set({
@@ -341,7 +338,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         usage: restoreUsage(items, session.context_window ?? 0, watermark ?? -1),
         approvalMode: session.approval_mode ?? "manual",
         // 空串兜底：老会话在迁移前没有这个字段
-        workDir: session.work_dir ?? "",
         modelPk: session.model_pk ?? "",
         agentId: session.agent_id ?? "",
         contextWindow: session.context_window ?? 0,
@@ -600,16 +596,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     set(update as Pick<ChatState, keyof ChatState>);
-  },
-
-  async setWorkDir(dir) {
-    const { sessionId } = get();
-    if (!sessionId) return;
-    // 不做乐观更新：后端要校验目录存在、还会顺手加一条白名单。
-    // 先改本地的话，校验失败时界面显示的目录和实际生效的不一致 ——
-    // 而那种不一致会让人以为"设了但没用"。
-    const s = await api.patchSession(sessionId, { work_dir: dir });
-    set({ workDir: s.work_dir ?? "" });
   },
 
   async setApprovalMode(mode) {

@@ -4,7 +4,6 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { AgentSwitcher } from "@/components/AgentSwitcher";
 import { ModelSwitcher } from "@/components/ModelSwitcher";
-import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 import { MemoryStatusIndicator } from "@/components/MemoryStatusIndicator";
 import Banner from "@/components/Banner";
 import Composer from "@/components/Composer";
@@ -74,7 +73,6 @@ export default function ChatPage() {
           <h1 className="truncate text-sm font-medium">
             {title || "新对话"}
           </h1>
-          <WorkspaceSwitcher sessionId={sessionId} />
           <AgentSwitcher sessionId={sessionId} agentId={agentId} />
           <ModelSwitcher sessionId={sessionId} modelPk={modelPk} />
           <div className="ml-auto" />

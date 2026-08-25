@@ -25,7 +25,7 @@ import {
 import clsx from "clsx";
 import { RefPicker, type RefCandidate, type RefKind } from "@/components/RefPicker";
 import { ContextBar } from "@/components/ContextBar";
-import { WorkDirPicker } from "@/components/WorkDirPicker";
+import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 import { api } from "@/lib/api";
 import { useChatStore } from "@/store/chat";
 import { speechUploadsAudio, useSpeechInput } from "@/hooks/useSpeechInput";
@@ -136,7 +136,6 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const stop = useChatStore((s) => s.stop);
   const sessionId = useChatStore((s) => s.sessionId);
   const modelPk = useChatStore((s) => s.modelPk);
-  const workDir = useChatStore((s) => s.workDir);
   // 没有 usage 时也要能显示窗口大小，所以单独存一份
   const contextWindow = useChatStore((s) => s.contextWindow);
   const approvalMode = useChatStore((s) => s.approvalMode);
@@ -547,11 +546,8 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
           )}
         </div>
         <div className="mt-1.5 flex items-center gap-1.5 px-1">
-          {/* 工作目录放在审批模式旁边：两者都是"这次对话的作用范围"，
-              而且用户在发第一句之前就该看到它 */}
-          {sessionId && (
-            <WorkDirPicker sessionId={sessionId} workDir={workDir} />
-          )}
+          {/* 工作区选择放在输入框下方：决定根目录与执行环境 */}
+          {sessionId && <WorkspaceSwitcher sessionId={sessionId} />}
           <button
             type="button"
             onClick={() =>

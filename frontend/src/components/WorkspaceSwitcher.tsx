@@ -6,16 +6,17 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronUp, Folder } from "lucide-react";
+import { Check, ChevronUp, Folder, Plus } from "lucide-react";
 import clsx from "clsx";
 import { api } from "@/lib/api";
-import { useChatStore } from "@/store/chat";
+import { WorkspaceEditor } from "./WorkspacePanel";
 import type { WorkspaceItem } from "@/lib/types";
 
 export function WorkspaceSwitcher({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [err, setErr] = useState("");
+  const [creating, setCreating] = useState(false);
 
   const { data: session } = useQuery({
     queryKey: ["session", sessionId],
@@ -27,14 +28,10 @@ export function WorkspaceSwitcher({ sessionId }: { sessionId: string }) {
     enabled: open,
   });
 
-  const setWorkDir = useChatStore((s) => s.setWorkDir);
-
   const pick = useMutation({
     mutationFn: (ws: WorkspaceItem) =>
       api.patchSession(sessionId, { workspace_id: ws.id }),
-    onSuccess: (_r, ws) => {
-      // 切工作区后端会把 work_dir 同步成新根目录，store 也要跟上
-      setWorkDir(ws.root_path);
+    onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["session", sessionId] });
       setOpen(false);
     },
@@ -65,9 +62,13 @@ export function WorkspaceSwitcher({ sessionId }: { sessionId: string }) {
               {ws.id === session?.workspace_id && <Check size={13} className="shrink-0 text-[var(--color-accent)]" aria-hidden />}
             </button>
           ))}
+          <button type="button" onClick={() => { setOpen(false); setCreating(true); }} className="mt-1 flex w-full items-center gap-2 rounded-md border-t px-2 py-2 text-left text-xs text-[var(--color-accent)] transition hover:bg-[var(--color-surface-2)]" style={{ borderColor: "var(--color-border)" }}>
+            <Plus size={13} aria-hidden />新建工作区
+          </button>
           {err && <p className="px-2 py-1 text-[10px] text-[var(--color-err)]">{err}</p>}
         </div>
       )}
+      {creating && <WorkspaceEditor ws={null} onClose={() => { setCreating(false); }} />}
     </div>
   );
 }

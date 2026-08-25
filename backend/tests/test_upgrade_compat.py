@@ -44,6 +44,13 @@ _ALLOWED_DROP_COLUMNS: dict[tuple[str, str, str], str] = {
         "message",
         "artifact_path",
     ): "artifact 功能已删除，列不再写入",
+    # 工作目录与工作区重复：工作区（workspace.root_path）就是根目录，
+    # session.work_dir 被移除，根目录统一由 workspace_id 决定。
+    (
+        "20260825_1000_c3d4e5f6a7b8_drop_session_work_dir.py",
+        "session",
+        "work_dir",
+    ): "工作目录与工作区重复，根目录统一由 workspace_id 决定",
 }
 
 

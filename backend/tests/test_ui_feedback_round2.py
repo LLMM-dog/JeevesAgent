@@ -290,38 +290,8 @@ class TestStoreSyncAfterSwitch:
         assert "setWorkModel" in src, "ModelSwitcher 没走 store setter"
         assert "api.patchSession" not in src, "还在直接调 api，store 不会更新"
 
-    def test_workdir_uses_store_setter(self) -> None:
-        """WorkDirPicker 有同一个 bug。"""
-        src = (FRONT / "components" / "WorkDirPicker.tsx").read_text(encoding="utf-8")
-        assert "setWorkDirInStore" in src or "s.setWorkDir" in src
-        assert "api.patchSession" not in src
-
-    def test_store_has_both_setters(self) -> None:
+    def test_store_has_model_setter(self) -> None:
         src = (FRONT / "store" / "chat.ts").read_text(encoding="utf-8")
         assert "async setWorkModel(" in src
-        assert "async setWorkDir(" in src
-        # 都要用后端返回值，不做乐观更新 —— 后端会拒绝禁用的模型
+        # 用后端返回值，不做乐观更新 —— 后端会拒绝禁用的模型
         assert "s.model_pk" in src
-        assert "s.work_dir" in src
-
-
-class TestWorkDirLabel:
-    """
-    第 5 条：工作目录按钮该直接显示当前目录。
-    """
-
-    def test_shows_current_dir(self) -> None:
-        src = (FRONT / "components" / "WorkDirPicker.tsx").read_text(encoding="utf-8")
-        assert "当前：" in src, "折叠时没显示当前目录"
-
-    def test_truncates_keeping_tail(self) -> None:
-        """
-        长路径要优先保留尾部：信息量集中在末尾几段（项目名、子目录），
-        开头往往是 C:\\Users\\某某\\Documents 这类所有路径都一样的前缀。
-        从头截断的话十个目录看起来全都一样。
-        """
-        src = (FRONT / "components" / "WorkDirPicker.tsx").read_text(encoding="utf-8")
-        assert "shortDir" in src
-        # 从后往前拼
-        assert "for (let i = parts.length - 1" in src
-        assert "优先保留" in src, "没解释为什么保尾部"

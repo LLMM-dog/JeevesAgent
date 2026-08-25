@@ -34,7 +34,6 @@ export interface SessionDetail extends SessionBrief {
   /** 实际生效的模型窗口。0 表示未配模型 */
   context_window: number;
   /** 这次对话的工作目录。空串 = 未设置 */
-  work_dir: string;
   approval_mode: "manual" | "auto";
   private_mode: boolean;
   amnesia_mode: boolean;

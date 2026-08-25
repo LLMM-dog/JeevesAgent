@@ -42,7 +42,7 @@ from app.modules.endpoint import service as ps
 from app.modules.endpoint.models import Endpoint, ModelBinding
 from app.modules.mcp.tools import build_tools
 from app.modules.session import repo
-from app.modules.session.models import Session
+from app.modules.session.models import Session, Workspace
 from app.modules.skill import package as skill_package
 from app.modules.skill import registry as skill_registry
 from app.modules.skill import state as skill_state
@@ -717,17 +717,17 @@ async def ref_candidates(
         s = (
             await db.execute(select(Session).where(Session.id == session_id))
         ).scalars().first()
-        if s is not None and s.work_dir:
-            wd = Path(s.work_dir)
-            if wd.is_dir():
-                roots.append(wd)
+        if s is not None:
+            ws = (await db.execute(select(Workspace).where(Workspace.id == s.workspace_id))).scalar_one_or_none()
+            if ws is not None and Path(ws.root_path).is_dir():
+                roots.append(Path(ws.root_path))
 
     if not roots:
         return {
             "items": [],
             # 前端据此区分"目录里真的没有匹配"和"还没设工作目录"
             "reason": "no_work_dir",
-            "hint": "这个对话还没设置工作目录，点输入框上方的目录名来指定",
+            "hint": "这个对话还没选择工作区，点输入框下方的工作区名来选择",
         }
 
     return {"items": _search_files(roots[0], query, limit)}

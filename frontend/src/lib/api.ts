@@ -784,8 +784,6 @@ export const api = {
       model_pk: string;
       /** 这次对话用哪个智能体。传空串清除选择 */
       agent_id: string;
-      /** 这次对话的工作目录。传空串清除 */
-      work_dir: string;
       /** 切换工作区（根目录 + 执行环境） */
       workspace_id: string;
       title: string;

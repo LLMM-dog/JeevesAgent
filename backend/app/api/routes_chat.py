@@ -3,7 +3,6 @@
 """
 
 import json
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -28,13 +27,12 @@ from app.core.exceptions import (
     ConflictError,
     NotFoundError,
 )
-from app.core.ids import path_id
 from app.infra.db.session import get_db
 from app.infra.sandbox.factory import get_sandbox
 from app.modules.agent import run_registry
 from app.modules.agent.chat_service import ChatService
 from app.modules.endpoint import service as provider_service
-from app.modules.endpoint.models import Model, PathWhitelist
+from app.modules.endpoint.models import Model
 from app.modules.session import repo
 from app.modules.session.models import Message, Session
 from fastapi import APIRouter, Depends, Query, Response
@@ -100,7 +98,6 @@ def _detail(s: Session) -> SessionDetail:
         amnesia_mode=bool(s.amnesia_mode),
         vision_mode=bool(s.vision_mode),
         stream_enabled=bool(s.stream_enabled),
-        work_dir=s.work_dir or "",
         model_pk=s.model_pk or "",
         agent_id=agent_id,
     )
@@ -322,81 +319,7 @@ async def _check_model_pk(db: AsyncSession, raw: str) -> str:
     return raw
 
 
-async def _resolve_work_dir(db: AsyncSession, session_id: str, raw: str) -> str:
-    """
-    校验工作目录，并把它加进该会话的白名单。
-
-    ## 为什么设工作目录要顺手加白名单
-
-    不加的话结果是"设了工作目录但 agent 读不了里面任何文件"——
-    工具报"路径不在白名单内"，而用户刚刚才指定了这个目录，
-    完全想不到还要单独授权一次。
-
-    权限给【可写】。理由：用户主动指定一个目录当工作区，意图就是
-    让 agent 在里面干活。只读的工作目录基本没有使用场景，
-    而"为什么它不能写"会成为下一个疑问。
-
-    ## 为什么必须存在且是目录
-
-    传一个不存在的路径，之后每次工具调用都失败，而错误信息指向
-    白名单而不是"这个目录不存在"。在入口处拦掉。
-    """
-    raw = (raw or "").strip()
-    if not raw:
-        # 空串 = 清除工作目录。同时撤掉之前自动加的那条白名单，
-        # 否则清了工作目录但权限还留着。
-        await _drop_auto_whitelist(db, session_id)
-        return ""
-
-    try:
-        p = Path(raw).expanduser().resolve()
-    except (OSError, ValueError) as e:
-        raise BadRequestError(f"路径无法解析：{raw}", code="bad_work_dir") from e
-
-    if not p.exists():
-        raise BadRequestError(f"目录不存在：{p}", code="work_dir_missing")
-    if not p.is_dir():
-        raise BadRequestError(f"不是目录：{p}", code="work_dir_not_dir")
-
-    # 换目录时先撤掉旧的自动条目，避免越用越多
-    await _drop_auto_whitelist(db, session_id)
-
-    db.add(
-        PathWhitelist(
-            id=path_id(),
-            session_id=session_id,
-            path=str(p),
-            can_write=1,
-            note=_AUTO_NOTE,
-            builtin=0,
-        )
-    )
-    return str(p)
-
-
-# 自动添加的白名单条目用这个 note 标记。
-#
-# 需要一个标记才能在换/清工作目录时准确撤掉它，
-# 又不误删用户手动加的条目。
-_AUTO_NOTE = "工作目录（自动授权）"
-
-
-async def _drop_auto_whitelist(db: AsyncSession, session_id: str) -> None:
-    rows = list(
-        (
-            await db.execute(
-                select(PathWhitelist).where(
-                    PathWhitelist.session_id == session_id,
-                    PathWhitelist.note == _AUTO_NOTE,
-                )
-            )
-        ).scalars()
-    )
-    for r in rows:
-        await db.delete(r)
-
-
-@router.patch("/sessions/{session_id}", response_model=SessionDetail, summary="修改会话")
+@router.patch("/sessions/{session_id}", response_model=SessionDetail, summary="改会话")
 async def patch_session(
     session_id: str, body: PatchSessionRequest, db: AsyncSession = Depends(get_db)
 ) -> SessionDetail:
@@ -410,12 +333,8 @@ async def patch_session(
         ws = await repo.get_workspace(db, data["workspace_id"])
         if ws.id != s.workspace_id:
             s.workspace_id = ws.id
-            # 切工作区 = 换根目录，工作目录同步指到新根目录
-            s.work_dir = ws.root_path
     if "pinned" in data and data["pinned"] is not None:
         s.pinned = 1 if data["pinned"] else 0
-    if "work_dir" in data and data["work_dir"] is not None:
-        s.work_dir = await _resolve_work_dir(db, session_id, data["work_dir"])
     if "model_pk" in data and data["model_pk"] is not None:
         s.model_pk = await _check_model_pk(db, data["model_pk"])
     if "approval_mode" in data and data["approval_mode"] is not None:
