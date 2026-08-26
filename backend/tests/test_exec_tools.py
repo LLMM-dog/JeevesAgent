@@ -80,11 +80,7 @@ class TestRunShell:
         命令工具完全忽略退出码（cmd.py 不读 returncode），
         模型只能从 stderr 文本猜。
         """
-        cmd = (
-            "Write-Output 'did some work'; exit 7"
-            if WIN
-            else "echo 'did some work'; exit 7"
-        )
+        cmd = "Write-Output 'did some work'; exit 7" if WIN else "echo 'did some work'; exit 7"
         r = await RunShellTool().run(mk_ctx(ws), command=cmd)
         assert r.is_error is True
         assert "did some work" in r.content, "丢掉了已捕获的输出"
@@ -124,9 +120,7 @@ class TestRunShell:
         outside = tmp_path.parent / "outside_ws"
         outside.mkdir(exist_ok=True)
         cmd = "Write-Output x" if WIN else "echo x"
-        r = await RunShellTool().run(
-            mk_ctx(ws), command=cmd, cwd=str(outside)
-        )
+        r = await RunShellTool().run(mk_ctx(ws), command=cmd, cwd=str(outside))
         assert r.is_error is True
 
     async def test_cwd_not_a_directory(self, ws: Path) -> None:
@@ -154,3 +148,65 @@ class TestRunShell:
         """
         desc = RunShellTool.description
         assert "cwd" in desc.lower()
+
+
+class TestWorkspaceSandboxCfg:
+    """
+    执行环境必须按 session → workspace_id 查，而不是拿 root_path 字符串比对。
+
+    str(Path(root_path)) 会归一化分隔符，而库里存的是用户原样填的字符串 ——
+    用户填 D:/proj（正斜杠）时两者对不上，select 静默 miss，docker 工作区
+    被当成本机执行、不建容器，且没有任何报错。
+    """
+
+    async def test_docker_workspace_matched_by_session(self, db: Any, tmp_path: Path) -> None:
+        from app.core.ids import workspace_id
+        from app.modules.agent.tools.exec import _workspace_sandbox_cfg
+        from app.modules.session import repo
+        from app.modules.session.models import Workspace
+
+        # root_path 故意用正斜杠写库 —— 旧实现按 str(ctx.workspace) 比对
+        # 会 miss（Path 会把 / 归一化成 \），这里必须仍然命中。
+        root = str(tmp_path / "proj").replace("\\", "/")
+        ws = Workspace(
+            id=workspace_id(),
+            name="d",
+            root_path=root,
+            is_default=0,
+            sandbox_backend="docker",
+            docker_container="d-box",
+            docker_image="python:3.12-slim",
+            docker_network="none",
+        )
+        db.add(ws)
+        await db.commit()
+        sess = await repo.create_session(db, workspace_id=ws.id, title="x")
+
+        ctx = ToolContext(
+            session_id=sess.id,
+            run_id="r",
+            workspace=Path(ws.root_path),
+            db=db,
+            llm=None,  # type: ignore[arg-type]
+        )
+        cfg = await _workspace_sandbox_cfg(ctx)
+        assert cfg["backend"] == "docker"
+        assert cfg["container"] == "d-box"
+        assert cfg["image"] == "python:3.12-slim"
+        assert cfg["network"] == "none"
+
+    async def test_local_workspace_stays_local(self, db: Any, workspace_id: str) -> None:
+        from app.modules.agent.tools.exec import _workspace_sandbox_cfg
+        from app.modules.session import repo
+
+        sess = await repo.create_session(db, workspace_id=workspace_id, title="x")
+        ctx = ToolContext(
+            session_id=sess.id,
+            run_id="r",
+            workspace=Path("/tmp/ws-test"),
+            db=db,
+            llm=None,  # type: ignore[arg-type]
+        )
+        cfg = await _workspace_sandbox_cfg(ctx)
+        assert cfg["backend"] == "local"
+        assert cfg["container"] == ""

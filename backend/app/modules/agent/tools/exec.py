@@ -48,11 +48,15 @@ async def _workspace_sandbox_cfg(ctx: ToolContext) -> dict[str, str]:
         return cfg
     from sqlalchemy import select
 
-    from app.modules.session.models import Workspace
+    from app.modules.session.models import Session, Workspace
 
+    # 按 session → workspace_id 精确查工作区，而不是拿 root_path 字符串去
+    # 比。str(Path(root_path)) 会归一化分隔符/相对路径，而库里存的是用户
+    # 原样填的字符串 —— 两者对不上时 select 静默 miss，docker 工作区被当
+    # 成本机执行、不建容器，且没有任何报错。
     row = (
         await ctx.db.execute(
-            select(Workspace).where(Workspace.root_path == str(ctx.workspace))
+            select(Workspace).join(Session, Session.workspace_id == Workspace.id).where(Session.id == ctx.session_id)
         )
     ).scalar_one_or_none()
     if row is None or row.sandbox_backend != "docker":
@@ -153,9 +157,7 @@ class RunShellTool:
                 },
                 "cwd": {
                     "type": "string",
-                    "description": (
-                        "工作目录，相对于工作区根目录。省略则用工作区根目录"
-                    ),
+                    "description": ("工作目录，相对于工作区根目录。省略则用工作区根目录"),
                 },
                 "timeout": {
                     "type": "integer",
@@ -185,10 +187,7 @@ class RunShellTool:
             # hint 一起给 —— 里面有白名单清单。不给的话模型只能靠猜，
             # 实测会连着换好几种写法全部被拒。
             return ToolResult(
-                content=(
-                    f"工作目录被拒绝：{e.message}。请改用工作区内的相对路径。"
-                    f"{getattr(e, 'hint', '')}"
-                ),
+                content=(f"工作目录被拒绝：{e.message}。请改用工作区内的相对路径。{getattr(e, 'hint', '')}"),
                 is_error=True,
             )
 

@@ -1,4 +1,4 @@
-﻿# jeeves 启动脚本（Windows）。
+# jeeves 启动脚本（Windows）。
 #
 # 默认起开发模式：后端 --reload + 前端 vite dev server。
 # 加 -Prod 则先构建前端再只起后端（后端会伺服静态文件）。
@@ -16,6 +16,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# start.bat 先执行了 `chcp 65001`，但 Windows 自带的 PowerShell 5.1
+# 不会同步更新 [Console]::OutputEncoding（仍是系统 ANSI 代码页）。
+# 结果 Write-Host 按 GBK 编码中文、控制台按 UTF-8 解码，每个中文字符
+# 被拆错位后逐字重复（"启动后端" 显示成 "启启动动后后端端"）。
+# 这里手动对齐输出编码。
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+} catch {
+    # 没有控制台（重定向/管道）时忽略 —— 此时编码由重定向目标决定
+}
+
 $root = Split-Path $PSScriptRoot -Parent
 
 function Fail($msg) {

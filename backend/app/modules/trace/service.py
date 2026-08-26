@@ -68,7 +68,7 @@ async def span_token_totals(db: AsyncSession, run_id: str) -> dict[str, Any]:
             )
         ).all()
     )
-    by_agent = [
+    by_agent: list[dict[str, Any]] = [
         {
             "agent_name": r[0] or "main",
             "total_tokens": int(r[1] or 0),
@@ -85,9 +85,29 @@ async def span_token_totals(db: AsyncSession, run_id: str) -> dict[str, Any]:
     }
 
 
-async def list_runs(
-    db: AsyncSession, *, session_id: str | None = None, limit: int = 50
-) -> list[Run]:
+async def span_totals_for_runs(db: AsyncSession, run_ids: list[str]) -> dict[str, int]:
+    """
+    一次查出多个 run 的真实 token 合计（只算 llm 类 span）。
+
+    ## 为什么列表也要这个数
+
+    run.total_tokens 只有主 loop 的量，子代理的 llm span 不在里面。
+    列表行显示它的话，含委派的执行会明显偏小，而点开详情看到的
+    span 汇总又是另一个更大的数 —— 同一个数字两处对不上。
+    """
+    if not run_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Span.run_id, func.sum(Span.total_tokens))
+            .where(Span.run_id.in_(run_ids), Span.kind == "llm")
+            .group_by(Span.run_id)
+        )
+    ).all()
+    return {r[0]: int(r[1] or 0) for r in rows}
+
+
+async def list_runs(db: AsyncSession, *, session_id: str | None = None, limit: int = 50) -> list[Run]:
     q = select(Run).order_by(Run.started_at.desc()).limit(min(limit, 200))
     if session_id:
         q = q.where(Run.session_id == session_id)
@@ -95,9 +115,7 @@ async def list_runs(
 
 
 async def get_run(db: AsyncSession, run_id: str) -> Run | None:
-    return (
-        await db.execute(select(Run).where(Run.id == run_id))
-    ).scalar_one_or_none()
+    return (await db.execute(select(Run).where(Run.id == run_id))).scalar_one_or_none()
 
 
 async def get_span_tree(db: AsyncSession, run_id: str) -> list[SpanNode]:
@@ -107,15 +125,7 @@ async def get_span_tree(db: AsyncSession, run_id: str) -> list[SpanNode]:
     一次查全部再在内存里建树 —— 不做递归查询。span 数量是十几条量级，
     递归 CTE 的复杂度不值得。
     """
-    rows = list(
-        (
-            await db.execute(
-                select(Span)
-                .where(Span.run_id == run_id)
-                .order_by(Span.started_at.asc())
-            )
-        ).scalars()
-    )
+    rows = list((await db.execute(select(Span).where(Span.run_id == run_id).order_by(Span.started_at.asc()))).scalars())
     nodes: dict[str, SpanNode] = {r.id: SpanNode(span=r, children=[]) for r in rows}
     roots: list[SpanNode] = []
     for r in rows:
@@ -171,12 +181,8 @@ async def cleanup(db: AsyncSession, *, retain_days: int = DEFAULT_RETAIN_DAYS) -
     查询时它们永远不会出现，但一直占空间。
     """
     cutoff = now_ms() - retain_days * 86_400_000
-    span_n = (
-        await db.execute(delete(Span).where(Span.created_at < cutoff))
-    ).rowcount or 0
-    run_n = (
-        await db.execute(delete(Run).where(Run.created_at < cutoff))
-    ).rowcount or 0
+    span_n = (await db.execute(delete(Span).where(Span.created_at < cutoff))).rowcount or 0
+    run_n = (await db.execute(delete(Run).where(Run.created_at < cutoff))).rowcount or 0
     await db.commit()
     if span_n or run_n:
         log.info("trace_cleanup", spans=span_n, runs=run_n, retain_days=retain_days)
@@ -198,9 +204,8 @@ async def stats(db: AsyncSession) -> dict[str, Any]:
         "retain_days": DEFAULT_RETAIN_DAYS,
     }
 
-async def list_session_summaries(
-    db: AsyncSession, *, limit: int = 50
-) -> list[dict[str, Any]]:
+
+async def list_session_summaries(db: AsyncSession, *, limit: int = 50) -> list[dict[str, Any]]:
     """
     按会话汇总执行记录。
 
@@ -226,17 +231,27 @@ async def list_session_summaries(
                     r.session_id                       AS session_id,
                     MAX(s.title)                       AS title,
                     COUNT(*)                           AS runs,
-                    COALESCE(SUM(r.total_tokens), 0)   AS total_tokens,
+                    sp.tokens                          AS total_tokens,
                     COALESCE(SUM(r.cost_usd), 0)       AS cost_usd,
                     SUM(CASE WHEN r.status = 'error' THEN 1 ELSE 0 END) AS errors,
+                    MIN(r.started_at)                  AS first_at,
                     MAX(r.started_at)                  AS last_at
                 FROM run r
                 LEFT JOIN session s ON s.id = r.session_id
+                -- token 从 span 表按会话汇总（含子代理）。run.total_tokens
+                -- 只有主 loop 的量，SUM 起来依然漏掉子代理，和 run 列表
+                -- 那个修过的口径对不上。
+                LEFT JOIN (
+                    SELECT session_id, SUM(total_tokens) AS tokens
+                    FROM span
+                    WHERE kind = 'llm'
+                    GROUP BY session_id
+                ) sp ON sp.session_id = r.session_id
                 -- 只统计顶层 run。子 agent 的 run 有 parent_run_id，
                 -- 计进去会让"执行次数"翻倍，而用户理解的一次执行
                 -- 是"我发了一条消息"。
                 WHERE r.parent_run_id IS NULL
-                GROUP BY r.session_id
+                GROUP BY r.session_id, sp.tokens
                 ORDER BY last_at DESC
                 LIMIT :limit
                 """

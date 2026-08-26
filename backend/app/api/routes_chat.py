@@ -3,6 +3,7 @@
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -27,12 +28,13 @@ from app.core.exceptions import (
     ConflictError,
     NotFoundError,
 )
+from app.core.ids import path_id
 from app.infra.db.session import get_db
 from app.infra.sandbox.factory import get_sandbox
 from app.modules.agent import run_registry
 from app.modules.agent.chat_service import ChatService
 from app.modules.endpoint import service as provider_service
-from app.modules.endpoint.models import Model
+from app.modules.endpoint.models import Model, PathWhitelist
 from app.modules.session import repo
 from app.modules.session.models import Message, Session
 from fastapi import APIRouter, Depends, Query, Response
@@ -74,9 +76,7 @@ async def _detail_with_window(db: AsyncSession, s: Session) -> SessionDetail:
     d = _detail(s)
     win = 0
     try:
-        m = await provider_service.resolve(
-            db, purpose="chat", override_pk=s.model_pk or ""
-        )
+        m = await provider_service.resolve(db, purpose="chat", override_pk=s.model_pk or "")
         win = m.context_window
     except AppError:
         # 没配模型时窗口未知。返回 0 让前端回落到默认值 ——
@@ -156,10 +156,11 @@ async def list_sessions(
 
 
 @router.post("/sessions", response_model=SessionDetail, status_code=201, summary="新建会话")
-async def create_session(
-    body: CreateSessionRequest, db: AsyncSession = Depends(get_db)
-) -> SessionDetail:
+async def create_session(body: CreateSessionRequest, db: AsyncSession = Depends(get_db)) -> SessionDetail:
     s = await repo.create_session(db, workspace_id=body.workspace_id, title=body.title)
+    if s.workspace_id:
+        ws = await repo.get_workspace(db, s.workspace_id)
+        await _grant_workspace_whitelist(db, s.id, ws.root_path)
     return await _detail_with_window(db, s)
 
 
@@ -295,6 +296,55 @@ async def export_session(
     )
 
 
+# 自动添加的白名单条目用这个 note 标记。
+#
+# 需要一个标记才能在换工作区时准确撤掉它，又不误删用户手动加的条目。
+_AUTO_NOTE = "工作区（自动授权）"
+
+
+async def _drop_auto_whitelist(db: AsyncSession, session_id: str) -> None:
+    rows = list(
+        (
+            await db.execute(
+                select(PathWhitelist).where(
+                    PathWhitelist.session_id == session_id,
+                    PathWhitelist.note == _AUTO_NOTE,
+                )
+            )
+        ).scalars()
+    )
+    for r in rows:
+        await db.delete(r)
+    if rows:
+        await db.commit()
+
+
+async def _grant_workspace_whitelist(db: AsyncSession, session_id: str, root_path: str) -> None:
+    """把工作区根目录加进该会话的可写白名单。
+
+    用户选工作区 = 授权 agent 在里面干活。不加的话选了工作区却写不了
+    文件，报"路径不在白名单内"，而用户完全想不到还要单独授权。
+    """
+    await _drop_auto_whitelist(db, session_id)
+    # 统一成绝对路径再入库，和 PathGuard.check() 里的 resolve() 对齐。
+    # 用户填的工作区目录可能是 D:\x（带大小写差异）或带 .. 的相对写法，
+    # 直接存原样会导致 is_relative_to 比对不上，白名单形同虚设。
+    resolved = str(Path(root_path).resolve(strict=False))
+    db.add(
+        PathWhitelist(
+            id=path_id(),
+            session_id=session_id,
+            path=resolved,
+            can_write=1,
+            note=_AUTO_NOTE,
+            builtin=0,
+        )
+    )
+    # 必须在这里提交：create_session 调用本函数后不再 commit，
+    # get_db 退出时也不会自动提交，不 commit 白名单条目会静默回滚。
+    await db.commit()
+
+
 async def _check_model_pk(db: AsyncSession, raw: str) -> str:
     """
     校验会话选的模型。空串 = 回到功能位绑定的默认模型。
@@ -333,6 +383,8 @@ async def patch_session(
         ws = await repo.get_workspace(db, data["workspace_id"])
         if ws.id != s.workspace_id:
             s.workspace_id = ws.id
+            # 选工作区 = 授权读写其根目录，顺手加进会话白名单
+            await _grant_workspace_whitelist(db, session_id, ws.root_path)
     if "pinned" in data and data["pinned"] is not None:
         s.pinned = 1 if data["pinned"] else 0
     if "model_pk" in data and data["model_pk"] is not None:
@@ -343,26 +395,9 @@ async def patch_session(
         # ContextVar 在 task 创建时快照，已运行的 task 读不到新值，
         # 用户会觉得"我都切成自动了它还在弹框"。
         runtime_state.set_approval_mode(session_id, data["approval_mode"])
-    # 开视觉模式前先确认模型支持。
-    #
-    # 不拦的话用户开了开关、发了图，得到的是上游 400，而错误信息通常是
-    # "Invalid content type" 这类 —— 完全不指向"你的模型不支持图片"。
-    # 排查方向会跑到网络、图片格式、base64 编码上去。
-    #
-    # 在这里拦掉，把真因和下一步动作直接说清。
-    if data.get("vision_mode"):
-        model = await provider_service.resolve(db, purpose="chat")
-        if not model.supports_vision:
-            raise BadRequestError(
-                "当前对话模型未确认支持图片输入",
-                code="vision_unverified",
-                hint=(
-                    f"模型 {model.model_id} 的图片能力尚未核验，或核验结果为不支持。"
-                    "去设置页对该模型点「核验视觉」，通过后才能开启此开关"
-                ),
-            )
-
-    for flag in ("private_mode", "amnesia_mode", "vision_mode", "stream_enabled"):
+    # 视觉不再是会话开关：发图即自动识别，图片能力在发消息时由
+    # chat_service 的图片策略统一判定（视觉功能位 → 描述，否则多模态）。
+    for flag in ("private_mode", "amnesia_mode", "stream_enabled"):
         if flag in data and data[flag] is not None:
             setattr(s, flag, 1 if data[flag] else 0)
 
@@ -477,9 +512,7 @@ async def list_messages(
     db: AsyncSession = Depends(get_db),
 ) -> MessageListResponse:
     await repo.get_session(db, session_id)
-    rows = await repo.load_messages(
-        db, session_id, agent_name=None if agent_name == "*" else agent_name
-    )
+    rows = await repo.load_messages(db, session_id, agent_name=None if agent_name == "*" else agent_name)
 
     # 归档水位线：前端用它跳过已归档消息，恢复"归档后的上下文占用"。
     # 归档后的实际上下文 = system + watermark 之后的消息 + overview 摘要，
@@ -494,17 +527,11 @@ async def list_messages(
     except Exception:  # noqa: BLE001
         pass
 
-    return MessageListResponse(
-        items=[_msg_out(m) for m in rows], watermark=watermark
-    )
+    return MessageListResponse(items=[_msg_out(m) for m in rows], watermark=watermark)
 
 
-@router.delete(
-    "/sessions/{session_id}/messages/{message_id}", summary="从该消息处截断（用于重发）"
-)
-async def truncate_messages(
-    session_id: str, message_id: str, db: AsyncSession = Depends(get_db)
-) -> dict[str, int]:
+@router.delete("/sessions/{session_id}/messages/{message_id}", summary="从该消息处截断（用于重发）")
+async def truncate_messages(session_id: str, message_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, int]:
     """
     截断删除：删掉该消息及其之后的全部消息。
 
@@ -534,9 +561,7 @@ async def truncate_messages(
 
 
 @router.post("/chat", summary="对话（SSE 流式）")
-async def chat(
-    body: ChatRequest, service: ChatService = Depends(deps.get_chat_service)
-) -> StreamingResponse:
+async def chat(body: ChatRequest, service: ChatService = Depends(deps.get_chat_service)) -> StreamingResponse:
     """
     必须用 POST —— 请求体里有消息内容、引用列表、附件 ID。
     前端因此【不能用 EventSource】（它只能发 GET），必须 fetch + getReader。

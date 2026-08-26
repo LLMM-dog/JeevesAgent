@@ -16,6 +16,20 @@ import { api } from "@/lib/api";
 import { filterModelsForPurpose, PURPOSE_META, PURPOSE_ORDER } from "@/lib/purposeMeta";
 import type { ModelItem, Purpose } from "@/lib/types";
 
+/**
+ * 下拉框里每个模型的显示文本。
+ *
+ * 看图位加前缀标识视觉验证状态：✓ 已验证可看图，？未核验。
+ * 原生 option 不支持着色，用符号比用颜色可靠（跨平台一致）。
+ */
+function modelOptionLabel(m: ModelItem, purpose: Purpose): string {
+  const name = m.display_name || m.model_id;
+  const disabled = m.enabled ? "" : "（已禁用）";
+  if (purpose !== "vision") return `${name}${disabled}`;
+  const mark = m.supports_vision === "true" ? "✓ " : "？";
+  return `${mark}${name}${disabled}`;
+}
+
 export function BindingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const [saving, setSaving] = useState<Purpose | null>(null);
@@ -158,14 +172,21 @@ export function BindingsDialog({ open, onClose }: { open: boolean; onClose: () =
                       <optgroup key={g.name} label={g.name}>
                         {g.models.map((m) => (
                           <option key={m.id} value={m.id}>
-                            {m.display_name || m.model_id}
-                            {m.enabled ? "" : "（已禁用）"}
+                            {modelOptionLabel(m, purpose)}
                           </option>
                         ))}
                       </optgroup>
                     ))}
                   </select>
                 </div>
+
+                {/* 看图位：下拉框符号图例。原生 option 不能着色，
+                    用符号区分验证状态，图例在这里解释符号含义。 */}
+                {purpose === "vision" && (
+                  <div className="mt-1 text-right text-[10px]" style={{ color: "var(--color-muted)" }}>
+                    ✓ 已核验可看图　？未核验
+                  </div>
+                )}
 
                 {/* 看图位：未核验模型的警示 + 核验按钮 */}
                 {purpose === "vision" && visionModel && visionModel.supports_vision === "unknown" && (

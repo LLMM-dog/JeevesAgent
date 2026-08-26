@@ -107,9 +107,7 @@ async def list_endpoints(db: AsyncSession = Depends(get_db)) -> EndpointListResp
 
 
 @router.post("/endpoints", response_model=EndpointOut, status_code=201, summary="添加模型组（API 端点）")
-async def create_endpoint(
-    body: CreateEndpointRequest, db: AsyncSession = Depends(get_db)
-) -> EndpointOut:
+async def create_endpoint(body: CreateEndpointRequest, db: AsyncSession = Depends(get_db)) -> EndpointOut:
     p = await ps.create_endpoint(
         db,
         name=body.name,
@@ -182,9 +180,7 @@ async def update_endpoint(
 @router.get("/models", response_model=ModelListResponse, summary="模型列表")
 async def list_models(
     endpoint_id: str | None = Query(None),
-    enabled_only: bool = Query(
-        False, description="只返回已启用的。对话页的切换菜单用这个"
-    ),
+    enabled_only: bool = Query(False, description="只返回已启用的。对话页的切换菜单用这个"),
     db: AsyncSession = Depends(get_db),
 ) -> ModelListResponse:
     """
@@ -198,9 +194,7 @@ async def list_models(
         rows = [m for m in rows if m.enabled]
 
     # 一次查出所有端点名，避免每个模型查一次
-    pmap = {
-        p.id: p.name for p in (await db.execute(select(Endpoint))).scalars()
-    }
+    pmap = {p.id: p.name for p in (await db.execute(select(Endpoint))).scalars()}
     # 一次查出所有绑定，按 model_pk 分组，给模型卡片显示"被配置为什么功能"
     bindings_map: dict[str, list[str]] = {}
     for b in (await db.execute(select(ModelBinding))).scalars():
@@ -229,9 +223,7 @@ async def list_models(
 
 
 @router.post("/models/{model_pk}/verify-vision", summary="核验图片输入能力")
-async def verify_vision(
-    model_pk: str, db: AsyncSession = Depends(get_db)
-) -> dict[str, object]:
+async def verify_vision(model_pk: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
     """
     发一次真实的多模态请求，确认这个模型收不收图片。
 
@@ -274,33 +266,23 @@ async def list_bindings(db: AsyncSession = Depends(get_db)) -> BindingListRespon
 
 
 @router.put("/bindings", summary="设置功能位（upsert）")
-async def set_binding(
-    body: SetBindingRequest, db: AsyncSession = Depends(get_db)
-) -> dict[str, str]:
-    b = await ps.set_binding(
-        db, purpose=body.purpose, model_pk=body.model_pk, agent_name=body.agent_name
-    )
+async def set_binding(body: SetBindingRequest, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+    b = await ps.set_binding(db, purpose=body.purpose, model_pk=body.model_pk, agent_name=body.agent_name)
     return {"id": b.id}
 
 
 # ─────────────────────────── todo ───────────────────────────
 
 
-@router.get(
-    "/sessions/{session_id}/todos", response_model=TodoListResponse, summary="任务清单"
-)
+@router.get("/sessions/{session_id}/todos", response_model=TodoListResponse, summary="任务清单")
 async def list_todos(session_id: str, db: AsyncSession = Depends(get_db)) -> TodoListResponse:
     await repo.get_session(db, session_id)
     rows = await load_active(db, session_id)
-    return TodoListResponse(
-        items=[TodoOut(**t) for t in _serialize(rows)], stats=_stats(rows)
-    )
+    return TodoListResponse(items=[TodoOut(**t) for t in _serialize(rows)], stats=_stats(rows))
 
 
 @router.patch("/todos/{todo_id}", response_model=TodoOut, summary="修改任务")
-async def patch_todo(
-    todo_id: str, body: PatchTodoRequest, db: AsyncSession = Depends(get_db)
-) -> TodoOut:
+async def patch_todo(todo_id: str, body: PatchTodoRequest, db: AsyncSession = Depends(get_db)) -> TodoOut:
     t = (await db.execute(select(Todo).where(Todo.id == todo_id))).scalar_one_or_none()
     if t is None:
         raise NotFoundError("任务不存在", code="todo_not_found")
@@ -343,9 +325,7 @@ async def archive_todos(session_id: str, db: AsyncSession = Depends(get_db)) -> 
 
 
 @router.get("/meta", response_model=MetaResponse, summary="运行时元信息")
-async def meta(
-    db: AsyncSession = Depends(get_db), registry: ToolRegistry = Depends(deps.get_registry)
-) -> MetaResponse:
+async def meta(db: AsyncSession = Depends(get_db), registry: ToolRegistry = Depends(deps.get_registry)) -> MetaResponse:
     """前端启动时拉一次，用于判断哪些功能可用。"""
     # 探真实可用性，而不是"docker 这个 python 包能不能 import"。
     #
@@ -409,10 +389,7 @@ async def list_skills(db: AsyncSession = Depends(get_db)) -> dict[str, object]:
             }
             for m in sorted(idx.skills.values(), key=lambda s: s.name)
         ],
-        "diagnostics": [
-            {"level": d.level, "message": d.message, "path": d.path}
-            for d in idx.diagnostics
-        ],
+        "diagnostics": [{"level": d.level, "message": d.message, "path": d.path} for d in idx.diagnostics],
     }
 
 
@@ -490,14 +467,11 @@ async def websearch_put(
         key = body.tavily_api_key or settings.websearch.tavily_api_key
         if not key:
             raise BadRequestError(
-                "Tavily 需要 API Key。去 tavily.com 注册一个免费的，"
-                "或者改用 ddg（免费、不需要 key）",
+                "Tavily 需要 API Key。去 tavily.com 注册一个免费的，或者改用 ddg（免费、不需要 key）",
                 code="tavily_key_required",
             )
 
-    if body.backend != "none" and not _mod_ok(
-        "tavily" if body.backend == "tavily" else "ddgs"
-    ):
+    if body.backend != "none" and not _mod_ok("tavily" if body.backend == "tavily" else "ddgs"):
         raise BadRequestError(
             f"缺少 {body.backend} 需要的依赖。装：uv sync --extra search",
             code="search_dep_missing",
@@ -714,9 +688,7 @@ async def ref_candidates(
     # 让前端能显示"先设置工作目录"而不是含糊的"没有匹配"。
     roots: list[Path] = []
     if session_id:
-        s = (
-            await db.execute(select(Session).where(Session.id == session_id))
-        ).scalars().first()
+        s = (await db.execute(select(Session).where(Session.id == session_id))).scalars().first()
         if s is not None:
             ws = (await db.execute(select(Workspace).where(Workspace.id == s.workspace_id))).scalar_one_or_none()
             if ws is not None and Path(ws.root_path).is_dir():
@@ -744,9 +716,24 @@ def _one_line_desc(text: object) -> str:
 # node_modules 里的 main.js，真正要的文件排在后面。
 _SKIP_DIRS = frozenset(
     {
-        ".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache",
-        ".pytest_cache", ".ruff_cache", "dist", "build", ".next", ".turbo",
-        ".idea", ".vscode", "target", ".gradle", "coverage", ".tox",
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        ".next",
+        ".turbo",
+        ".idea",
+        ".vscode",
+        "target",
+        ".gradle",
+        "coverage",
+        ".tox",
     }
 )
 
@@ -804,9 +791,7 @@ def _search_files(root: Path, query: str, limit: int) -> list[dict[str, object]]
                 score = 30
             else:
                 continue
-            scored.append(
-                (score, rel, {"name": p.name, "path": rel, "detail": rel, "is_dir": False})
-            )
+            scored.append((score, rel, {"name": p.name, "path": rel, "detail": rel, "is_dir": False}))
 
     if root.is_dir():
         walk(root, 0)
@@ -869,9 +854,7 @@ async def upload_skill(
         raise BadRequestError("文件为空", code="skill_empty")
 
     try:
-        result = skill_package.install_package(
-            data, settings.skills_dir, overwrite=overwrite
-        )
+        result = skill_package.install_package(data, settings.skills_dir, overwrite=overwrite)
     except skill_package.SkillPackageError as e:
         msg = str(e)
         if "已存在" in msg:
@@ -915,9 +898,7 @@ async def delete_skill(name: str) -> dict[str, object]:
 
 
 @router.patch("/skills/{name}/enabled", summary="开关一个技能")
-async def toggle_skill(
-    name: str, body: SkillToggle, db: AsyncSession = Depends(get_db)
-) -> dict[str, object]:
+async def toggle_skill(name: str, body: SkillToggle, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
     """
     关掉的技能不进系统提示词。
 
@@ -938,9 +919,7 @@ async def toggle_skill(
 
 
 @router.patch("/mcp/servers/{server_id}/enabled", summary="开关一个 MCP 服务器")
-async def toggle_mcp_server(
-    server_id: str, body: McpToggle, request: Request
-) -> dict[str, object]:
+async def toggle_mcp_server(server_id: str, body: McpToggle, request: Request) -> dict[str, object]:
     """
     改 yaml 里的 enabled 并重连。
 
@@ -961,9 +940,7 @@ async def toggle_mcp_server(
     from app.modules.mcp.manager import get_manager
 
     if not set_enabled(server_id, body.enabled):
-        raise NotFoundError(
-            f"配置里没有 {server_id} 这个服务器", code="server_not_found"
-        )
+        raise NotFoundError(f"配置里没有 {server_id} 这个服务器", code="server_not_found")
 
     mgr = get_manager()
     await mgr.disconnect_all()
@@ -996,9 +973,7 @@ async def mcp_server_detail(server_id: str) -> dict[str, object]:
             break
 
     if cfg is None and state is None:
-        raise NotFoundError(
-            f"服务器 {server_id} 不存在", code="server_not_found"
-        )
+        raise NotFoundError(f"服务器 {server_id} 不存在", code="server_not_found")
 
     result: dict[str, object] = {
         "server_id": server_id,
@@ -1006,31 +981,33 @@ async def mcp_server_detail(server_id: str) -> dict[str, object]:
         "enabled": cfg.enabled if cfg else True,
     }
     if cfg:
-        result.update({
-            "url": cfg.url,
-            "headers": cfg.headers,
-            "command": cfg.command,
-            "args": cfg.args,
-            "env": cfg.env,
-            "cwd": cfg.cwd,
-            "command_approved": cfg.command_approved,
-        })
+        result.update(
+            {
+                "url": cfg.url,
+                "headers": cfg.headers,
+                "command": cfg.command,
+                "args": cfg.args,
+                "env": cfg.env,
+                "cwd": cfg.cwd,
+                "command_approved": cfg.command_approved,
+            }
+        )
     if state:
-        result.update({
-            "status": state.status,
-            "error": state.error,
-            "tool_count": len(state.tools),
-            "tools": [{"name": t.name, "raw_name": t.raw_name, "description": t.description} for t in state.tools],
-            "estimated_tokens": estimate_tokens(state.tools),
-            "connected_at": state.connected_at,
-        })
+        result.update(
+            {
+                "status": state.status,
+                "error": state.error,
+                "tool_count": len(state.tools),
+                "tools": [{"name": t.name, "raw_name": t.raw_name, "description": t.description} for t in state.tools],
+                "estimated_tokens": estimate_tokens(state.tools),
+                "connected_at": state.connected_at,
+            }
+        )
     return result
 
 
 @router.post("/mcp/servers", summary="添加 MCP 服务器", status_code=201)
-async def mcp_server_add(
-    body: McpServerCreate, request: Request
-) -> dict[str, object]:
+async def mcp_server_add(body: McpServerCreate, request: Request) -> dict[str, object]:
     """添加服务器到配置文件并立刻重连。"""
     from app.modules.mcp.config import ServerConfig
     from app.modules.mcp.loader import add_server, load_configs
@@ -1039,9 +1016,7 @@ async def mcp_server_add(
     # 查重
     configs, _errors = load_configs()
     if any(c.server_id == body.server_id for c in configs):
-        raise ConflictError(
-            f"server_id {body.server_id} 已存在", code="server_exists"
-        )
+        raise ConflictError(f"server_id {body.server_id} 已存在", code="server_exists")
 
     cfg = ServerConfig(
         server_id=body.server_id,
@@ -1076,9 +1051,7 @@ async def mcp_server_add(
 
 
 @router.patch("/mcp/servers/{server_id}", summary="修改 MCP 服务器")
-async def mcp_server_update(
-    server_id: str, body: McpServerUpdate, request: Request
-) -> dict[str, object]:
+async def mcp_server_update(server_id: str, body: McpServerUpdate, request: Request) -> dict[str, object]:
     """改配置并重连。只传要改的字段。"""
     from app.modules.mcp.loader import load_configs, update_server
     from app.modules.mcp.manager import get_manager
@@ -1090,9 +1063,7 @@ async def mcp_server_update(
             current = c
             break
     if current is None:
-        raise NotFoundError(
-            f"服务器 {server_id} 不存在", code="server_not_found"
-        )
+        raise NotFoundError(f"服务器 {server_id} 不存在", code="server_not_found")
 
     data = body.model_dump(exclude_unset=True)
 
@@ -1105,9 +1076,7 @@ async def mcp_server_update(
 
     updated = update_server(server_id, data)
     if not updated:
-        raise NotFoundError(
-            f"配置里没有 {server_id} 这个服务器", code="server_not_found"
-        )
+        raise NotFoundError(f"配置里没有 {server_id} 这个服务器", code="server_not_found")
 
     # 重连
     mgr = get_manager()
@@ -1122,18 +1091,14 @@ async def mcp_server_update(
 
 
 @router.delete("/mcp/servers/{server_id}", summary="删除 MCP 服务器")
-async def mcp_server_delete(
-    server_id: str, request: Request
-) -> dict[str, bool]:
+async def mcp_server_delete(server_id: str, request: Request) -> dict[str, bool]:
     """从配置里删掉并关闭连接。"""
     from app.modules.mcp.loader import remove_server
     from app.modules.mcp.manager import get_manager
 
     ok = remove_server(server_id)
     if not ok:
-        raise NotFoundError(
-            f"服务器 {server_id} 不存在", code="server_not_found"
-        )
+        raise NotFoundError(f"服务器 {server_id} 不存在", code="server_not_found")
 
     # 断开并清理工具
     mgr = get_manager()
@@ -1180,9 +1145,14 @@ async def trace_sessions(
                 # 会话可能已被删（run 有 CASCADE，但汇总是查历史）
                 "title": r["title"] or "未命名会话",
                 "runs": r["runs"],
-                "total_tokens": r["total_tokens"],
+                # span 汇总可能是 NULL（该会话还没有 llm span），归一成 0
+                "total_tokens": int(r["total_tokens"] or 0),
                 "cost_usd": r["cost_usd"],
                 "errors": r["errors"],
+                # 第一次执行时间（展示用）与最近执行时间（排序用）分开。
+                # 原来只返回 last_at，前端拿它当"这次会话的时间"展示 ——
+                # 显示的是最新一次执行，用户以为整个会话是那一刻发生的。
+                "first_at": r["first_at"],
                 "last_at": r["last_at"],
             }
             for r in rows
@@ -1197,6 +1167,9 @@ async def list_traces(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     runs = await trace_service.list_runs(db, session_id=session_id, limit=limit)
+    # 列表行的 token 用 span 汇总（含子代理），否则和点开详情看到的
+    # span_totals 对不上 —— 同一个执行两处显示两个不同的 token 数。
+    token_map = await trace_service.span_totals_for_runs(db, [r.id for r in runs])
     return {
         "items": [
             {
@@ -1209,7 +1182,8 @@ async def list_traces(
                 "started_at": r.started_at,
                 "duration_ms": r.duration_ms,
                 "turns": r.turns,
-                "total_tokens": r.total_tokens,
+                # 真实合计（span 汇总）。span 缺失时回落 run.total_tokens。
+                "total_tokens": token_map.get(r.id, r.total_tokens),
                 # 含子代理的累计。不聚合的话这个数答不出来 ——
                 # 它们要么在前端内存累加，要么在展示层重建，要么没实现。
                 "rollup_total_tokens": r.rollup_total_tokens,
@@ -1223,9 +1197,7 @@ async def list_traces(
 
 
 @router.get("/traces/{run_id}", summary="执行树")
-async def get_trace(
-    run_id: str, db: AsyncSession = Depends(get_db)
-) -> dict[str, object]:
+async def get_trace(run_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
     run = await trace_service.get_run(db, run_id)
     if run is None:
         raise NotFoundError("执行记录不存在", code="run_not_found")

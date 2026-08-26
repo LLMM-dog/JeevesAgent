@@ -297,17 +297,9 @@ function TraceDetail({ runId }: { runId: string }) {
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--color-muted)]">
-        <span>{data.turns} 轮</span>
-        <span>{fmtDur(data.duration_ms)}</span>
-        <span>{fmtTok(totals.total_tokens)}</span>
-        {data.stop_reason !== "final" && (
-          <span className="text-[var(--color-warn)]">{data.stop_reason}</span>
-        )}
-      </div>
-
-      {/* 按智能体拆分。"委派花了多少"是判断委派值不值的唯一依据 ——
-          常见实现答不出这个数 */}
+      {/* 轮次/耗时/token 已经在折叠行里显示过了，这里不再重复。
+          只留折叠行没有的、按智能体的拆分 —— "委派花了多少"是判断
+          委派值不值的唯一依据，常见实现答不出这个数。 */}
       {totals.by_agent.length > 1 && (
         <div className="flex flex-wrap gap-2 text-[10px]">
           {totals.by_agent.map((a) => (
@@ -836,7 +828,7 @@ function RunTraces() {
                       )}
                     </div>
                     <div className="mt-0.5 text-[10px] text-[var(--color-muted)]">
-                      {new Date(s.last_at).toLocaleString("zh-CN")}
+                      首次 {new Date(s.first_at).toLocaleString("zh-CN")}
                     </div>
                   </div>
                   <div className="shrink-0 text-right text-[10px] tabular-nums text-[var(--color-muted)]">

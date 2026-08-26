@@ -51,7 +51,7 @@ export function WorkspaceSwitcher({ sessionId }: { sessionId: string }) {
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 w-72 rounded-lg border p-1 shadow-xl" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}>
+        <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-lg border p-1 shadow-xl" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}>
           {items.map((ws) => (
             <button key={ws.id} type="button" onClick={() => pick.mutate(ws)} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition hover:bg-[var(--color-surface-2)]">
               <span className="min-w-0 flex-1">

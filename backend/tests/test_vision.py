@@ -140,10 +140,7 @@ class TestBuildContent:
         单轮图片数有上限。一张 1024x1024 折算 700~1500 token，
         5 张就是几千 —— 这是视觉功能最容易炸上下文的地方。
         """
-        imgs = [
-            vision.ImagePart(mime="image/png", data_b64=str(i))
-            for i in range(vision.MAX_IMAGES_PER_TURN + 3)
-        ]
+        imgs = [vision.ImagePart(mime="image/png", data_b64=str(i)) for i in range(vision.MAX_IMAGES_PER_TURN + 3)]
         out = vision.build_user_content("x", imgs)
         assert isinstance(out, list)
         # 1 个 text + 上限张图
@@ -166,9 +163,7 @@ class _FakeLLM:
         self.err = err
         self.last_messages: Any = None
 
-    async def probe_chat(
-        self, *, base_url: str, api_key: str, model_id: str, messages: Any
-    ) -> str:
+    async def probe_chat(self, *, base_url: str, api_key: str, model_id: str, messages: Any) -> str:
         self.last_messages = messages
         if self.err:
             raise self.err
@@ -269,9 +264,7 @@ class TestProbeVision:
         直接报"不支持"是假阴性。
         """
         llm = _FakeLLM(
-            err=RuntimeError(
-                'HTTP 400: {"code":20015,"message":"image_url provided is not a valid image."}'
-            )
+            err=RuntimeError('HTTP 400: {"code":20015,"message":"image_url provided is not a valid image."}')
         )
         ok, detail = await vision.probe_vision(llm, "http://x/v1", "k", "m")
         assert not ok
@@ -284,10 +277,7 @@ class TestProbeVision:
         端点根本不认识这个 content 类型（实测 deepseek 就是这样）。
         """
         llm = _FakeLLM(
-            err=RuntimeError(
-                "HTTP 400: Failed to deserialize the JSON body: "
-                "messages[0]: unknown variant `image_url`"
-            )
+            err=RuntimeError("HTTP 400: Failed to deserialize the JSON body: messages[0]: unknown variant `image_url`")
         )
         ok, detail = await vision.probe_vision(llm, "http://x/v1", "k", "m")
         assert not ok
@@ -317,9 +307,7 @@ class TestMsgToApi:
         """
         from app.modules.agent.messages import Msg
 
-        api = Msg(
-            role="user", content="看图", images=["data:image/png;base64,!!!bad!!!"]
-        ).to_api()
+        api = Msg(role="user", content="看图", images=["data:image/png;base64,!!!bad!!!"]).to_api()
         # 只剩 text，没有崩
         assert api["content"] == [{"type": "text", "text": "看图"}]
 
@@ -372,21 +360,21 @@ class _FakeSession:
 
 
 class TestCheckImages:
-    def test_dropped_when_vision_off(self) -> None:
+    def test_kept_even_if_legacy_vision_flag_off(self) -> None:
         """
-        没开视觉模式时丢弃图片而不报错。
+        不再有视觉模式开关：发图即自动识别。
 
-        用户可能在关掉开关后才发出已贴好的图。报错会让他丢掉整条消息
-        （文字也发不出去），而丢弃图片只损失图片。
+        数据库里还留着旧的 vision_mode 列（未迁移），即使它是 0，
+        图片也不该被丢弃 —— 用户把图贴进来就是意图。
         """
         from app.modules.agent.chat_service import ChatService
 
         s = _FakeSession()
         s.vision_mode = 0  # type: ignore[assignment]
-        out = ChatService._check_images([_data_url(_png())], s)
-        assert out == []
+        url = _data_url(_png())
+        assert ChatService._check_images([url], s) == [url]
 
-    def test_kept_when_vision_on(self) -> None:
+    def test_valid_image_kept(self) -> None:
         from app.modules.agent.chat_service import ChatService
 
         url = _data_url(_png())
@@ -404,9 +392,7 @@ class TestCheckImages:
         from app.modules.agent.chat_service import ChatService
 
         with pytest.raises(BadRequestError):
-            ChatService._check_images(
-                [_data_url(b"MZ fake exe", "image/png")], _FakeSession()
-            )
+            ChatService._check_images([_data_url(b"MZ fake exe", "image/png")], _FakeSession())
 
     def test_excess_truncated_not_rejected(self) -> None:
         """
@@ -418,33 +404,6 @@ class TestCheckImages:
         urls = [_data_url(_png(i + 1)) for i in range(vision.MAX_IMAGES_PER_TURN + 3)]
         out = ChatService._check_images(urls, _FakeSession())
         assert len(out) == vision.MAX_IMAGES_PER_TURN
-
-
-class TestVisionModeGating:
-    """
-    未核验的模型不许开视觉开关。
-
-    不拦的话用户开了开关、发了图，得到的是上游 400，错误信息通常是
-    "Invalid content type" 这类 —— 完全不指向"你的模型不支持图片"，
-    排查方向会跑到网络、图片格式、base64 编码上去。
-    """
-
-    def test_route_checks_supports_vision(self) -> None:
-        import inspect
-
-        from app.api import routes_chat
-
-        src = inspect.getsource(routes_chat)
-        assert "vision_unverified" in src, "开启视觉模式时没检查模型能力"
-
-    def test_error_hint_says_what_to_do(self) -> None:
-        """报错必须给出下一步动作，不能只说"不支持"。"""
-        import inspect
-
-        from app.api import routes_chat
-
-        src = inspect.getsource(routes_chat)
-        assert "核验视觉" in src, "报错没告诉用户去哪里核验"
 
 
 class TestThreeStateVision:

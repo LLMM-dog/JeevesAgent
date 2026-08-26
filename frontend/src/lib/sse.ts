@@ -102,6 +102,9 @@ export function startChat(
           session_id: opts.session_id,
           content: opts.content,
           refs: opts.refs ?? [],
+          // 图片 data URL。缺了这一行的话后端 body.images 永远是空，
+          // 图片根本没发出去 —— "发图没反应"的根因。
+          images: opts.images ?? [],
           attachment_ids: opts.attachment_ids ?? [],
           agent_id: opts.agent_id ?? "",
         }),

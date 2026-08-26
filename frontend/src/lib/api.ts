@@ -699,6 +699,9 @@ export const api = {
         total_tokens: number;
         cost_usd: number;
         errors: number;
+        /** 第一次执行时间（展示用） */
+        first_at: number;
+        /** 最近执行时间（排序用） */
         last_at: number;
       }[];
     }>("/traces-sessions"),

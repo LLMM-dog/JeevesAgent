@@ -97,9 +97,7 @@ class TestSessionIsolation:
                 assert "inner" in str(get_guard().allowed[0].path)
             assert "outer" in str(get_guard().allowed[0].path)
 
-    async def test_load_merges_global_and_session(
-        self, db, workspace_id: str, tmp_path: Path
-    ) -> None:
+    async def test_load_merges_global_and_session(self, db, workspace_id: str, tmp_path: Path) -> None:
         """
         会话级 + 全局要合并。
 
@@ -110,21 +108,13 @@ class TestSessionIsolation:
         s = tmp_path / "mine"
         g.mkdir()
         s.mkdir()
-        db.add(
-            PathWhitelist(
-                id=path_id(), session_id=None, path=str(g), can_write=0, builtin=1
-            )
-        )
+        db.add(PathWhitelist(id=path_id(), session_id=None, path=str(g), can_write=0, builtin=1))
         # session_id 必须指向真实存在的会话 —— 有外键约束，
         # 用编造的 id 会报 "FOREIGN KEY constraint failed"
         from app.modules.session import repo as srepo
 
         sess = await srepo.create_session(db, workspace_id=workspace_id, title="x")
-        db.add(
-            PathWhitelist(
-                id=path_id(), session_id=sess.id, path=str(s), can_write=1, builtin=0
-            )
-        )
+        db.add(PathWhitelist(id=path_id(), session_id=sess.id, path=str(s), can_write=1, builtin=0))
         await db.flush()
 
         allowed = await load_session_allowed(db, sess.id)
@@ -133,9 +123,7 @@ class TestSessionIsolation:
         assert str(s) in paths
 
         # 别的会话看不到 ses_x 的条目
-        other_sess = await srepo.create_session(
-            db, workspace_id=workspace_id, title="y"
-        )
+        other_sess = await srepo.create_session(db, workspace_id=workspace_id, title="y")
         other = await load_session_allowed(db, other_sess.id)
         assert str(s) not in {str(a.path) for a in other}
         assert str(g) in {str(a.path) for a in other}
@@ -159,6 +147,7 @@ class TestRefCandidatesFix:
         assert body.get("reason") == "no_work_dir"
         assert "工作区" in body.get("hint", "")
 
+
 class TestWhitelistApi:
     """第 4 条抱怨：看不到白名单，也没有地方去改。"""
 
@@ -170,9 +159,7 @@ class TestWhitelistApi:
     async def test_add_and_delete(self, client: AsyncClient, tmp_path: Path) -> None:
         d = tmp_path / "extra"
         d.mkdir()
-        r = await client.post(
-            "/api/whitelist", json={"path": str(d), "can_write": False}
-        )
+        r = await client.post("/api/whitelist", json={"path": str(d), "can_write": False})
         assert r.status_code == 201
         item = r.json()
         assert Path(item["path"]) == d.resolve()
@@ -189,46 +176,34 @@ class TestWhitelistApi:
         r = await client.post("/api/whitelist", json={"path": str(d)})
         assert r.status_code == 409
 
-    async def test_reports_missing_path(
-        self, client: AsyncClient, tmp_path: Path
-    ) -> None:
+    async def test_reports_missing_path(self, client: AsyncClient, tmp_path: Path) -> None:
         """
         允许加不存在的目录（可能先授权再创建），但要标出来。
 
         不标的话目录被移走后界面还显示正常，而用户正纳闷
         为什么 agent 读不到文件。
         """
-        r = await client.post(
-            "/api/whitelist", json={"path": str(tmp_path / "later")}
-        )
+        r = await client.post("/api/whitelist", json={"path": str(tmp_path / "later")})
         assert r.status_code == 201
         assert r.json()["exists"] is False
 
     async def test_builtin_protected(self, client: AsyncClient, db) -> None:
         """内置项不可删也不可改权限 —— 删了 agent 完全不能读写文件。"""
-        row = PathWhitelist(
-            id=path_id(), session_id=None, path="C:/builtin_x", can_write=0, builtin=1
-        )
+        row = PathWhitelist(id=path_id(), session_id=None, path="C:/builtin_x", can_write=0, builtin=1)
         db.add(row)
         await db.flush()
 
         rd = await client.delete(f"/api/whitelist/{row.id}")
         assert rd.status_code == 400
-        rp = await client.patch(
-            f"/api/whitelist/{row.id}", json={"can_write": True}
-        )
+        rp = await client.patch(f"/api/whitelist/{row.id}", json={"can_write": True})
         assert rp.status_code == 400
 
-    async def test_session_scope_in_list(
-        self, client: AsyncClient, tmp_path: Path
-    ) -> None:
+    async def test_session_scope_in_list(self, client: AsyncClient, tmp_path: Path) -> None:
         """带 session_id 时返回该会话生效的全部集合（会话级 + 全局）。"""
         sid = (await client.post("/api/sessions", json={"title": "t"})).json()["id"]
         d = tmp_path / "mine"
         d.mkdir()
-        await client.post(
-            f"/api/whitelist?session_id={sid}", json={"path": str(d), "can_write": True}
-        )
+        await client.post(f"/api/whitelist?session_id={sid}", json={"path": str(d), "can_write": True})
 
         r = await client.get(f"/api/whitelist?session_id={sid}")
         paths = [i["path"] for i in r.json()["items"]]
@@ -237,6 +212,35 @@ class TestWhitelistApi:
         # 不带 session_id 只看全局，看不到会话级的
         r2 = await client.get("/api/whitelist")
         assert str(d.resolve()) not in [i["path"] for i in r2.json()["items"]]
+
+
+class TestWorkspaceAutoWhitelist:
+    """选工作区 = 自动授权读写其根目录。"""
+
+    async def test_create_session_grants_workspace(self, client: AsyncClient, tmp_path: Path) -> None:
+        ws = (await client.post("/api/workspaces", json={"name": "w", "root_path": str(tmp_path)})).json()
+        sid = (await client.post("/api/sessions", json={"workspace_id": ws["id"]})).json()["id"]
+
+        r = await client.get(f"/api/whitelist?session_id={sid}")
+        paths = [i["path"] for i in r.json()["items"]]
+        assert str(tmp_path.resolve()) in paths
+
+    async def test_patch_session_swaps_whitelist(self, client: AsyncClient, tmp_path: Path) -> None:
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        w1 = (await client.post("/api/workspaces", json={"name": "w1", "root_path": str(a)})).json()
+        w2 = (await client.post("/api/workspaces", json={"name": "w2", "root_path": str(b)})).json()
+        sid = (await client.post("/api/sessions", json={"workspace_id": w1["id"]})).json()["id"]
+
+        r = await client.patch(f"/api/sessions/{sid}", json={"workspace_id": w2["id"]})
+        assert r.status_code == 200
+
+        r = await client.get(f"/api/whitelist?session_id={sid}")
+        paths = [i["path"] for i in r.json()["items"]]
+        assert str(b.resolve()) in paths
+        assert str(a.resolve()) not in paths
 
 
 class TestBrowse:

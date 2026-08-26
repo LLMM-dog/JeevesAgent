@@ -69,10 +69,15 @@ class PreparedChat:
 # ── 权限过滤 ──
 
 _TOOL_PERMISSION_MAP: dict[str, str] = {
-    "read_file": "read", "grep": "read", "glob": "read", "list_dir": "read",
-    "write_file": "write", "edit_file": "write",
+    "read_file": "read",
+    "grep": "read",
+    "glob": "read",
+    "list_dir": "read",
+    "write_file": "write",
+    "edit_file": "write",
     "run_shell": "shell",
-    "web_search": "network", "web_fetch": "network",
+    "web_search": "network",
+    "web_fetch": "network",
     "delegate_task": "subagent",
 }
 
@@ -148,11 +153,7 @@ async def _try_resolve_vision(db: AsyncSession) -> "Any | None":
     from app.modules.endpoint.models import ModelBinding
 
     b = (
-        await db.execute(
-            select(ModelBinding).where(
-                ModelBinding.agent_name == "", ModelBinding.purpose == "vision"
-            )
-        )
+        await db.execute(select(ModelBinding).where(ModelBinding.agent_name == "", ModelBinding.purpose == "vision"))
     ).scalar_one_or_none()
     if b is None:
         return None
@@ -199,6 +200,7 @@ async def _fetch_url_text(href: str) -> str:
     if res.truncated:
         return f"{res.text}\n\n（原文 {res.original_bytes} 字节，已截断）"
     return res.text
+
 
 class ChatService:
     def __init__(
@@ -250,9 +252,7 @@ class ChatService:
 
             # 预检 chat 位能否解析出模型，结果丢弃。
             # 目的是让"未配置模型"返回 400 而不是流中途的 error 事件。
-            await provider_service.resolve(
-                db, purpose="chat", override_pk=session.model_pk or ""
-            )
+            await provider_service.resolve(db, purpose="chat", override_pk=session.model_pk or "")
 
             if run_registry.active_run_of(session_id) is not None:
                 raise ConflictError(
@@ -282,9 +282,7 @@ class ChatService:
             # 报错放在发消息前（这里能变成 400），不放流里 —— 流里只能走 error
             # 事件，且响应头已发出，报错会变成"连接中断"。
             if checked and await _try_resolve_vision(db) is None:
-                chat_model = await provider_service.resolve(
-                    db, purpose="chat", override_pk=session.model_pk or ""
-                )
+                chat_model = await provider_service.resolve(db, purpose="chat", override_pk=session.model_pk or "")
                 if not chat_model.supports_vision:
                     raise BadRequestError(
                         "当前对话模型不支持图片，且未配置视觉模型",
@@ -327,21 +325,10 @@ class ChatService:
         """
         校验图片并返回可用的那些。
 
-        ## 为什么没开视觉模式时直接丢弃而不报错
-
-        用户可能在关掉开关后才发出已经贴好的图。报错会让他丢掉整条消息
-        （文字也发不出去），而丢弃图片只损失图片 —— 文字仍然送达。
-
-        日志里记下丢了几张，排查"我的图怎么没了"时能查到。
+        发图即自动识别，不再有"视觉模式开关"这一层 ——
+        用户把图贴进来就是意图，这里只做格式/大小/张数校验。
         """
         if not images:
-            return []
-        if not session.vision_mode:
-            log.info(
-                "images_dropped_vision_off",
-                session_id=session.id,
-                count=len(images),
-            )
             return []
 
         from app.modules.endpoint import vision
@@ -454,9 +441,7 @@ class ChatService:
         try:
             while True:
                 try:
-                    item = await asyncio.wait_for(
-                        bus.get(), timeout=settings.agent.heartbeat_interval
-                    )
+                    item = await asyncio.wait_for(bus.get(), timeout=settings.agent.heartbeat_interval)
                 except TimeoutError:
                     # 心跳。推理阶段可能 200s+ 不吐任何字节，没有心跳
                     # 会被代理/浏览器判为超时断开。
@@ -531,14 +516,10 @@ class ChatService:
                     try:
                         extra_params = parse_extra_llm_params(agent_def.extra_llm_params)
                     except ValueError as e:
-                        log.warning(
-                            "extra_llm_params_invalid", agent_id=agent_id, error=str(e)
-                        )
+                        log.warning("extra_llm_params_invalid", agent_id=agent_id, error=str(e))
 
         # 模型：智能体绑定 > 会话选择 > 默认
-        model = await provider_service.resolve(
-            db, purpose="chat", override_pk=agent_model or model_pk
-        )
+        model = await provider_service.resolve(db, purpose="chat", override_pk=agent_model or model_pk)
         registry = self._base_registry.forked()
 
         # 按智能体权限过滤工具
@@ -562,9 +543,7 @@ class ChatService:
                 from app.modules.session import repo as session_repo
 
                 # 获取最后一条用户消息作为查询
-                recent_messages = await session_repo.load_messages(
-                    db, session_id, agent_name=None, limit=10
-                )
+                recent_messages = await session_repo.load_messages(db, session_id, agent_name=None, limit=10)
                 user_query = ""
                 for msg in reversed(recent_messages):
                     if msg.role == "user":
@@ -575,6 +554,7 @@ class ChatService:
                     # 获取嵌入模型
                     try:
                         from app.modules.llm import get_embedding_model
+
                         embed_model = await get_embedding_model(db)
                     except Exception:
                         embed_model = None
@@ -616,9 +596,7 @@ class ChatService:
             )
         )
 
-        with record_span(
-            "agent", "main", session_id=session_id, agent_name="main", run_id=run_id
-        ):
+        with record_span("agent", "main", session_id=session_id, agent_name="main", run_id=run_id):
             await emit(Ev.AGENT_START, agent_name="main", task=None)
 
             loop = AgentLoop(
@@ -642,7 +620,7 @@ class ChatService:
             # 否则用 chat 模型直接多模态（supports_vision 已在 prepare 检查过）。
             #
             # 必须在 load_context 之后做 —— row_to_msg 故意不还原 images
-            #（避免历史里的图每轮重发），所以刚落库的那条读回来也是没图的。
+            # （避免历史里的图每轮重发），所以刚落库的那条读回来也是没图的。
             # 这里补上，让它只在这一轮生效。
             if images:
                 vision_model = await _try_resolve_vision(db)
@@ -651,9 +629,7 @@ class ChatService:
                     # chat 模型看不到原图，只看到这段文字（省 token 且不依赖 chat 的多模态）。
                     from app.modules.endpoint import vision as vision_mod
 
-                    description = await vision_mod.describe_images(
-                        get_llm(), vision_model, images
-                    )
+                    description = await vision_mod.describe_images(get_llm(), vision_model, images)
                     if description:
                         for m in reversed(loop.messages):
                             if m.role == "user":
@@ -742,9 +718,7 @@ class ChatService:
         if title_empty and result.final_text:
             await self._generate_title(db, session_id)
 
-    async def _expand_refs(
-        self, loop: AgentLoop, refs: list[dict[str, Any]] | None, workspace_path: str
-    ) -> None:
+    async def _expand_refs(self, loop: AgentLoop, refs: list[dict[str, Any]] | None, workspace_path: str) -> None:
         """
         展开本轮引用，附加到最后一条 user 消息。
 
@@ -816,9 +790,7 @@ class ChatService:
             skills=res.skills,
         )
 
-    async def _generate_title(
-        self, db: AsyncSession, session_id: str, *, fallback_text: str = ""
-    ) -> None:
+    async def _generate_title(self, db: AsyncSession, session_id: str, *, fallback_text: str = "") -> None:
         """
         首轮后生成标题。
 
@@ -834,16 +806,12 @@ class ChatService:
         try:
             model = await provider_service.resolve(db, purpose="title")
             rows = await repo.load_messages(db, session_id)
-            convo = "\n".join(
-                f"{r.role}: {r.content[:500]}" for r in rows if r.role in ("user", "assistant")
-            )[:4000]
+            convo = "\n".join(f"{r.role}: {r.content[:500]}" for r in rows if r.role in ("user", "assistant"))[:4000]
             template = prompts.load_builtin("title")
             text = prompts.render(template, conversation=convo)
 
             chunks: list[str] = []
-            async for c in get_llm().stream_chat(
-                model, [{"role": "user", "content": text}]
-            ):
+            async for c in get_llm().stream_chat(model, [{"role": "user", "content": text}]):
                 if c.kind == "content":
                     chunks.append(c.text)
 
@@ -866,9 +834,7 @@ class ChatService:
 
         await self._fallback_title(db, session_id, fallback_text)
 
-    async def _fallback_title(
-        self, db: AsyncSession, session_id: str, text: str
-    ) -> None:
+    async def _fallback_title(self, db: AsyncSession, session_id: str, text: str) -> None:
         """
         用模型回复的开头当标题。
 

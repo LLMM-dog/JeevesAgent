@@ -138,9 +138,9 @@ class TestRedaction:
 
     def test_whitelist_has_no_secret_fields(self) -> None:
         for k in ATTR_WHITELIST:
-            assert not any(
-                bad in k.lower() for bad in ("key", "secret", "password", "token")
-            ), f"白名单里有可疑字段：{k}"
+            assert not any(bad in k.lower() for bad in ("key", "secret", "password", "token")), (
+                f"白名单里有可疑字段：{k}"
+            )
 
 
 class TestPreview:
@@ -207,12 +207,15 @@ class TestCost:
         返回 0 是无奈之选，但单价必须一起存进 span —— 报表能靠
         price 字段是否为 NULL 区分"零成本"和"没配价"。
         """
-        assert compute_cost(
-            input_tokens=1000,
-            output_tokens=1000,
-            price_in_per_1m=None,
-            price_out_per_1m=None,
-        ) == 0.0
+        assert (
+            compute_cost(
+                input_tokens=1000,
+                output_tokens=1000,
+                price_in_per_1m=None,
+                price_out_per_1m=None,
+            )
+            == 0.0
+        )
 
     def test_partial_price(self) -> None:
         c = compute_cost(
@@ -224,9 +227,7 @@ class TestCost:
         assert c == pytest.approx(1.0)
 
     def test_zero_tokens(self) -> None:
-        assert compute_cost(
-            input_tokens=0, output_tokens=0, price_in_per_1m=1.0, price_out_per_1m=1.0
-        ) == 0.0
+        assert compute_cost(input_tokens=0, output_tokens=0, price_in_per_1m=1.0, price_out_per_1m=1.0) == 0.0
 
 
 class _FakeSession:
@@ -436,9 +437,7 @@ class TestSpanTreeAndCleanup:
         tool_node = next(c for c in roots[0].children if c.span.id == "tool1")
         assert [c.span.id for c in tool_node.children] == ["sub1"]
 
-    async def test_orphan_span_attached_to_root_not_dropped(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_orphan_span_attached_to_root_not_dropped(self, db: Any, trace_session: str) -> None:
         """
         父 span 不在本 run 里时挂到根上，不丢掉。
 
@@ -453,9 +452,7 @@ class TestSpanTreeAndCleanup:
         assert len(roots) == 1
         assert roots[0].span.id == "orphan"
 
-    async def test_tree_to_dict_exposes_truncation(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_tree_to_dict_exposes_truncation(self, db: Any, trace_session: str) -> None:
         """
         截断事实要出现在 API 响应里 —— 否则前端无法提示"内容不全"。
         """
@@ -481,9 +478,7 @@ class TestSpanTreeAndCleanup:
         assert d[0]["output_truncated"] is True
         assert d[0]["output_bytes"] == 99999
 
-    async def test_has_price_distinguishes_zero_from_unpriced(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_has_price_distinguishes_zero_from_unpriced(self, db: Any, trace_session: str) -> None:
         """
         has_price 让前端能区分"零成本"和"没配价"。
 
@@ -550,9 +545,7 @@ class TestSpanTreeAndCleanup:
         assert "record_span(" in src, "agent span 没落库，会产生孤儿 span"
         assert "new_span(" not in src, "又用回 new_span 了，它不写表"
 
-    async def test_cleanup_removes_old_only(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_cleanup_removes_old_only(self, db: Any, trace_session: str) -> None:
         """
         TTL 清理。常见实现没做 —— 落库了就必须管清理，
         否则这张表会无声长到几百 MB（span 增速是消息表的 5~10 倍）。
@@ -565,12 +558,8 @@ class TestSpanTreeAndCleanup:
         old = now - 30 * 86_400_000
         await self._add_span(db, "old_span", session_id=trace_session, created=old)
         await self._add_span(db, "new_span", session_id=trace_session, created=now)
-        db.add(
-            Run(id="old_run", session_id=trace_session, started_at=old, created_at=old, updated_at=old)
-        )
-        db.add(
-            Run(id="new_run", session_id=trace_session, started_at=now, created_at=now, updated_at=now)
-        )
+        db.add(Run(id="old_run", session_id=trace_session, started_at=old, created_at=old, updated_at=old))
+        db.add(Run(id="new_run", session_id=trace_session, started_at=now, created_at=now, updated_at=now))
         await db.commit()
 
         res = await service.cleanup(db, retain_days=14)
@@ -580,9 +569,7 @@ class TestSpanTreeAndCleanup:
         remaining = await service.get_span_tree(db, "r1")
         assert [n.span.id for n in remaining] == ["new_span"]
 
-    async def test_stats(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_stats(self, db: Any, trace_session: str) -> None:
         from app.modules.trace import service
         from app.modules.trace.models import Run
 
@@ -606,15 +593,11 @@ class TestSpanTreeAndCleanup:
 class TestRunRollup:
     async def test_run_record_shape(self, trace_session: str) -> None:
         """run 记录带 parent_run_id，用于成本上卷。"""
-        r = RunRecord(
-            id="r1", session_id=trace_session, started_at=1, parent_run_id="r0", total_tokens=100
-        )
+        r = RunRecord(id="r1", session_id=trace_session, started_at=1, parent_run_id="r0", total_tokens=100)
         assert r.parent_run_id == "r0"
         assert r.total_tokens == 100
 
-    async def test_span_totals_include_subagent(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_span_totals_include_subagent(self, db: Any, trace_session: str) -> None:
         """
         从 span 汇总时必须包含子代理的量，并按智能体拆开。
 
@@ -655,9 +638,44 @@ class TestRunRollup:
         assert by["researcher"]["total_tokens"] == 1500
         assert by["main"]["llm_calls"] == 2
 
-    async def test_child_tokens_rollup_to_parent(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_span_totals_for_runs_matches_single(self, db: Any, trace_session: str) -> None:
+        """
+        列表用的多 run 聚合，必须和单 run 的 span_token_totals 对齐。
+
+        列表行和点开详情显示的是同一个数字 —— 一个执行两处两个 token
+        数的 bug 就是两者口径不一致造成的。
+        """
+        from app.modules.trace import service
+        from app.modules.trace.models import Span
+
+        def sp(sid: str, run_id: str, agent: str, tok: int, kind: str = "llm") -> Span:
+            return Span(
+                id=sid,
+                run_id=run_id,
+                session_id=trace_session,
+                kind=kind,
+                name="m",
+                agent_name=agent,
+                started_at=1,
+                total_tokens=tok,
+            )
+
+        db.add(sp("r1_main", "r1", "", 3000))
+        db.add(sp("r1_sub", "r1", "researcher", 1500))
+        # agent 类 span 上挂的 token 不能重复计
+        db.add(sp("r1_agent", "r1", "researcher", 1500, kind="agent"))
+        db.add(sp("r2_main", "r2", "", 800))
+        await db.commit()
+
+        totals = await service.span_totals_for_runs(db, ["r1", "r2", "missing"])
+        assert totals["r1"] == 4500
+        assert totals["r2"] == 800
+        assert "missing" not in totals
+
+        single = await service.span_token_totals(db, "r1")
+        assert totals["r1"] == single["total_tokens"]
+
+    async def test_child_tokens_rollup_to_parent(self, db: Any, trace_session: str) -> None:
         """
         子 run 的 token 上卷到父 run。
 
@@ -681,9 +699,7 @@ class TestRunRollup:
         w = TraceWriter(lambda: _Ctx(db))  # type: ignore[arg-type]
 
         # 父 run 先落库
-        await w._write(
-            RunRecord(id="parent", session_id=trace_session, started_at=1, total_tokens=100, cost_usd=0.001)
-        )
+        await w._write(RunRecord(id="parent", session_id=trace_session, started_at=1, total_tokens=100, cost_usd=0.001))
         # 两个子 run 结束
         await w._write(
             RunRecord(
@@ -710,18 +726,14 @@ class TestRunRollup:
 
         from sqlalchemy import select
 
-        parent = (
-            await db.execute(select(Run).where(Run.id == "parent"))
-        ).scalar_one()
+        parent = (await db.execute(select(Run).where(Run.id == "parent"))).scalar_one()
         # 自身 100 + 子 500 + 子 300
         assert parent.rollup_total_tokens == 900
         assert parent.rollup_cost_usd == pytest.approx(0.009)
         # 自身的 total 不被污染 —— 要能分开看"我自己花了多少"和"总共花了多少"
         assert parent.total_tokens == 100
 
-    async def test_rollup_skips_running_child(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_rollup_skips_running_child(self, db: Any, trace_session: str) -> None:
         """还在跑的子 run 不上卷，否则会重复计。"""
         from app.modules.trace.models import Run
         from app.modules.trace.writer import TraceWriter
@@ -752,9 +764,7 @@ class TestRunRollup:
         p = (await db.execute(select(Run).where(Run.id == "p"))).scalar_one()
         assert p.rollup_total_tokens == 0
 
-    async def test_rollup_missing_parent_is_safe(
-        self, db: Any, trace_session: str
-    ) -> None:
+    async def test_rollup_missing_parent_is_safe(self, db: Any, trace_session: str) -> None:
         """
         父 run 还没落库时（子先结束的竞态）丢掉这次上卷，不抛异常。
 
@@ -792,11 +802,7 @@ class TestRunRollup:
         from app.core.trace_context import SpanInfo
         from app.modules.trace.recorder import SpanSink
 
-        sink = SpanSink(
-            info=SpanInfo(
-                span_id="x", parent_span_id=None, depth=0, kind="llm", name="m"
-            )
-        )
+        sink = SpanSink(info=SpanInfo(span_id="x", parent_span_id=None, depth=0, kind="llm", name="m"))
         sink.set_usage(input_tokens=100, output_tokens=50, reasoning=30)
         # total 应该是 150，不是 180
         assert sink.usage["total_tokens"] == 150
@@ -808,11 +814,57 @@ class TestRunRollup:
         from app.core.trace_context import SpanInfo
         from app.modules.trace.recorder import SpanSink
 
-        sink = SpanSink(
-            info=SpanInfo(
-                span_id="x", parent_span_id=None, depth=0, kind="llm", name="m"
-            )
-        )
+        sink = SpanSink(info=SpanInfo(span_id="x", parent_span_id=None, depth=0, kind="llm", name="m"))
         sink.set_usage(input_tokens=100)
         assert sink.usage["cache_read_tokens"] is None
         assert sink.usage["output_tokens"] is None
+
+
+class TestSessionSummaries:
+    """
+    会话汇总层（执行记录的第一层）。
+
+    token 用 span 汇总（含子代理），时间第一次执行用 first_at、
+    排序用 last_at —— 两者不能混用，否则界面上那个时间就是
+    "最新一次执行"，用户会以为整个会话发生在那一刻。
+    """
+
+    async def test_span_tokens_and_first_at(self, db: Any, trace_session: str) -> None:
+        from app.modules.trace import service
+        from app.modules.trace.models import Run, Span
+
+        def run(rid: str, started: int, parent: str | None = None) -> Run:
+            return Run(
+                id=rid,
+                session_id=trace_session,
+                started_at=started,
+                parent_run_id=parent,
+            )
+
+        def span(sid: str, run_id: str, tok: int, kind: str = "llm") -> Span:
+            return Span(
+                id=sid,
+                run_id=run_id,
+                session_id=trace_session,
+                kind=kind,
+                name="m",
+                started_at=1,
+                total_tokens=tok,
+            )
+
+        db.add(run("r1", 1000))
+        db.add(run("r2", 3000))
+        # 子 run 不算一次独立执行（用户理解的执行 = 发一条消息）
+        db.add(run("child", 2000, parent="r1"))
+        db.add(span("s_main1", "r1", 4000))
+        db.add(span("s_sub", "r1", 1500))  # 子代理，与主代理共享 session
+        db.add(span("s_r2", "r2", 800))
+        db.add(span("s_agent", "r1", 1500, kind="agent"))  # 不计入 token
+        await db.commit()
+
+        rows = await service.list_session_summaries(db, limit=10)
+        ours = next(r for r in rows if r["session_id"] == trace_session)
+        assert ours["runs"] == 2
+        assert ours["total_tokens"] == 4000 + 1500 + 800
+        assert ours["first_at"] == 1000
+        assert ours["last_at"] == 3000

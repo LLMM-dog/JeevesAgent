@@ -108,7 +108,6 @@ class PatchSessionRequest(BaseModel):
     approval_mode: Literal["manual", "auto"] | None = None
     private_mode: bool | None = None
     amnesia_mode: bool | None = None
-    vision_mode: bool | None = None
     stream_enabled: bool | None = None
     agent_id: str | None = None
 
@@ -206,7 +205,7 @@ class CreateEndpointModel(BaseModel):
     context_window: int | None = None
     model_type: str = ""
     supports_vision: str = "unknown"  # "true" | "false" | "unknown"
-    supports_tools: str = "unknown"   # "true" | "false" | "unknown"
+    supports_tools: str = "unknown"  # "true" | "false" | "unknown"
 
 
 class CreateEndpointRequest(BaseModel):
@@ -276,7 +275,7 @@ class ModelPatch(BaseModel):
     price_in_per_1m: float | None = None
     price_out_per_1m: float | None = None
     supports_vision: str | None = None  # "true" | "false" | "unknown"
-    supports_tools: str | None = None   # "true" | "false" | "unknown"
+    supports_tools: str | None = None  # "true" | "false" | "unknown"
 
 
 class UpdateEndpointRequest(BaseModel):

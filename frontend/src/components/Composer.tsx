@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   BrainCircuit,
-  Eye,
   EyeOff,
   File,
   ImagePlus,
@@ -125,8 +124,6 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const send = useChatStore((s) => s.send);
-  const visionMode = useChatStore((s) => s.visionMode);
-  const setVisionMode = useChatStore((s) => s.setVisionMode);
   const streamEnabled = useChatStore((s) => s.streamEnabled);
   const setStreamEnabled = useChatStore((s) => s.setStreamEnabled);
   const privateMode = useChatStore((s) => s.privateMode);
@@ -146,14 +143,31 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
 
   const busy = pending || streaming !== null;
 
-  // 当前模型的视觉能力，用于发图时给"未知"轻量提示。
-  // 复用对话页切换菜单的同一份缓存（["models", "enabled"]）。
+  // 发图时实际负责识别的模型。
+  //
+  // 识别有两条路：配了视觉功能位 → 用视觉模型识别成文字；没配 →
+  // 当前对话模型直接多模态。所以"发图会不会失败"要看的是【实际识别
+  // 用的那个模型】，不能只看对话页选的模型 —— 配了视觉功能位时对话
+  // 模型支不支持视觉根本无关。
   const { data: modelList } = useQuery({
     queryKey: ["models", "enabled"],
     queryFn: () => api.models({ enabledOnly: true }),
   });
-  const currentModel = modelList?.items.find((m) => m.id === modelPk);
-  const visionUnknown = currentModel?.supports_vision === "unknown";
+  const { data: bindingData } = useQuery({
+    queryKey: ["bindings"],
+    queryFn: api.listBindings,
+  });
+  const bindings = bindingData?.items ?? [];
+  const visionBinding = bindings.find(
+    (b) => b.agent_name === "" && b.purpose === "vision",
+  );
+  // 没在会话里单点选模型时，实际用的是 chat 功能位绑定的那个。
+  const chatModelId =
+    modelPk || bindings.find((b) => b.agent_name === "" && b.purpose === "chat")?.model_pk || "";
+  const currentModel = modelList?.items.find((m) => m.id === chatModelId);
+  // 没配视觉功能位、且实际对话模型不是【确认支持视觉】时，发图才提示。
+  const visionRisky =
+    !visionBinding && currentModel != null && currentModel.supports_vision !== "true";
 
   // 语音输入。
   //
@@ -247,10 +261,6 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
    */
   const addFiles = async (files: File[]) => {
     setImgError(null);
-    if (!visionMode) {
-      setImgError("请先开启视觉模式，否则图片会被丢弃");
-      return;
-    }
     const pics = files.filter((f) => f.type.startsWith("image/"));
     if (pics.length === 0) return;
 
@@ -373,11 +383,13 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
           </div>
         )}
 
-        {/* 视觉能力未知的轻量提示：模型未核验，发图后果自负 */}
-        {visionMode && visionUnknown && (
+        {/* 没配视觉模型、且实际对话模型未确认支持视觉时提示 ——
+            配了视觉功能位则识别走视觉模型，不提示。 */}
+        {images.length > 0 && visionRisky && (
           <p className="mb-2 flex items-center gap-1.5 text-xs text-[var(--color-warn)]">
             <TriangleAlert size={12} className="shrink-0" />
-            当前模型视觉能力未核验，发图可能失败。可在「设置 → 模型」里核验。
+            未配置视觉模型，且当前对话模型视觉能力未核验，发图会失败。
+            可在「功能位绑定」配视觉模型，或核验当前模型。
           </p>
         )}
 
@@ -406,7 +418,6 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
 
         <div
           onDragOver={(e) => {
-            if (!visionMode) return;
             e.preventDefault();
             setDragging(true);
           }}
@@ -462,9 +473,8 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
             aria-label="消息输入框"
             className="max-h-[200px] min-h-[24px] flex-1 resize-none bg-transparent px-1.5 py-1 text-sm outline-none placeholder:text-[var(--color-muted)] disabled:cursor-not-allowed"
           />
-          {/* 选图按钮只在视觉模式下出现 ——
-              开关关着时给个能点但没用的按钮只会让人困惑 */}
-          {visionMode && !busy && (
+          {/* 选图按钮：随时可点，发图即自动识别 */}
+          {!busy && (
             <>
               <input
                 ref={fileRef}
@@ -572,28 +582,6 @@ export default function Composer({ disabled }: { disabled?: boolean }) {
               <ShieldCheck size={11} aria-hidden />
             )}
             {approvalMode === "auto" ? "自动执行" : "逐个确认"}
-          </button>
-
-          {/* 视觉模式开关。
-              未核验的模型点了会拿到 400 并附带"去设置页核验"的提示 ——
-              后端拦在那里，前端不重复判断（能力状态在设置页才拿得到）。 */}
-          <button
-            type="button"
-            onClick={() => void setVisionMode(!visionMode)}
-            aria-pressed={visionMode}
-            title={
-              visionMode
-                ? "视觉模式已开：可以粘贴或拖入图片"
-                : "开启视觉模式后可以发图片（需要模型支持）"
-            }
-            className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition ${
-              visionMode
-                ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
-                : "text-[var(--color-muted)] hover:bg-[var(--color-surface)]"
-            }`}
-          >
-            <Eye size={11} aria-hidden />
-            视觉
           </button>
 
           {/* 流式开关：控制 LLM 的 stream 参数。会话级，逐字输出 vs 一次性返回 */}

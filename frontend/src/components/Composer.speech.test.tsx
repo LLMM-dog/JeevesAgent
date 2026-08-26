@@ -21,8 +21,6 @@ vi.mock("@/store/chat", () => ({
   useChatStore: (sel: (s: Record<string, unknown>) => unknown) =>
     sel({
       send: vi.fn(),
-      visionMode: false,
-      setVisionMode: vi.fn(),
       stop: vi.fn(),
       approvalMode: "auto",
       setApprovalMode: vi.fn(),

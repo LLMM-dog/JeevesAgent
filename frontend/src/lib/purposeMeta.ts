@@ -88,12 +88,26 @@ export const PURPOSE_ORDER: Purpose[] = [
  * 能用的模型：
  * - 类型没探测到（unknown）的模型总是出现，让用户自己判断；
  * - 推理（reasoning）就是对话，所以对话类功能位同时接受 chat 和 reasoning；
- * - 视觉位只看 supports_vision，未核验（unknown）的也放进来 —— 绑定时会提示核验。
+ * - 视觉位只看 supports_vision：验证通过(true)排前面，未验证(unknown)排后面，
+ *   验证不通过(false)不显示 —— 绑定时会提示核验。
  */
 export function filterModelsForPurpose(
   models: ModelItem[],
   purpose: Purpose,
 ): ModelItem[] {
+  // 看图位单独处理：只认 supports_vision 三态 ——
+  // 验证通过(true)优先、未验证(unknown)其次、验证不通过(false)不显示。
+  // 不受下面"类型 unknown 总是出现"的宽松规则影响，因为视觉位要的是
+  // "能不能看图"，不是"模型类型是否已知"。
+  if (purpose === "vision") {
+    const rank = (v: ModelItem["supports_vision"]) => (v === "true" ? 0 : 1);
+    return models
+      .filter(
+        (m) => m.supports_vision === "true" || m.supports_vision === "unknown",
+      )
+      .sort((a, b) => rank(a.supports_vision) - rank(b.supports_vision));
+  }
+
   return models.filter((m) => {
     if ((m.model_type as string) === "unknown") return true;
 
@@ -103,8 +117,6 @@ export function filterModelsForPurpose(
       case "compact":
       case "memory":
         return m.model_type === "chat" || m.model_type === "reasoning";
-      case "vision":
-        return m.supports_vision === "true" || m.supports_vision === "unknown";
       case "embedding":
         return m.model_type === "embedding";
       case "memory_rerank":

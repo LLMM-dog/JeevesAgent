@@ -117,8 +117,6 @@ interface ChatState {
    */
   contextWindow: number;
   approvalMode: "manual" | "auto";
-  /** 视觉模式。开启后可发图片，但模型必须先通过核验 */
-  visionMode: boolean;
   /** 会话级流式开关：控制 LLM 调用的 stream 参数 */
   streamEnabled: boolean;
   /**
@@ -156,7 +154,6 @@ interface ChatState {
   setWorkModel: (pk: string) => Promise<void>;
   /** 设置这次对话用哪个智能体。传空串清除选择 */
   setAgentId: (id: string) => Promise<void>;
-  setVisionMode: (on: boolean) => Promise<void>;
   setStreamEnabled: (on: boolean) => Promise<void>;
   /** 轮询后台正在跑的 run，直到它结束 */
   watchBackgroundRun: (sessionId: string) => Promise<void>;
@@ -274,7 +271,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentId: "",
   contextWindow: 0,
   approvalMode: "manual",
-  visionMode: false,
   streamEnabled: true,
   privateMode: false,
   amnesiaMode: false,
@@ -341,7 +337,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         modelPk: session.model_pk ?? "",
         agentId: session.agent_id ?? "",
         contextWindow: session.context_window ?? 0,
-        visionMode: session.vision_mode ?? false,
         streamEnabled: session.stream_enabled ?? true,
         // 【必须读回来】。不读的话切会话后开关显示的是上一个会话的状态 ——
         // 用户以为自己开着私密模式，而实际这个会话是关的。
@@ -636,23 +631,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await api.patchSession(sessionId, { amnesia_mode: on });
     } catch (err) {
       set({ amnesiaMode: previous, banner: toBanner(err) });
-    }
-  },
-
-  async setVisionMode(on) {
-    const { sessionId } = get();
-    if (!sessionId) return;
-    const previous = get().visionMode;
-    set({ visionMode: on });
-    try {
-      await api.patchSession(sessionId, { vision_mode: on });
-    } catch (err) {
-      // 回滚并把后端的提示显示出来。
-      //
-      // 这条路径很重要：未核验的模型开视觉会返回 400，附带
-      // "去设置页核验"的 hint。不显示的话开关会静默弹回去，
-      // 用户完全不知道为什么。
-      set({ visionMode: previous, banner: toBanner(err) });
     }
   },
 
