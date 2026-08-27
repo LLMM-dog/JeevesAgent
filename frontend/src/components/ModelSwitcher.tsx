@@ -4,6 +4,7 @@ import { Check, ChevronUp, Cpu } from "lucide-react";
 import clsx from "clsx";
 
 import { api } from "../lib/api";
+import { filterModelsForPurpose } from "../lib/purposeMeta";
 import { useChatStore } from "../store/chat";
 import type { ModelItem } from "../lib/types";
 
@@ -66,6 +67,9 @@ export function ModelSwitcher({
   });
 
   const items = data?.items ?? [];
+  // 对话页的模型切换只列对话/推理模型。嵌入、重排、TTS 等模型不是
+  // chat 协议，选了也会在下一轮报错。
+  const chatModels = filterModelsForPurpose(items, "chat");
   const current = items.find((m) => m.id === modelPk);
   const chatBinding = bindings?.items.find((b) => b.purpose === "chat");
 
@@ -139,12 +143,12 @@ export function ModelSwitcher({
             </p>
           )}
 
-          {items.length === 0 ? (
+          {chatModels.length === 0 ? (
             <p className="px-3 py-3 text-xs" style={{ color: "var(--color-muted)" }}>
-              没有已启用的模型。去设置页添加，或把禁用的启用。
+              没有已启用的对话模型。去设置页添加，或把禁用的启用。
             </p>
           ) : (
-            items.map((m: ModelItem) => (
+            chatModels.map((m: ModelItem) => (
               <button
                 key={m.id}
                 onClick={() => pick.mutate(m.id)}

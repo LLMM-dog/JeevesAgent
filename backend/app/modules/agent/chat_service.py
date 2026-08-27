@@ -633,7 +633,9 @@ class ChatService:
                     if description:
                         for m in reversed(loop.messages):
                             if m.role == "user":
-                                suffix = f"\n\n[附图的视觉识别结果]\n{description}"
+                                # 用标签包裹识别结果，chat 模型能明确区分
+                                # "用户说的话"和"系统注入的图片描述"。
+                                suffix = f"\n\n<image_description>\n{description}\n</image_description>"
                                 m.content = (m.content or "") + suffix
                                 break
                 else:
@@ -716,7 +718,7 @@ class ChatService:
             return
 
         if title_empty and result.final_text:
-            await self._generate_title(db, session_id)
+            await self._generate_title(db, session_id, chat_model=model)
 
     async def _expand_refs(self, loop: AgentLoop, refs: list[dict[str, Any]] | None, workspace_path: str) -> None:
         """
@@ -790,7 +792,14 @@ class ChatService:
             skills=res.skills,
         )
 
-    async def _generate_title(self, db: AsyncSession, session_id: str, *, fallback_text: str = "") -> None:
+    async def _generate_title(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        *,
+        fallback_text: str = "",
+        chat_model: Any = None,
+    ) -> None:
         """
         首轮后生成标题。
 
@@ -804,7 +813,25 @@ class ChatService:
         但"修好 calc.py 的第 5 行"永远比"未命名会话"有用。
         """
         try:
-            model = await provider_service.resolve(db, purpose="title")
+            from sqlalchemy import select
+
+            from app.modules.endpoint.models import ModelBinding
+
+            # 标题位没绑定时，直接用【当前对话模型】生成标题。
+            # 走 provider_service.resolve 会回落到全局 chat 绑定，但用户在
+            # 这个会话里可能临时选了另一个模型 —— 那才是他看到的“当前对话模型”。
+            title_binding = (
+                await db.execute(
+                    select(ModelBinding).where(
+                        ModelBinding.agent_name == "", ModelBinding.purpose == "title"
+                    )
+                )
+            ).scalar_one_or_none()
+            if title_binding is None and chat_model is not None:
+                model = chat_model
+            else:
+                model = await provider_service.resolve(db, purpose="title")
+
             rows = await repo.load_messages(db, session_id)
             convo = "\n".join(f"{r.role}: {r.content[:500]}" for r in rows if r.role in ("user", "assistant"))[:4000]
             template = prompts.load_builtin("title")

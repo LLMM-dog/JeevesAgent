@@ -8,11 +8,12 @@
  * 智能体移除（不是真删除，真删除在技能/MCP 各自设置页）。
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Plus, X } from "lucide-react";
 
 import { api } from "@/lib/api";
+import { filterModelsForPurpose } from "@/lib/purposeMeta";
 import type { AgentItem, ModelItem } from "@/lib/types";
 import { TogglePickerDialog } from "./TogglePickerDialog";
 
@@ -108,6 +109,13 @@ export function AgentEditorDialog({
   const [picker, setPicker] = useState<null | "skill" | "mcp" | "llm">(null);
   const [err, setErr] = useState("");
 
+  // 智能体只能用对话/推理模型。嵌入、重排、TTS 等模型出现在这里只会
+  // 让用户误选，发消息时再报协议错误。
+  const chatModels = useMemo(() => filterModelsForPurpose(models, "chat"), [models]);
+  const selectedModel = models.find((m) => m.id === modelId);
+  const selectedHidden =
+    modelId !== "" && selectedModel != null && !chatModels.some((m) => m.id === modelId);
+
   const save = useMutation({
     mutationFn: () => {
       const data = {
@@ -194,7 +202,12 @@ export function AgentEditorDialog({
             <span className="mb-1 block text-xs" style={{ color: "var(--color-muted)" }}>使用模型</span>
             <select value={modelId} onChange={(e) => setModelId(e.target.value)} className={inputCls} style={inputStyle}>
               <option value="">（不指定，跟随全局绑定）</option>
-              {models.map((m) => (
+              {selectedHidden && selectedModel && (
+                <option value={modelId}>
+                  {selectedModel.display_name || selectedModel.model_id}（类型不匹配）
+                </option>
+              )}
+              {chatModels.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.display_name || m.model_id} · {(m.context_window / 1000).toFixed(0)}K
                 </option>

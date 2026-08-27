@@ -66,7 +66,11 @@ async def emit_updated(db: Any, session_id: str) -> None:
 
 class TodoWriteTool:
     name = "todo_write"
-    description = "写入任务清单（全量替换）。3 步以上任务先列计划，每完成一步立即更新。同一时刻只能一个 in_progress。"
+    description = (
+        "写入任务清单（全量替换）。3 步以上任务先列计划，每完成一步立即更新。\n"
+        "必须传入完整列表；已有任务可带 id 精确定位（只传 id+status 时会回填原内容）。\n"
+        "同一时刻只能一个 in_progress。"
+    )
     requires_approval = False
 
     def parameters(self) -> dict[str, Any]:
@@ -79,7 +83,8 @@ class TodoWriteTool:
                     "items": {
                         "type": "object",
                         "properties": {
-                            "content": {"type": "string", "description": "任务描述，20 字内"},
+                            "id": {"type": "string", "description": "已有任务的 id；更新时可选，首次创建省略"},
+                            "content": {"type": "string", "description": "任务描述，20 字内；带 id 更新时可省略"},
                             "status": {
                                 "type": "string",
                                 "enum": list(_STATUSES),
@@ -91,7 +96,10 @@ class TodoWriteTool:
                                 "description": "默认 medium",
                             },
                         },
-                        "required": ["content"],
+                        # content 和 id 都不强制 —— 模型常见的“标记完成”调用是
+                        # {"id": "todo_xxx", "status": "completed"}，没有 content。
+                        # 强制 content 会让这种调用被判为“没有有效的任务项”。
+                        "required": [],
                     },
                 }
             },
@@ -107,10 +115,26 @@ class TodoWriteTool:
         notes: list[str] = []
         seen_in_progress = False
 
+        # 提前载入现有清单，供 id 回填和 created_at 保留使用。
+        existing = await load_active(ctx.db, ctx.session_id)
+        by_id = {r.id: r for r in existing}
+
         for i, it in enumerate(raw):
             if not isinstance(it, dict):
                 continue
             content = str(it.get("content", "")).strip()
+            todo_pk = str(it.get("id", "")).strip()
+
+            # 模型最常见的“标记完成”调用只给 id+status，不带 content。
+            # 这里用 id 回填原内容，让这类调用也能成功，而不是返回
+            # “没有有效的任务项”让模型卡住。
+            if not content and todo_pk:
+                old = by_id.get(todo_pk)
+                if old is None:
+                    notes.append(f"id 为 {todo_pk} 的任务不存在，已忽略")
+                    continue
+                content = old.content
+
             if not content:
                 continue
             status = str(it.get("status", "pending"))
@@ -130,15 +154,20 @@ class TodoWriteTool:
                     seen_in_progress = True
 
             items.append(
-                {"content": content, "status": status, "priority": priority, "order_index": i}
+                {
+                    "content": content,
+                    "status": status,
+                    "priority": priority,
+                    "order_index": i,
+                    "id": todo_pk,
+                }
             )
 
         if not items:
             return ToolResult(content="没有有效的任务项", is_error=True)
 
-        # 按 content 匹配已有记录来保留 id 和 created_at ——
+        # 按 id（优先）或 content 匹配已有记录来保留 id 和 created_at ——
         # 这样前端不会看到条目闪烁重建
-        existing = await load_active(ctx.db, ctx.session_id)
         by_content = {r.content: r for r in existing}
 
         await ctx.db.execute(
@@ -146,7 +175,9 @@ class TodoWriteTool:
         )
 
         for item in items:
-            old = by_content.get(item["content"])
+            old = by_id.get(item["id"]) if item.get("id") else None
+            if old is None:
+                old = by_content.get(item["content"])
             ctx.db.add(
                 Todo(
                     id=old.id if old else new_todo_id(),

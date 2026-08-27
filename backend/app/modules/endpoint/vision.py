@@ -55,6 +55,7 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # 这是视觉功能最容易炸上下文的地方。
 MAX_IMAGES_PER_TURN = 5
 
+
 def _make_probe_png() -> str:
     """
     生成核验用的图：16x16 纯红方块，RGB 真彩色，无 alpha。
@@ -87,24 +88,14 @@ def _make_probe_png() -> str:
     import zlib
 
     def chunk(tag: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data))
-            + tag
-            + data
-            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-        )
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
     w = h = 16
     # colortype=2 是 RGB 真彩色，没有 alpha 通道 ——
     # 不透明是这张图的关键属性
     ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
     rows = b"".join(b"\x00" + bytes((220, 30, 30)) * w for _ in range(h))
-    png = (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", ihdr)
-        + chunk(b"IDAT", zlib.compress(rows))
-        + chunk(b"IEND", b"")
-    )
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
     return base64.b64encode(png).decode()
 
 
@@ -142,10 +133,7 @@ def validate_image(raw: bytes, mime: str) -> tuple[bool, str]:
     但我们不该把用户的任意文件内容外发。
     """
     if mime not in ALLOWED_MIME:
-        return False, (
-            f"不支持的图片类型 {mime}。"
-            f"可用：{', '.join(sorted(ALLOWED_MIME))}"
-        )
+        return False, (f"不支持的图片类型 {mime}。可用：{', '.join(sorted(ALLOWED_MIME))}")
     if len(raw) > MAX_IMAGE_BYTES:
         mb = len(raw) / 1024 / 1024
         return False, (
@@ -165,10 +153,7 @@ def validate_image(raw: bytes, mime: str) -> tuple[bool, str]:
     }
     expected = sigs.get(mime, ())
     if expected and not any(raw.startswith(s) for s in expected):
-        return False, (
-            f"文件内容不是 {mime} —— 声明的类型与实际内容不符。"
-            "改扩展名不会改变文件格式"
-        )
+        return False, (f"文件内容不是 {mime} —— 声明的类型与实际内容不符。改扩展名不会改变文件格式")
     if mime == "image/webp" and len(raw) >= 12 and raw[8:12] != b"WEBP":
         return False, "文件内容不是有效的 WebP"
     return True, ""
@@ -210,9 +195,7 @@ def build_user_content(text: str, images: list[ImagePart]) -> str | list[dict[st
     return parts
 
 
-async def probe_vision(
-    llm: Any, base_url: str, api_key: str, model_id: str
-) -> tuple[bool, str]:
+async def probe_vision(llm: Any, base_url: str, api_key: str, model_id: str) -> tuple[bool, str]:
     """
     核验模型是否支持图片输入。返回 (支持, 说明)。
 
@@ -298,8 +281,8 @@ async def describe_images(llm: Any, model: Any, images: list[str]) -> str:
         {
             "type": "text",
             "text": (
-                "请详细描述这张图片的内容，包括其中的文字、界面元素、代码、"
-                "错误信息等所有可见细节。只描述你实际看到的，不要臆测。"
+                "请简洁地描述这张图片的关键内容（可见文字、界面元素、代码、"
+                "图表、错误信息等）。只描述实际看到的，不要臆测或补充图片之外的信息。"
             ),
         }
     ]
@@ -308,9 +291,7 @@ async def describe_images(llm: Any, model: Any, images: list[str]) -> str:
         if decoded is None:
             continue
         mime, raw = decoded
-        parts.append(
-            ImagePart(mime=mime, data_b64=_b64.b64encode(raw).decode()).to_api()
-        )
+        parts.append(ImagePart(mime=mime, data_b64=_b64.b64encode(raw).decode()).to_api())
 
     if len(parts) == 1:
         # 没有一张图解码成功

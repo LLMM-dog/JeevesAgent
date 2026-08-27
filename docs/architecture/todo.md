@@ -62,7 +62,9 @@ todo
 
 代价是每次写入的 payload 稍大。相比正确性可忽略。
 
-实现上：按 `content` 匹配已有记录来保留 `id` 和 `created_at`（这样前端不会看到条目闪烁重建），匹配不到的视为新建。
+实现上：优先按 `id`、其次按 `content` 匹配已有记录来保留 `id` 和 `created_at`（这样前端不会看到条目闪烁重建），匹配不到的视为新建。
+
+模型最常用的“标记完成”调用是 `{"id": "todo_xxx", "status": "completed"}` —— 只有 `id` 没有 `content`。工具会把这种情况回填为原 `content` 再更新，而不是报“没有有效的任务项”。
 
 ### todo_read
 
