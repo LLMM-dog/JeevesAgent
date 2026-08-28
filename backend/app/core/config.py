@@ -514,15 +514,16 @@ class MemoryConfig(BaseModel):
     # 自动触发记忆提取的条件。满足任一条件即触发。
     # 参考 OpenViking 的 auto_commit_policy.py。
 
-    # 待处理 token 数阈值。默认 10,000 (OpenViking 的 DEFAULT_PENDING_TOKEN_THRESHOLD)。
-    auto_commit_pending_token_threshold: int = 10_000
+    # 待处理 token 数阈值。仅在关闭“按窗口比例记忆”时启用。
+    # 默认 500,000（0.5M），避免小会话被过早归档。
+    auto_commit_pending_token_threshold: int = 500_000
 
     # 是否启用上下文窗口百分比策略。
     auto_commit_use_context_percentage: bool = True
 
-    # 上下文窗口使用率阈值（0.0 - 1.0）。默认 0.80 (80%)。
+    # 上下文窗口使用率阈值（0.0 - 1.0）。默认 0.70 (70%)。
     # 多智能体时取最小窗口。
-    auto_commit_context_usage_percentage: float = 0.80
+    auto_commit_context_usage_percentage: float = 0.70
 
     # 待处理消息数量阈值。默认 50 (OpenViking 的 DEFAULT_MESSAGE_COUNT_THRESHOLD)。
     auto_commit_message_count_threshold: int = 50

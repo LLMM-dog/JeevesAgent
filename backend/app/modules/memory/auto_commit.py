@@ -64,18 +64,7 @@ async def check_and_trigger(db: AsyncSession, session_id: str) -> bool:
     # ── 判断是否触发 ──
     cfg = settings.memory
 
-    # 条件1：固定 token 阈值
-    if pending_tokens >= cfg.auto_commit_pending_token_threshold:
-        log.info(
-            "auto_commit_trigger_token_threshold",
-            session_id=session_id,
-            pending_tokens=pending_tokens,
-            threshold=cfg.auto_commit_pending_token_threshold,
-        )
-        await _do_commit(db, session_id)
-        return True
-
-    # 条件2：上下文窗口百分比（可选）
+    # 条件1：优先按窗口比例记忆。
     if cfg.auto_commit_use_context_percentage:
         # 获取所有智能体的最小窗口
         min_context_limit = await _get_min_context_limit(session)
@@ -91,8 +80,19 @@ async def check_and_trigger(db: AsyncSession, session_id: str) -> bool:
             )
             await _do_commit(db, session_id)
             return True
+    else:
+        # 用户关闭“按窗口比例记忆”时，才启用固定 token 阈值。
+        if pending_tokens >= cfg.auto_commit_pending_token_threshold:
+            log.info(
+                "auto_commit_trigger_token_threshold",
+                session_id=session_id,
+                pending_tokens=pending_tokens,
+                threshold=cfg.auto_commit_pending_token_threshold,
+            )
+            await _do_commit(db, session_id)
+            return True
 
-    # 条件3：消息数量阈值
+    # 条件2：消息数量阈值
     if pending_messages >= cfg.auto_commit_message_count_threshold:
         log.info(
             "auto_commit_trigger_message_count",
