@@ -24,6 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/workspaces", tags=["工作区"])
 
+
+def _clean_root(raw: str) -> str:
+    """去掉用户复制路径时可能带上的首尾引号。"""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        raw = raw[1:-1].strip()
+    return raw
+
+
 # Docker 容器名规则：字母数字开头，后续可含 . _ -，最长 64。
 CONTAINER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
 
@@ -97,8 +106,8 @@ async def create_workspace(
     container = body.docker_container.strip() if backend == "docker" else ""
     await _validate_container(db, container)
 
-    # root_path 唯一
-    root = body.root_path.strip()
+    # root_path 唯一；去掉复制路径时可能带入的首尾引号
+    root = _clean_root(body.root_path)
     dup = (await db.execute(select(Workspace).where(Workspace.root_path == root))).scalar_one_or_none()
     if dup is not None:
         raise ConflictError(f"目录 {root} 已被工作区「{dup.name}」使用", code="workspace_path_taken")
