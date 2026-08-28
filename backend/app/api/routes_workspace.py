@@ -16,7 +16,7 @@ from app.core.exceptions import BadRequestError, ConflictError
 from app.core.ids import workspace_id
 from app.infra.db.session import get_db
 from app.modules.session import repo
-from app.modules.session.models import Workspace
+from app.modules.session.models import Session, Workspace
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,6 +153,26 @@ async def delete_workspace(
     ws = await repo.get_workspace(db, workspace_id)
     if ws.is_default:
         raise BadRequestError("默认工作区不能删除")
+
+    # 有会话还引用这个工作区时，先把它们迁到默认工作区。
+    # 否则 SQLite 外键约束会直接报 IntegrityError，用户只看到一堆堆栈。
+    sessions = list(
+        (
+            await db.execute(
+                select(Session).where(Session.workspace_id == ws.id)
+            )
+        ).scalars()
+    )
+    if sessions:
+        default_ws = (
+            await db.execute(select(Workspace).where(Workspace.is_default == 1))
+        ).scalar_one_or_none()
+        if default_ws is None:
+            raise BadRequestError("没有默认工作区，无法迁移引用该工作区的会话")
+        for s in sessions:
+            s.workspace_id = default_ws.id
+        await db.flush()
+
     await db.delete(ws)
     await db.commit()
     log.info("workspace_deleted", id=ws.id, name=ws.name)

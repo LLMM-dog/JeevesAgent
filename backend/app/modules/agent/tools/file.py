@@ -67,6 +67,17 @@ def _rel(p: Path, root: Path) -> str:
         return str(p).replace("\\", "/")
 
 
+def _clean_path(raw: str) -> str:
+    """去掉模型偶尔加的引号。
+
+    模型有时会传 `"E:/foo/bar"`，Path 会把它当成相对路径并拼到工作区下，
+    最后出现 `workspace/"E:/foo/bar"` 这种错误。"""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        raw = raw[1:-1].strip()
+    return raw
+
+
 def _skip(p: Path) -> bool:
     return any(part in SKIP_DIRS for part in p.parts)
 
@@ -88,7 +99,7 @@ class ReadFileTool:
         }
 
     async def run(self, ctx: ToolContext, **kw: Any) -> ToolResult:
-        raw = str(kw.get("path", "")).strip()
+        raw = _clean_path(str(kw.get("path", "")))
         if not raw:
             return ToolResult(content="path 不能为空", is_error=True)
         offset = max(1, int(kw.get("offset") or 1))
@@ -170,7 +181,7 @@ class WriteFileTool:
         }
 
     async def run(self, ctx: ToolContext, **kw: Any) -> ToolResult:
-        raw = str(kw.get("path", "")).strip()
+        raw = _clean_path(str(kw.get("path", "")))
         content = kw.get("content")
         insert_line = kw.get("insert_line")
         if not raw:
@@ -325,7 +336,7 @@ class EditFileTool:
         }
 
     async def run(self, ctx: ToolContext, **kw: Any) -> ToolResult:
-        raw = str(kw.get("path", "")).strip()
+        raw = _clean_path(str(kw.get("path", "")))
         old = kw.get("old_string")
         new = kw.get("new_string")
         if not raw or old is None or new is None:
@@ -402,7 +413,7 @@ class ListDirTool:
         }
 
     async def run(self, ctx: ToolContext, **kw: Any) -> ToolResult:
-        raw = str(kw.get("path", "") or ".").strip()
+        raw = _clean_path(str(kw.get("path", "") or "."))
         target = Path(raw)
         if not target.is_absolute():
             target = ctx.workspace / target
@@ -466,7 +477,7 @@ class GlobTool:
         if not pattern:
             return ToolResult(content="pattern 不能为空", is_error=True)
 
-        base = Path(str(kw.get("path", "") or "."))
+        base = Path(_clean_path(str(kw.get("path", "") or ".")))
         if not base.is_absolute():
             base = ctx.workspace / base
         root = get_guard().check(base)
@@ -523,7 +534,7 @@ class GrepTool:
         except re.error as e:
             return ToolResult(content=f"正则不合法：{e}", is_error=True)
 
-        base = Path(str(kw.get("path", "") or "."))
+        base = Path(_clean_path(str(kw.get("path", "") or ".")))
         if not base.is_absolute():
             base = ctx.workspace / base
         root = get_guard().check(base)

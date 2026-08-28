@@ -19,7 +19,7 @@
 | [architecture/context.md](architecture/context.md) | 上下文：占用计算、压缩时机与预算 |
 | [architecture/memory.md](architecture/memory.md) | 记忆系统：三层隔离（全局/智能体/会话）、peer、存储形态、merge 语义 |
 | [architecture/memory-schema.md](architecture/memory-schema.md) | 记忆类型 YAML：字段说明、内置 10 种类型、如何自己加一种 |
-| [architecture/multi-agent-roadmap.md](architecture/multi-agent-roadmap.md) | 多智能体路线图：验证增强、编排、技能进化 |
+| [architecture/multi-agent-roadmap.md](architecture/multi-agent-roadmap.md) | 多智能体路线图：已实现智能体与子智能体，编排/验证增强规划中 |
 | [api/](api/) | HTTP 接口、SSE 事件协议 |
 | [guides/](guides/) | 产品定位、术语表 |
 | [development/](development/) | 环境搭建、代码规范、测试策略 |

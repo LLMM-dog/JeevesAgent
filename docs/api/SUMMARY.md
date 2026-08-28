@@ -36,7 +36,7 @@
 | 文件 | 说明 | 建议 |
 |------|------|------|
 | `conventions.md` | 旧的约定文档 | 可删除（已整合到 API_OVERVIEW.md） |
-| `endpoints-agents.md` | 旧的智能体文档 | 可删除（已被 agent_router.md 替代） |
+| `endpoints-agents.md` | 旧的智能体文档 | 已改为指向 agent_router.md 的 stub |
 | `endpoints-chat.md` | 旧的会话文档 | 可删除（已被 routes_chat.md 替代） |
 | `endpoints-config.md` | 旧的配置文档 | 可删除（已被 routes_config.md 替代） |
 | `sse-events.md` | SSE 事件文档 | 可保留或整合到 API_OVERVIEW.md |
