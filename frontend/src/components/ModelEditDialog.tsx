@@ -46,6 +46,15 @@ const inputStyle = {
   background: "var(--color-bg)",
 } as const;
 
+function shortBaseUrl(baseUrl: string, fallback: string): string {
+  if (!baseUrl) return fallback;
+  try {
+    return new URL(baseUrl).host || baseUrl;
+  } catch {
+    return baseUrl.replace(/^https?:\/\//, "").split("/")[0] || fallback;
+  }
+}
+
 function parsePrice(v: string): number | null {
   if (v.trim() === "") return null;
   const n = Number(v);
@@ -83,13 +92,18 @@ export function ModelEditDialog({
     model?.price_out_per_1m != null ? String(model.price_out_per_1m) : "",
   );
   const [enabled, setEnabled] = useState(model?.enabled ?? true);
-  const [targetEndpointId, setTargetEndpointId] = useState(
-    model?.endpoint_id ?? endpoint.id,
+  const [targetGroupId, setTargetGroupId] = useState(
+    model ? model.group_id || model.endpoint_id : endpoint.id,
   );
 
   const [groupName, setGroupName] = useState(endpoint.name);
   const [groupBaseUrl, setGroupBaseUrl] = useState(endpoint.base_url);
   const [groupApiKey, setGroupApiKey] = useState("");
+
+  const isCustomGroup = !endpoint.base_url;
+  const sourceEndpoint = model
+    ? endpoints.find((e) => e.id === model.endpoint_id)
+    : undefined;
 
   const save = useMutation({
     mutationFn: async () => {
@@ -103,22 +117,26 @@ export function ModelEditDialog({
           price_in_per_1m: parsePrice(priceIn),
           price_out_per_1m: parsePrice(priceOut),
           enabled,
-          ...(targetEndpointId !== model.endpoint_id
-            ? { endpoint_id: targetEndpointId }
+          ...(targetGroupId !== (model.group_id || model.endpoint_id)
+            ? { group_id: targetGroupId }
             : {}),
         });
       }
-      // 分组字段改了才发。Key 留空 = 不改。
-      if (
-        groupName !== endpoint.name ||
-        groupBaseUrl !== endpoint.base_url ||
-        groupApiKey.trim() !== ""
-      ) {
-        await api.patchEndpoint(endpoint.id, {
-          name: groupName,
-          base_url: groupBaseUrl,
-          api_key: groupApiKey,
-        });
+      // 分组字段改了才发。Key 留空 = 不改；自定义分组没有地址/Key。
+      const endpointPatch: {
+        name?: string;
+        base_url?: string;
+        api_key?: string;
+      } = {};
+      if (groupName !== endpoint.name) endpointPatch.name = groupName;
+      if (endpoint.base_url && groupBaseUrl !== endpoint.base_url) {
+        endpointPatch.base_url = groupBaseUrl;
+      }
+      if (endpoint.base_url && groupApiKey.trim() !== "") {
+        endpointPatch.api_key = groupApiKey;
+      }
+      if (Object.keys(endpointPatch).length > 0) {
+        await api.patchEndpoint(endpoint.id, endpointPatch);
       }
     },
     onSuccess: () => {
@@ -148,7 +166,11 @@ export function ModelEditDialog({
               {model ? model.model_id : `编辑分组「${endpoint.name}」`}
             </h2>
             <p className="mt-0.5 text-xs" style={{ color: "var(--color-muted)" }}>
-              {model ? "模型详情与所属分组。" : "分组自带地址和 Key，其下模型共用。"}
+              {model
+                ? "模型详情与所属分组。"
+                : isCustomGroup
+                  ? "自定义分组只有名称，模型调用仍走各自来源。"
+                  : "分组自带地址和 Key，其下模型共用。"}
             </p>
           </div>
           <button
@@ -164,7 +186,30 @@ export function ModelEditDialog({
         <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
           {model && (
             <>
-              <Field label="显示名称">
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="模型名（自动探测，不可更改）">
+                  <input
+                    value={model.model_id}
+                    disabled
+                    className={inputCls}
+                    style={{ ...inputStyle, opacity: 0.6 }}
+                  />
+                </Field>
+                <Field label="来源">
+                  <input
+                    value={
+                      sourceEndpoint
+                        ? shortBaseUrl(sourceEndpoint.base_url, sourceEndpoint.name)
+                        : model.endpoint_name
+                    }
+                    disabled
+                    className={inputCls}
+                    style={{ ...inputStyle, opacity: 0.6 }}
+                  />
+                </Field>
+              </div>
+
+              <Field label="显示名称" hint="默认是模型名，可改成更友好的名字。">
                 <input
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
@@ -250,10 +295,10 @@ export function ModelEditDialog({
                 </Field>
               </div>
 
-              <Field label="所属分组" hint="也可在卡片上直接拖到别的分组。">
+              <Field label="所属分组" hint="只改展示位置；模型调用仍走上面的来源。也可在卡片上直接拖动。">
                 <select
-                  value={targetEndpointId}
-                  onChange={(e) => setTargetEndpointId(e.target.value)}
+                  value={targetGroupId}
+                  onChange={(e) => setTargetGroupId(e.target.value)}
                   className={inputCls}
                   style={inputStyle}
                 >
@@ -279,7 +324,7 @@ export function ModelEditDialog({
 
           <div className="border-t pt-3" style={{ borderColor: "var(--color-border)" }}>
             <p className="mb-3 text-xs font-medium" style={{ color: "var(--color-muted)" }}>
-              分组（地址 / Key）
+              {isCustomGroup ? "自定义分组" : "分组（地址 / Key）"}
             </p>
             <div className="space-y-3">
               <Field label="分组名">
@@ -290,27 +335,31 @@ export function ModelEditDialog({
                   style={inputStyle}
                 />
               </Field>
-              <Field label="地址（Base URL）">
-                <input
-                  value={groupBaseUrl}
-                  onChange={(e) => setGroupBaseUrl(e.target.value)}
-                  className={inputCls}
-                  style={inputStyle}
-                />
-              </Field>
-              <Field
-                label="API Key"
-                hint={`当前尾 4 位：${endpoint.key_hint}。留空保持不变，重新填才会更新。`}
-              >
-                <input
-                  type="password"
-                  value={groupApiKey}
-                  onChange={(e) => setGroupApiKey(e.target.value)}
-                  placeholder="留空不变"
-                  className={inputCls}
-                  style={inputStyle}
-                />
-              </Field>
+              {!isCustomGroup && (
+                <>
+                  <Field label="地址（Base URL）">
+                    <input
+                      value={groupBaseUrl}
+                      onChange={(e) => setGroupBaseUrl(e.target.value)}
+                      className={inputCls}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field
+                    label="API Key"
+                    hint={`当前尾 4 位：${endpoint.key_hint}。留空保持不变，重新填才会更新。`}
+                  >
+                    <input
+                      type="password"
+                      value={groupApiKey}
+                      onChange={(e) => setGroupApiKey(e.target.value)}
+                      placeholder="留空不变"
+                      className={inputCls}
+                      style={inputStyle}
+                    />
+                  </Field>
+                </>
+              )}
             </div>
           </div>
 

@@ -8,7 +8,7 @@
  * - 分组头右侧的「+」展开快捷添加表单（自动拉该分组的模型列表搜索）。
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
@@ -37,23 +37,44 @@ import { BindingsDialog } from "./BindingsDialog";
 import { ModelEditDialog } from "./ModelEditDialog";
 import VisionPanel from "./VisionPanel";
 
+function shortBaseUrl(baseUrl: string, fallback: string): string {
+  if (!baseUrl) return fallback;
+  try {
+    return new URL(baseUrl).host || baseUrl;
+  } catch {
+    return baseUrl.replace(/^https?:\/\//, "").split("/")[0] || fallback;
+  }
+}
+
 // ─────────────────────────── 模型卡片 ───────────────────────────
 
 function ModelCard({
   model,
+  sourceLabel,
   dragging,
+  sortDragging,
+  sortOver,
+  sortInsertBefore,
   onToggle,
   onEdit,
   onDelete,
   onDragStart,
+  onDragOver,
+  onDrop,
   onDragEnd,
 }: {
   model: ModelItem;
+  sourceLabel: string;
   dragging: boolean;
+  sortDragging: boolean;
+  sortOver: boolean;
+  sortInsertBefore: boolean;
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onDragStart: (e: React.DragEvent) => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDrop: (e: React.DragEvent) => void;
   onDragEnd: () => void;
 }) {
   const type = modelTypeMeta(model.model_type);
@@ -63,21 +84,29 @@ function ModelCard({
   return (
     <div
       draggable
+      data-model-id={model.id}
       onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
       onDragEnd={onDragEnd}
       onClick={onEdit}
-      title="点击编辑，按住拖动到别的分组"
+      title="拖动到分组空白处 = 移动分组；拖动到卡片左侧/右侧 = 插入排序"
       className={clsx(
-        "group relative cursor-grab rounded-lg border p-3 transition-colors active:cursor-grabbing",
-        dragging && "opacity-40",
+        "group relative cursor-grab select-none rounded-lg border p-3 transition-colors active:cursor-grabbing",
+        (dragging || sortDragging) && "opacity-40",
+        sortOver && "border-dashed border-[var(--color-accent)]",
         model.enabled
           ? "bg-[var(--color-surface)] hover:border-[var(--color-accent)]"
           : "opacity-60",
       )}
       style={{ borderColor: "var(--color-border)" }}
     >
-      {/* 拖动手柄：悬浮时出现在左侧，提示可拖 */}
-      <div className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 opacity-0 transition-opacity group-hover:opacity-60">
+      {/* 排序手柄：拖动这里进行组内排序；卡片其它区域拖动用于移动分组 */}
+      <div
+        data-sort-handle="true"
+        title="拖动排序"
+        className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 cursor-grab p-1 opacity-0 transition-opacity group-hover:opacity-70"
+      >
         <GripVertical size={14} style={{ color: "var(--color-muted)" }} />
       </div>
 
@@ -95,7 +124,16 @@ function ModelCard({
           <div className="truncate text-sm font-medium" style={{ color: "var(--color-text)" }}>
             {name}
           </div>
-          <div className="mt-0.5 flex items-center gap-1.5 text-[11px]" style={{ color: "var(--color-muted)" }}>
+          <div
+            className="mt-0.5 truncate font-mono text-[11px]"
+            style={{ color: "var(--color-muted)" }}
+            title="模型名（自动探测，不可更改）"
+          >
+            {model.model_id}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]" style={{ color: "var(--color-muted)" }}>
+            <span title="来源">{sourceLabel}</span>
+            <span>·</span>
             {/* 视觉能力三态：支持=眼睛，不支持=斜杠眼睛，未知=问号（后果用户自负） */}
             {model.supports_vision === "true" && (
               <span className="inline-flex items-center gap-0.5" title="支持视觉" style={{ color: "var(--color-ok)" }}>
@@ -185,6 +223,14 @@ function ModelCard({
       >
         <Trash2 size={13} />
       </button>
+
+      {/* 排序插入位置预览：悬停卡片左/右半区时显示插入线 */}
+      {sortOver && (
+        <div
+          className="pointer-events-none absolute top-2 bottom-2 w-0.5 rounded bg-[var(--color-accent)]"
+          style={sortInsertBefore ? { left: -2 } : { right: -2 }}
+        />
+      )}
     </div>
   );
 }
@@ -202,6 +248,10 @@ export default function ModelsPanel() {
   } | null>(null);
   const [dragModelId, setDragModelId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [sortOverId, setSortOverId] = useState<string | null>(null);
+  const [sortInsertBefore, setSortInsertBefore] = useState(true);
+  // 只有一个 HTML5 拖拽源。落在卡片上 = 插入排序；落在分组空白处 = 移动分组。
+  const dragModelIdRef = useRef<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const endpoints = useQuery({ queryKey: ["endpoints"], queryFn: api.listEndpoints });
@@ -249,8 +299,18 @@ export default function ModelsPanel() {
   });
 
   const moveModel = useMutation({
-    mutationFn: (args: { modelId: string; endpointId: string }) =>
-      api.patchModel(args.modelId, { endpoint_id: args.endpointId }),
+    mutationFn: (args: { modelId: string; groupId: string }) =>
+      api.patchModel(args.modelId, { group_id: args.groupId }),
+    onError: (e: Error) => alert(e.message),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["models"] });
+      qc.invalidateQueries({ queryKey: ["endpoints"] });
+    },
+  });
+
+  const moveModelTo = useMutation({
+    mutationFn: (args: { modelId: string; targetId: string; insertBefore: boolean }) =>
+      api.moveModelTo(args.modelId, args.targetId, args.insertBefore),
     onError: (e: Error) => alert(e.message),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["models"] });
@@ -263,18 +323,67 @@ export default function ModelsPanel() {
 
   const grouped = allEndpoints.map((endpoint) => ({
     endpoint,
-    models: allModels.filter((m) => m.endpoint_id === endpoint.id),
+    models: allModels.filter((m) => (m.group_id || m.endpoint_id) === endpoint.id),
   }));
 
-  const onDrop = (endpoint: EndpointOut) => {
-    setDropTarget(null);
-    if (dragModelId) {
-      const m = allModels.find((x) => x.id === dragModelId);
-      if (m && m.endpoint_id !== endpoint.id) {
-        moveModel.mutate({ modelId: m.id, endpointId: endpoint.id });
-      }
-    }
+  const resetDrag = () => {
+    dragModelIdRef.current = null;
     setDragModelId(null);
+    setDropTarget(null);
+    setSortOverId(null);
+  };
+
+  const startDrag = (e: React.DragEvent, modelId: string) => {
+    dragModelIdRef.current = modelId;
+    setDragModelId(modelId);
+    setSortOverId(null);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", modelId);
+  };
+
+  const handleCardDragOver = (e: React.DragEvent, modelId: string) => {
+    if (!dragModelIdRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const before = e.clientX < rect.left + rect.width / 2;
+    setSortOverId(modelId);
+    setSortInsertBefore(before);
+  };
+
+  const handleCardDrop = (e: React.DragEvent, targetId: string) => {
+    if (!dragModelIdRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    moveModelTo.mutate({
+      modelId: dragModelIdRef.current,
+      targetId,
+      insertBefore: sortInsertBefore,
+    });
+    resetDrag();
+  };
+
+  const handleSectionDragOver = (e: React.DragEvent, endpoint: EndpointOut) => {
+    if (!dragModelIdRef.current) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setSortOverId(null);
+    setDropTarget(endpoint.id);
+  };
+
+  const handleSectionDrop = (e: React.DragEvent, endpoint: EndpointOut) => {
+    if (!dragModelIdRef.current) return;
+    e.preventDefault();
+    const activeId = dragModelIdRef.current;
+    const m = allModels.find((x) => x.id === activeId);
+    if (m && (m.group_id || m.endpoint_id) !== endpoint.id) {
+      moveModel.mutate({ modelId: m.id, groupId: endpoint.id });
+    }
+    resetDrag();
+  };
+
+  const handleDragEnd = () => {
+    resetDrag();
   };
 
   return (
@@ -337,17 +446,9 @@ export default function ModelsPanel() {
           {grouped.map(({ endpoint, models: ms }) => (
             <section
               key={endpoint.id}
-              onDragOver={(e) => {
-                if (dragModelId) {
-                  e.preventDefault();
-                  e.dataTransfer.dropEffect = "move";
-                  if (dropTarget !== endpoint.id) setDropTarget(endpoint.id);
-                }
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                onDrop(endpoint);
-              }}
+              data-endpoint-id={endpoint.id}
+              onDragOver={(e) => handleSectionDragOver(e, endpoint)}
+              onDrop={(e) => handleSectionDrop(e, endpoint)}
               className={clsx(
                 "rounded-lg border-t pt-4 transition-colors",
                 dropTarget === endpoint.id && "bg-[var(--color-surface-2)]",
@@ -379,24 +480,37 @@ export default function ModelsPanel() {
                   <span className="text-xs" style={{ color: "var(--color-muted)" }}>
                     {ms.length} 个模型
                   </span>
-                  <span className="truncate font-mono text-xs" style={{ color: "var(--color-muted)" }}>
-                    {endpoint.base_url}
-                  </span>
-                  <span className="shrink-0 text-xs" style={{ color: "var(--color-muted)" }}>
-                    ·{endpoint.key_hint}
-                  </span>
+                  {endpoint.base_url ? (
+                    <>
+                      <span className="truncate font-mono text-xs" style={{ color: "var(--color-muted)" }}>
+                        {endpoint.base_url}
+                      </span>
+                      <span className="shrink-0 text-xs" style={{ color: "var(--color-muted)" }}>
+                        ·{endpoint.key_hint}
+                      </span>
+                    </>
+                  ) : (
+                    <span
+                      className="shrink-0 rounded bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px]"
+                      style={{ color: "var(--color-muted)" }}
+                    >
+                      自定义分组
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex shrink-0 items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setQuickAdd((v) => (v === endpoint.id ? null : endpoint.id))}
-                    className="inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs hover:bg-[var(--color-surface-2)]"
-                    style={{ borderColor: "var(--color-accent)", color: "var(--color-accent)" }}
-                  >
-                    <Plus size={13} />
-                    添加模型
-                  </button>
+                  {endpoint.base_url && (
+                    <button
+                      type="button"
+                      onClick={() => setQuickAdd((v) => (v === endpoint.id ? null : endpoint.id))}
+                      className="inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs hover:bg-[var(--color-surface-2)]"
+                      style={{ borderColor: "var(--color-accent)", color: "var(--color-accent)" }}
+                    >
+                      <Plus size={13} />
+                      添加模型
+                    </button>
+                  )}
                   <button
                     type="button"
                     aria-label={`编辑分组 ${endpoint.name}`}
@@ -410,12 +524,11 @@ export default function ModelsPanel() {
                     type="button"
                     aria-label={`删除分组 ${endpoint.name}`}
                     onClick={() => {
-                      if (
-                        confirm(
-                          `确定删除整个模型组「${endpoint.name}」及其所有模型吗？` +
-                            `只想删一个模型请用模型行上的删除按钮。`,
-                        )
-                      ) {
+                      const msg = endpoint.base_url
+                        ? `确定删除整个供应商分组「${endpoint.name}」及其所有模型吗？` +
+                            `只想删一个模型请用模型行上的删除按钮。`
+                        : `确定删除自定义分组「${endpoint.name}」吗？其中的模型会回到来源分组。`;
+                      if (confirm(msg)) {
                         deleteEndpoint.mutate(endpoint.id);
                       }
                     }}
@@ -445,29 +558,36 @@ export default function ModelsPanel() {
               {/* 卡片网格 */}
               {ms.length === 0 ? (
                 <div className="rounded-lg border border-dashed px-3 py-6 text-center text-xs" style={{ borderColor: "var(--color-border)", color: "var(--color-muted)" }}>
-                  该分组还没有模型。点右侧「添加模型」，或从别的分组把卡片拖进来。
+                  {endpoint.base_url
+                    ? "该分组还没有模型。点右侧「添加模型」，或从别的分组把卡片拖进来。"
+                    : "自定义分组还没有模型。把已有模型拖到这里，或在编辑模型时改所属分组。"}
                 </div>
               ) : (
                 <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {ms.map((m) => (
-                    <ModelCard
-                      key={m.id}
-                      model={m}
-                      dragging={dragModelId === m.id}
-                      onToggle={() => handleToggle(m)}
-                      onEdit={() => setEditing({ model: m, endpoint })}
-                      onDelete={() => deleteModel.mutate(m.id)}
-                      onDragStart={(e) => {
-                        setDragModelId(m.id);
-                        e.dataTransfer.effectAllowed = "move";
-                        e.dataTransfer.setData("text/plain", m.id);
-                      }}
-                      onDragEnd={() => {
-                        setDragModelId(null);
-                        setDropTarget(null);
-                      }}
-                    />
-                  ))}
+                  {ms.map((m) => {
+                    const sourceEndpoint = allEndpoints.find((e) => e.id === m.endpoint_id);
+                    const sourceLabel = sourceEndpoint
+                      ? shortBaseUrl(sourceEndpoint.base_url, sourceEndpoint.name)
+                      : m.endpoint_name;
+                    return (
+                      <ModelCard
+                        key={m.id}
+                        model={m}
+                        sourceLabel={sourceLabel}
+                        dragging={dragModelId === m.id}
+                        sortDragging={dragModelId === m.id}
+                        sortOver={sortOverId === m.id}
+                        sortInsertBefore={sortInsertBefore}
+                        onToggle={() => handleToggle(m)}
+                        onEdit={() => setEditing({ model: m, endpoint })}
+                        onDelete={() => deleteModel.mutate(m.id)}
+                        onDragStart={(e) => startDrag(e, m.id)}
+                        onDragOver={(e) => handleCardDragOver(e, m.id)}
+                        onDrop={(e) => handleCardDrop(e, m.id)}
+                        onDragEnd={handleDragEnd}
+                      />
+                    );
+                  })}
                 </div>
               )}
                 </>

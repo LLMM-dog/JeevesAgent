@@ -65,6 +65,7 @@ export function AddEndpointDialog({
   const qc = useQueryClient();
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [groupName, setGroupName] = useState("");
   const [probeResult, setProbeResult] = useState<ProbeResponse | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [visionPrefs, setVisionPrefs] = useState<
@@ -90,19 +91,27 @@ export function AddEndpointDialog({
 
   const save = useMutation({
     mutationFn: () =>
-      api.createEndpoint({
-        name: probeResult?.suggested_name ?? "",
-        base_url: baseUrl.trim(),
-        api_key: apiKey.trim(),
-        models: probeResult?.models
-          .filter((m) => selected.has(m.model_id))
-          .map((m) => ({
-            model_id: m.model_id,
-            context_window: m.context_window,
-            model_type: m.model_type,
-            supports_vision: visionPrefs[m.model_id] ?? "unknown",
-          })) ?? [],
-      }),
+      mode === "group"
+        ? api.createEndpoint({
+            name: groupName.trim(),
+            base_url: "",
+            api_key: "",
+            models: [],
+          })
+        : api.createEndpoint({
+            name: probeResult?.suggested_name ?? "",
+            base_url: baseUrl.trim(),
+            api_key: apiKey.trim(),
+            models:
+              probeResult?.models
+                .filter((m) => selected.has(m.model_id))
+                .map((m) => ({
+                  model_id: m.model_id,
+                  context_window: m.context_window,
+                  model_type: m.model_type,
+                  supports_vision: visionPrefs[m.model_id] ?? "unknown",
+                })) ?? [],
+          }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["endpoints"] });
       qc.invalidateQueries({ queryKey: ["models"] });
@@ -115,6 +124,7 @@ export function AddEndpointDialog({
   const reset = () => {
     setBaseUrl("");
     setApiKey("");
+    setGroupName("");
     setProbeResult(null);
     setSelected(new Set());
     setVisionPrefs({});
@@ -131,7 +141,10 @@ export function AddEndpointDialog({
 
   if (!open) return null;
 
-  const canSave = baseUrl.trim().length > 0 && apiKey.trim().length > 0;
+  const canSave =
+    mode === "group"
+      ? groupName.trim().length > 0
+      : baseUrl.trim().length > 0 && apiKey.trim().length > 0;
 
   return (
     <div
@@ -153,7 +166,9 @@ export function AddEndpointDialog({
               {mode === "model" ? "添加模型" : "添加分组"}
             </h2>
             <p className="mt-0.5 text-xs" style={{ color: "var(--color-muted)" }}>
-              输入地址和 API Key，自动探测模型并按供应商分组。同名或同地址会并入已有分组。
+              {mode === "model"
+                ? "输入地址和 API Key，自动探测模型并按供应商分组。同名或同地址会并入已有分组。"
+                : "自定义分组只做展示归类，不需要地址和 API Key。之后可以把已有模型拖进这个分组。"}
             </p>
           </div>
           <button
@@ -168,6 +183,30 @@ export function AddEndpointDialog({
 
         {/* 表单 */}
         <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          {mode === "group" ? (
+            <>
+              <Field
+                label="分组名"
+                hint="例如 DeepSeek、GPT、国产模型。之后把已有模型拖进来即可。"
+              >
+                <input
+                  value={groupName}
+                  onChange={(e) => setGroupName(e.target.value)}
+                  placeholder="DeepSeek"
+                  className={inputCls}
+                  style={inputStyle}
+                  autoFocus
+                />
+              </Field>
+              {err && (
+                <p role="alert" className="flex items-start gap-1.5 text-sm" style={{ color: "var(--color-err)" }}>
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  {err}
+                </p>
+              )}
+            </>
+          ) : (
+            <>
           <Field
             label="地址（Base URL）"
             hint="例如 https://api.deepseek.com。会规范化（补 /v1、去尾斜杠）。"
@@ -300,6 +339,8 @@ export function AddEndpointDialog({
                 })}
               </ul>
             </div>
+          )}
+            </>
           )}
         </div>
 

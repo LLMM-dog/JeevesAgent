@@ -648,6 +648,8 @@ export interface ModelItem {
   endpoint_id: string;
   /** 端点名，用于菜单里显示"端点 / 模型" */
   endpoint_name: string;
+  /** 展示分组 id。空串 = 跟随来源端点（默认分组）。 */
+  group_id: string;
   model_id: string;
   display_name: string;
   context_window: number;

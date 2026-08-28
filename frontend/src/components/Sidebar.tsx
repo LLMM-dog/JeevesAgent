@@ -8,6 +8,7 @@ import {
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Pin,
   PinOff,
   Settings,
@@ -157,6 +158,15 @@ export default function Sidebar() {
     mutationFn: ({ id, pinned }: { id: string; pinned: boolean }) =>
       api.patchSession(id, { pinned }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["sessions"] }),
+  });
+
+  const renameSession = useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      api.patchSession(id, { title }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (e: Error) => alert(e.message),
   });
 
   /**
@@ -327,8 +337,8 @@ export default function Sidebar() {
                     to={`/chat/${s.id}`}
                     className={({ isActive }) =>
                       clsx(
-                        // pr-20 给三个按钮留位（导出 + 置顶 + 删除）
-                        "flex items-center gap-1 truncate rounded-md px-2.5 py-2 pr-20 text-sm transition",
+                        // pr-28 给四个按钮留位（重命名 + 导出 + 置顶 + 删除）
+                        "flex items-center gap-1 truncate rounded-md px-2.5 py-2 pr-28 text-sm transition",
                         isActive
                           ? "bg-[var(--color-surface-2)] text-[var(--color-text)]"
                           : "text-[var(--color-muted)] hover:bg-[var(--color-surface-2)]/60",
@@ -347,10 +357,28 @@ export default function Sidebar() {
                     )}
                     <span className="truncate">{s.title || "未命名会话"}</span>
                   </NavLink>
-                  {/* 三个按钮排成一行而不是各自 absolute 定位。
+                  {/* 四个按钮排成一行而不是各自 absolute 定位。
                       各自定位的话每加一个都要重算 right-* 和容器的 pr-*，
-                      而侧边栏只有 256px，三个图标挤在一起容易点错。 */}
+                      而侧边栏只有 256px，四个图标挤在一起容易点错。 */}
                   <div className="absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+                    <button
+                      type="button"
+                      aria-label={`重命名会话 ${s.title || "未命名会话"}`}
+                      title="重命名"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        const next = window.prompt(
+                          "输入会话标题",
+                          s.title || "未命名会话",
+                        );
+                        if (next != null && next.trim() && next.trim() !== s.title) {
+                          renameSession.mutate({ id: s.id, title: next.trim() });
+                        }
+                      }}
+                      className="rounded p-1 text-[var(--color-muted)] transition hover:text-[var(--color-accent)]"
+                    >
+                      <Pencil size={13} aria-hidden />
+                    </button>
                     <button
                       type="button"
                       aria-label={`导出会话 ${s.title || "未命名会话"}`}

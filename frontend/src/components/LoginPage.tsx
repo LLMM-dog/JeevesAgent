@@ -123,6 +123,9 @@ export default function LoginPage() {
           连续输错会触发限流（默认 15 分钟内最多 10 次）。首次部署时若未在
           .env 配置管理员密码，初始密码会打印在服务启动日志里。
         </p>
+        <p className="text-center text-[11px]" style={{ color: "var(--color-muted)" }}>
+          v{__APP_VERSION__}
+        </p>
       </form>
     </div>
   );

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import structlog
 from app.core.crypto import decrypt, encrypt, key_hint
 from app.core.events import Ev, emit
-from app.core.exceptions import NoModelBoundError, NotFoundError
+from app.core.exceptions import BadRequestError, ConflictError, NoModelBoundError, NotFoundError
 from app.core.ids import binding_id, endpoint_id, model_id
 from app.core.time import now_ms
 from app.infra.llm.openai_compat import normalize_base_url
@@ -164,11 +164,39 @@ async def create_endpoint(
     判据里带 Key 尾号是有意的：同一个端点用两个不同的 Key
     （比如个人额度和团队额度）是合理场景，那种情况该分成两组。
     """
+    name = name.strip()
+    is_custom = not base_url.strip() and not api_key.strip()
+
+    # 自定义分组：只有展示用途，没有真实地址和 Key。
+    # 模型拖进来自定义分组后，调用时仍走模型自己的 endpoint_id 来源。
+    if is_custom:
+        if not name:
+            raise BadRequestError("自定义分组需要填分组名", code="empty_group_name")
+        dup = (
+            await db.execute(select(Endpoint).where(Endpoint.name == name))
+        ).scalar_one_or_none()
+        if dup is not None:
+            raise ConflictError(f"分组「{name}」已存在", code="endpoint_exists")
+        p = Endpoint(
+            id=endpoint_id(),
+            name=name,
+            base_url="",
+            api_key_cipher="",
+            key_hint="",
+            last_probe_at=None,
+        )
+        db.add(p)
+        await db.commit()
+        return p
+
+    if not base_url.strip() or not api_key.strip():
+        raise BadRequestError("地址和 API Key 都不能为空", code="endpoint_requires_credentials")
+
     norm_url = normalize_base_url(base_url)
     hint = key_hint(api_key)
 
     # 用户不填分组名时从地址推断（"添加模型"是纯自动分组，见路由层）。
-    name = name.strip() or guess_endpoint_name(norm_url)
+    name = name or guess_endpoint_name(norm_url)
 
     # 先按名字找，再按"同端点同 Key"找
     p = (
@@ -298,7 +326,14 @@ async def update_endpoint(
     """
     p = await get_endpoint(db, pid)
     if name is not None and name.strip():
-        p.name = name.strip()
+        new_name = name.strip()
+        if new_name != p.name:
+            dup = (
+                await db.execute(select(Endpoint).where(Endpoint.name == new_name))
+            ).scalar_one_or_none()
+            if dup is not None:
+                raise ConflictError(f"分组「{new_name}」已存在", code="endpoint_exists")
+        p.name = new_name
     if base_url is not None and base_url.strip():
         p.base_url = normalize_base_url(base_url)
     if api_key is not None and api_key.strip():
@@ -313,6 +348,7 @@ async def list_models(db: AsyncSession, endpoint_id_: str | None = None) -> list
     stmt = select(Model)
     if endpoint_id_:
         stmt = stmt.where(Model.endpoint_id == endpoint_id_)
+    stmt = stmt.order_by(Model.sort_order.asc(), Model.created_at.asc())
     return list((await db.execute(stmt)).scalars())
 
 

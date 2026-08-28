@@ -211,8 +211,10 @@ class CreateEndpointModel(BaseModel):
 class CreateEndpointRequest(BaseModel):
     # 允许留空 —— 空则由后端从 base_url 推断分组名（"添加模型"是纯自动分组）
     name: str = ""
-    base_url: str = Field(min_length=1)
-    api_key: str = Field(min_length=1)
+    # 自定义分组只需要 name，地址和 Key 都留空。
+    # 普通供应商分组则两个都必填（由 service 层校验）。
+    base_url: str = ""
+    api_key: str = ""
     models: list[CreateEndpointModel] = Field(default_factory=list)
 
 
@@ -238,6 +240,8 @@ class ModelOut(BaseModel):
     # 端点名。对话页下拉显示 "端点 / 模型"。
     # 只有 endpoint_id 的话前端还得再查一次
     endpoint_name: str = ""
+    # 展示分组 id。空串 = 跟随来源端点（默认分组）。
+    group_id: str = ""
     model_id: str
     display_name: str
     context_window: int
@@ -269,13 +273,33 @@ class ModelPatch(BaseModel):
     enabled: bool | None = None
     display_name: str | None = None
     context_window: int | None = None
-    # 移动模型到另一个分组（拖动改分组）。绑定引用的是 model_pk 不受影响。
+    # 移动模型到另一个【展示分组】（拖动改分组）。绑定引用的是 model_pk 不受影响。
+    # 空串 = 回到来源端点分组。
+    group_id: str | None = None
+    # 修改真实来源端点（供应商）。展示分组用 group_id，调用连接用 endpoint_id。
     endpoint_id: str | None = None
     model_type: str | None = None
     price_in_per_1m: float | None = None
     price_out_per_1m: float | None = None
     supports_vision: str | None = None  # "true" | "false" | "unknown"
     supports_tools: str | None = None  # "true" | "false" | "unknown"
+
+
+class ModelMoveRequest(BaseModel):
+    direction: Literal["up", "down"]
+
+
+class ModelReorderRequest(BaseModel):
+    """前端拖拽排序后，把同一展示分组的模型按新顺序提交。"""
+
+    model_ids: list[str] = Field(min_length=2)
+
+
+class ModelMoveToRequest(BaseModel):
+    """把模型移动到目标模型的左侧或右侧，同时完成分组与排序。"""
+
+    target_model_pk: str = Field(min_length=1)
+    insert_before: bool = True
 
 
 class UpdateEndpointRequest(BaseModel):

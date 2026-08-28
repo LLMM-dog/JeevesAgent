@@ -1,4 +1,4 @@
-# jeeves 启动脚本（Windows）。
+﻿# jeeves 启动脚本（Windows）。
 #
 # 默认起开发模式：后端 --reload + 前端 vite dev server。
 # 加 -Prod 则先构建前端再只起后端（后端会伺服静态文件）。
@@ -23,7 +23,10 @@ $ErrorActionPreference = "Stop"
 # 被拆错位后逐字重复（"启动后端" 显示成 "启启动动后后端端"）。
 # 这里手动对齐输出编码。
 try {
-    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [Console]::OutputEncoding = $enc
+    [Console]::InputEncoding = $enc
+    $OutputEncoding = $enc
 } catch {
     # 没有控制台（重定向/管道）时忽略 —— 此时编码由重定向目标决定
 }

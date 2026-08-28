@@ -9,6 +9,10 @@ const BACKEND = process.env.JEEVES_BACKEND ?? "http://127.0.0.1:9000";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    // 版本唯一来源是 package.json，构建时注入，前端不手写版本号
+    __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.0.0"),
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

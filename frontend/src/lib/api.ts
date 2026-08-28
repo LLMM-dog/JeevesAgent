@@ -407,6 +407,8 @@ export const api = {
       enabled?: boolean;
       display_name?: string;
       context_window?: number;
+      /** 展示分组 id。空串 = 回到来源端点分组。 */
+      group_id?: string;
       endpoint_id?: string;
       model_type?: string;
       price_in_per_1m?: number | null;
@@ -422,6 +424,24 @@ export const api = {
 
   deleteModel: (pk: string) =>
     request<{ ok: boolean }>(`/models/${pk}`, { method: "DELETE" }),
+
+  moveModel: (pk: string, direction: "up" | "down") =>
+    request<{ ok: boolean }>(`/models/${pk}/move`, {
+      method: "POST",
+      json: { direction },
+    }),
+
+  moveModelTo: (pk: string, targetModelPk: string, insertBefore: boolean) =>
+    request<{ ok: boolean }>(`/models/${pk}/move-to`, {
+      method: "POST",
+      json: { target_model_pk: targetModelPk, insert_before: insertBefore },
+    }),
+
+  reorderModels: (modelIds: string[]) =>
+    request<{ ok: boolean }>("/models/reorder", {
+      method: "POST",
+      json: { model_ids: modelIds },
+    }),
 
   // ── 文件访问：白名单与目录浏览 ──
 
@@ -863,9 +883,9 @@ export const api = {
 
   createEndpoint: (body: {
     name?: string;
-    base_url: string;
-    api_key: string;
-    models: {
+    base_url?: string;
+    api_key?: string;
+    models?: {
       model_id: string;
       display_name?: string;
       context_window?: number;

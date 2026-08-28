@@ -7,6 +7,7 @@ function mk(overrides: Partial<ModelItem>): ModelItem {
     id: "m",
     endpoint_id: "e",
     endpoint_name: "端点",
+    group_id: "",
     model_id: "m",
     display_name: "模型",
     context_window: 0,

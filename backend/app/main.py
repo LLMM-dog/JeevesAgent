@@ -41,6 +41,7 @@ from app.core.exceptions import AppError
 from app.core.ids import path_id
 from app.core.logging import setup_logging
 from app.core.time import now_ms
+from app.core.version import get_version
 from app.infra.db.session import dispose_engine, get_sessionmaker
 from app.infra.llm.openai_compat import close_llm
 from app.modules.agent import agent_service as agent_svc
@@ -474,7 +475,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Jeeves",
-        version="0.3.1",
+        version=get_version(),
         description="本地个人 Agent 工作台",
         lifespan=lifespan,
     )

@@ -32,6 +32,7 @@ from app.api.schemas import (
 from app.core.config import settings
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.core.time import now_ms
+from app.core.version import get_version
 from app.infra.db.session import get_db
 from app.infra.llm.openai_compat import get_llm
 from app.infra.sandbox.factory import fallback_reason as sandbox_fallback_reason
@@ -205,6 +206,7 @@ async def list_models(
                 id=m.id,
                 endpoint_id=m.endpoint_id,
                 endpoint_name=pmap.get(m.endpoint_id, ""),
+                group_id=m.group_id or "",
                 model_id=m.model_id,
                 display_name=m.display_name,
                 context_window=m.context_window,
@@ -340,7 +342,7 @@ async def meta(db: AsyncSession = Depends(get_db), registry: ToolRegistry = Depe
     docker_ok = sandbox.name == "docker"
 
     return MetaResponse(
-        version="0.2.0",
+        version=get_version(),
         sandbox_backend=settings.sandbox.backend,
         sandbox_docker_available=docker_ok,
         sandbox_fallback_reason=sandbox_fallback_reason(),

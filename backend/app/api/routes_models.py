@@ -16,8 +16,11 @@ import structlog
 from app.api.deps import get_registry
 from app.api.schemas import (
     ModelCreate,
+    ModelMoveRequest,
+    ModelMoveToRequest,
     ModelOut,
     ModelPatch,
+    ModelReorderRequest,
 )
 from app.core.config import settings
 from app.core.crypto import decrypt
@@ -66,6 +69,7 @@ def _out(m: Model, endpoint_name: str = "") -> ModelOut:
         id=m.id,
         endpoint_id=m.endpoint_id,
         endpoint_name=endpoint_name,
+        group_id=m.group_id or "",
         model_id=m.model_id,
         display_name=m.display_name or m.model_id,
         context_window=m.context_window,
@@ -175,8 +179,21 @@ async def patch_model(
             raise BadRequestError("上下文窗口太小", code="window_too_small")
         m.context_window = data["context_window"]
         m.window_source = "manual"
+    if "group_id" in data:
+        # 拖动改【展示分组】。空串 = 回到来源端点分组。
+        # 展示分组与调用来源解耦：模型拖进自定义分组后，调用仍走 endpoint_id。
+        want_group = (data["group_id"] or "").strip()
+        if want_group:
+            target = (
+                await db.execute(select(Endpoint).where(Endpoint.id == want_group))
+            ).scalars().first()
+            if target is None:
+                raise NotFoundError("目标分组不存在", code="endpoint_not_found")
+            m.group_id = want_group
+        else:
+            m.group_id = None
     if "endpoint_id" in data and data["endpoint_id"] is not None:
-        # 拖动改分组：把模型移到另一个端点。
+        # 修改真实来源端点（供应商）。UI 不直接暴露，保留给以后用。
         #
         # 绑定引用的是 model_pk（模型主键），跨端点移动不影响绑定 ——
         # 只是这个模型以后用新端点的 base_url + Key 来调。
@@ -216,6 +233,142 @@ async def patch_model(
         await db.execute(select(Endpoint).where(Endpoint.id == m.endpoint_id))
     ).scalars().first()
     return _out(m, p.name if p else "")
+
+
+@router.post("/models/{model_pk}/move", summary="同展示分组内上下移动模型")
+async def move_model(
+    model_pk: str, body: ModelMoveRequest, db: AsyncSession = Depends(get_db)
+) -> dict[str, bool]:
+    """
+    自定义排序。
+
+    排序范围是模型的【展示分组】：group_id 有值就按 group_id 分组，
+    没有就按来源 endpoint 分组。这样自定义分组里的模型也能排序，
+    而且不会影响其它分组。
+    """
+    m = (
+        await db.execute(select(Model).where(Model.id == model_pk))
+    ).scalars().first()
+    if m is None:
+        raise NotFoundError("模型不存在", code="model_not_found")
+
+    if m.group_id:
+        stmt = select(Model).where(Model.group_id == m.group_id)
+    else:
+        stmt = select(Model).where(
+            Model.group_id.is_(None), Model.endpoint_id == m.endpoint_id
+        )
+    rows = list(
+        (
+            await db.execute(
+                stmt.order_by(Model.sort_order.asc(), Model.created_at.asc())
+            )
+        ).scalars()
+    )
+    if len(rows) < 2:
+        return {"ok": True}
+
+    idx = next((i for i, r in enumerate(rows) if r.id == m.id), -1)
+    if idx < 0:
+        return {"ok": True}
+
+    target = idx - 1 if body.direction == "up" else idx + 1
+    if target < 0 or target >= len(rows):
+        return {"ok": True}
+
+    rows[idx], rows[target] = rows[target], rows[idx]
+    # 每次移动后归一化成 0..n-1，避免重复 sort_order 导致下次排序不稳定。
+    for i, r in enumerate(rows):
+        r.sort_order = i
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/models/{model_pk}/move-to", summary="移动到目标模型左侧/右侧并自动调整分组")
+async def move_model_to(
+    model_pk: str,
+    body: ModelMoveToRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, bool]:
+    """
+    一次拖拽同时完成两件事：
+      1. 把模型归入目标模型所在的展示分组
+      2. 插到目标模型左侧或右侧
+    """
+    m = (
+        await db.execute(select(Model).where(Model.id == model_pk))
+    ).scalars().first()
+    if m is None:
+        raise NotFoundError("模型不存在", code="model_not_found")
+
+    target = (
+        await db.execute(select(Model).where(Model.id == body.target_model_pk))
+    ).scalars().first()
+    if target is None:
+        raise NotFoundError("目标模型不存在", code="model_not_found")
+
+    group_key = target.group_id or target.endpoint_id
+    m.group_id = group_key
+
+    if target.group_id:
+        stmt = select(Model).where(Model.group_id == group_key, Model.id != m.id)
+    else:
+        stmt = select(Model).where(
+            Model.group_id.is_(None), Model.endpoint_id == group_key, Model.id != m.id
+        )
+    rows = list(
+        (
+            await db.execute(
+                stmt.order_by(Model.sort_order.asc(), Model.created_at.asc())
+            )
+        ).scalars()
+    )
+
+    target_index = next((i for i, r in enumerate(rows) if r.id == target.id), -1)
+    if target_index < 0:
+        rows.append(m)
+    else:
+        insert_index = target_index if body.insert_before else target_index + 1
+        rows.insert(insert_index, m)
+
+    for i, r in enumerate(rows):
+        r.sort_order = i
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/models/reorder", summary="拖拽排序后批量更新同组模型顺序")
+async def reorder_models(
+    body: ModelReorderRequest, db: AsyncSession = Depends(get_db)
+) -> dict[str, bool]:
+    """
+    接收前端拖拽后的完整顺序。
+
+    只允许同一展示分组内的模型参与排序：展示分组 = group_id（有值时）
+    否则为 endpoint_id。跨组拖拽走 patch_model 改 group_id，不走这里。
+    """
+    rows = list(
+        (
+            await db.execute(select(Model).where(Model.id.in_(body.model_ids)))
+        ).scalars()
+    )
+    by_id = {r.id: r for r in rows}
+    if len(rows) != len(body.model_ids):
+        raise NotFoundError("有模型不存在", code="model_not_found")
+
+    def group_of(m: Model) -> str:
+        return m.group_id or m.endpoint_id
+
+    groups = {group_of(m) for m in rows}
+    if len(groups) != 1:
+        raise BadRequestError("只能对同一分组的模型排序", code="cross_group_reorder")
+
+    for i, pk in enumerate(body.model_ids):
+        by_id[pk].sort_order = i
+    await db.commit()
+    return {"ok": True}
+
+
 
 
 @router.delete("/models/{model_pk}", summary="删除单个模型")
@@ -284,6 +437,11 @@ async def available_models(
         ).scalars().first()
     if p_ is None:
         raise NotFoundError("端点不存在", code="endpoint_not_found")
+    if not p_.base_url or not p_.api_key_cipher:
+        raise BadRequestError(
+            "自定义分组没有可探测的模型列表，请把已有模型拖进该分组",
+            code="custom_group_no_probe",
+        )
 
     have = {
         m.model_id

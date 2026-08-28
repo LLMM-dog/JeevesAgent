@@ -38,6 +38,14 @@ class Model(Base, TimestampMixin):
     endpoint_id: Mapped[str] = mapped_column(
         "provider_id", String(32), ForeignKey("provider.id", ondelete="CASCADE"), nullable=False
     )
+    # 展示分组。NULL = 跟随来源端点（默认分组）。
+    #
+    # 与 endpoint_id 分离的原因：用户可以把不同供应商的 deepseek 模型
+    # 拖进同一个自定义分组（例如“DeepSeek”），但调用时仍要走各自真实的
+    # base_url + Key。endpoint_id 管调用，group_id 只管展示。
+    group_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("provider.id", ondelete="SET NULL"), nullable=True
+    )
     # 端点的模型标识，如 "deepseek-chat"
     model_id: Mapped[str] = mapped_column(String(200), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
@@ -53,6 +61,8 @@ class Model(Base, TimestampMixin):
     # chat | reasoning | embedding | rerank | tts | audio | image
     # 探测/添加时按名字启发式判定一次，前端用图标显示，用户可改。
     model_type: Mapped[str] = mapped_column(String(16), default="chat", nullable=False)
+    # 组内自定义排序。越小越靠前；移动时后端会归一化成连续值。
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     vision_checked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
